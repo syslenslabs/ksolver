@@ -1,0 +1,383 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: constraints
+---
+# ─── 1. TAINTS/TOLERATIONS ───────────────────────────
+# Workload that tolerates a specific taint - shows taint isolation cost
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-training
+  namespace: constraints
+  labels:
+    constraint: taint-toleration
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gpu-training
+  template:
+    metadata:
+      labels:
+        app: gpu-training
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: gpu
+      containers:
+        - name: train
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+---
+# ─── 2. NODE SELECTORS ──────────────────────────────
+# Workload pinned to a specific pool by nodeSelector
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pinned-to-memory
+  namespace: constraints
+  labels:
+    constraint: node-selector
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: pinned-to-memory
+  template:
+    metadata:
+      labels:
+        app: pinned-to-memory
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: memory
+      containers:
+        - name: db
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "12Gi"
+---
+# ─── 3. REQUIRED POD ANTI-AFFINITY ──────────────────
+# Spread across hosts - blocks consolidation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ha-api
+  namespace: constraints
+  labels:
+    constraint: pod-anti-affinity
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: ha-api
+  template:
+    metadata:
+      labels:
+        app: ha-api
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: ha-api
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: api
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+---
+# ─── 4. CLUSTER AUTOSCALER safe-to-evict=false ──────
+# Workloads that block autoscaler scale-down
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stateful-cache
+  namespace: constraints
+  labels:
+    constraint: safe-to-evict
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: stateful-cache
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        app: stateful-cache
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: cache
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+---
+# ─── 5. EXTENDED RESOURCES (GPU requests) ───────────
+# Workload requesting nvidia.com/gpu
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-gpu
+  namespace: constraints
+  labels:
+    constraint: extended-resource
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inference-gpu
+  template:
+    metadata:
+      labels:
+        app: inference-gpu
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: gpu
+      containers:
+        - name: infer
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+---
+# ─── 6. OVERPROVISIONED REQUESTS (binpacking waste) ─
+# Workloads with wildly inflated requests vs actual need
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bloated-java-app
+  namespace: constraints
+  labels:
+    constraint: request-inflation
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: bloated-java-app
+  template:
+    metadata:
+      labels:
+        app: bloated-java-app
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: java
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+---
+# ─── 7. LOPSIDED REQUESTS (CPU:memory imbalance) ────
+# High CPU, low memory - causes fragmentation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-heavy-worker
+  namespace: constraints
+  labels:
+    constraint: lopsided-requests
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: cpu-heavy-worker
+  template:
+    metadata:
+      labels:
+        app: cpu-heavy-worker
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: compute
+      containers:
+        - name: worker
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "8"
+              memory: "2Gi"
+---
+# Memory-heavy, low CPU - the counterpart
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-heavy-cache
+  namespace: constraints
+  labels:
+    constraint: lopsided-requests
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: memory-heavy-cache
+  template:
+    metadata:
+      labels:
+        app: memory-heavy-cache
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: memory
+      containers:
+        - name: cache
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "24Gi"
+---
+# ─── 8. EPHEMERAL STORAGE REQUESTS ──────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-aggregator
+  namespace: constraints
+  labels:
+    constraint: ephemeral-storage
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: log-aggregator
+  template:
+    metadata:
+      labels:
+        app: log-aggregator
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: logs
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+              ephemeral-storage: "10Gi"
+---
+# ─── 9. MANY SMALL PODS (max pods pressure) ─────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sidecar-fleet
+  namespace: constraints
+  labels:
+    constraint: max-pods
+spec:
+  replicas: 30
+  selector:
+    matchLabels:
+      app: sidecar-fleet
+  template:
+    metadata:
+      labels:
+        app: sidecar-fleet
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: sidecar
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+---
+# ─── 10. PDB (collected but not yet used in solver) ─
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ha-api-pdb
+  namespace: constraints
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: ha-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: stateful-cache-pdb
+  namespace: constraints
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: stateful-cache
+---
+# ─── 11. DAEMONSET (heavy overhead per node) ────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: heavy-monitor
+  namespace: constraints
+spec:
+  selector:
+    matchLabels:
+      app: heavy-monitor
+  template:
+    metadata:
+      labels:
+        app: heavy-monitor
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: monitor
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "512Mi"

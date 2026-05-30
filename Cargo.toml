@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "ksolver",
+    "vendor/cp_sat",
+]
+
+[patch."https://github.com/bmjask/cp_sat.git"]
+cp_sat = { path = "vendor/cp_sat" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,333 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+---
+# Large API fleet spread across general pool
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: production
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: api
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: production
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: auth-service
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: auth
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+---
+# Memory-heavy databases on memory pool
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-primary
+  namespace: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-primary
+  template:
+    metadata:
+      labels:
+        app: postgres-primary
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: memory
+      containers:
+        - name: pg
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "2"
+              memory: "16Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cluster
+  namespace: production
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis-cluster
+  template:
+    metadata:
+      labels:
+        app: redis-cluster
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: memory
+      containers:
+        - name: redis
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "8Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: memory
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: elasticsearch
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: es
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "12Gi"
+---
+# Compute-heavy batch jobs on compute pool
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-training
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ml-training
+  template:
+    metadata:
+      labels:
+        app: ml-training
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: compute
+      containers:
+        - name: train
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "4"
+              memory: "8Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-pipeline
+  namespace: production
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: data-pipeline
+  template:
+    metadata:
+      labels:
+        app: data-pipeline
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: compute
+      containers:
+        - name: pipeline
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+---
+# Microservices spread across general pool
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: production
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: svc
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: svc
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-processor
+  namespace: production
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: payment-processor
+  template:
+    metadata:
+      labels:
+        app: payment-processor
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: svc
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "384Mi"
+---
+# Overprovisioned cronjob always running
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-builder
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: report-builder
+  template:
+    metadata:
+      labels:
+        app: report-builder
+    spec:
+      tolerations:
+        - key: kwok.x-k8s.io/node
+          operator: Exists
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: general
+      containers:
+        - name: report
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"

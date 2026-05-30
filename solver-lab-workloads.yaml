@@ -1,0 +1,206 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+# Overprovisioned CPU pods (request inflation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waste-cpu
+  namespace: demo
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: waste-cpu
+  template:
+    metadata:
+      labels:
+        app: waste-cpu
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "64Mi"
+---
+# Overprovisioned memory pods (request inflation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waste-mem
+  namespace: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: waste-mem
+  template:
+    metadata:
+      labels:
+        app: waste-mem
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+            limits:
+              cpu: "100m"
+              memory: "512Mi"
+---
+# Pods with anti-affinity spread (blocks consolidation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-app
+  namespace: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: spread-app
+  template:
+    metadata:
+      labels:
+        app: spread-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - spread-app
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+# Pinned pods (nodeSelector to specific node)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pinned-worker1
+  namespace: demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pinned-worker1
+  template:
+    metadata:
+      labels:
+        app: pinned-worker1
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: solver-lab-worker
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+---
+# Medium workloads that could be consolidated
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-service
+  namespace: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-service
+  template:
+    metadata:
+      labels:
+        app: api-service
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "192Mi"
+            limits:
+              cpu: "150m"
+              memory: "192Mi"
+---
+# Heavy DaemonSet (visible overhead tax)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: monitoring-agent
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app: monitoring-agent
+  template:
+    metadata:
+      labels:
+        app: monitoring-agent
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+# Small fragmentation pods
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-jobs
+  namespace: demo
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: worker-jobs
+  template:
+    metadata:
+      labels:
+        app: worker-jobs
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"

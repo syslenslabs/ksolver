@@ -1,0 +1,43 @@
+pollSeconds: 5
+maxParallel: 4
+topPoolScenarios: 3
+
+baseScenario:
+  Solver: cp-sat-rust
+  IgnoreUnschedulableWorkloads: true
+  VerificationBackend: local-precheck
+  NodePoolLabelKeys:
+    - eks.amazonaws.com/nodegroup
+    - cloud.google.com/gke-nodepool
+    - agentpool
+
+scenarios:
+  - name: strict
+    overrides:
+      IgnoreTaints: false
+      RelaxPreferredAffinity: false
+      RelaxRequiredAntiAffinity: false
+
+  - name: no-taints
+    overrides:
+      IgnoreTaints: true
+      RelaxPreferredAffinity: false
+      RelaxRequiredAntiAffinity: false
+
+  - name: relaxed-affinity
+    overrides:
+      IgnoreTaints: false
+      RelaxPreferredAffinity: true
+      RelaxRequiredAntiAffinity: false
+
+  - name: relaxed-anti-affinity
+    overrides:
+      IgnoreTaints: false
+      RelaxPreferredAffinity: false
+      RelaxRequiredAntiAffinity: true
+
+  - name: theoretical-max
+    overrides:
+      IgnoreTaints: true
+      RelaxPreferredAffinity: true
+      RelaxRequiredAntiAffinity: true

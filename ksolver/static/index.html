@@ -1,0 +1,2742 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KSolver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;1,9..40,300&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0e1117;
+      --panel: rgba(22,27,34,0.85);
+      --panel-solid: #161b22;
+      --ink: #e6edf3;
+      --muted: #8b949e;
+      --line: rgba(48,54,61,0.8);
+      --accent: #58a6ff;
+      --accent-2: #79c0ff;
+      --good: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --shadow: 0 8px 32px rgba(0,0,0,0.32);
+      --green: #3fb950;
+      --blue: #58a6ff;
+      --orange: #d29922;
+      --purple: #bc8cff;
+      --gray: #8b949e;
+      --glow-green: 0 0 20px rgba(63,185,80,0.15);
+      --glow-blue: 0 0 20px rgba(88,166,255,0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+    }
+    .page { max-width: 1380px; margin: 0 auto; padding: 32px; }
+
+    /* --- HERO --- */
+    .hero-bar { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; margin-bottom: 24px; }
+    .hero-title { font-size: 24px; font-weight: 700; margin: 0; letter-spacing: -0.02em; }
+    .hero-subtitle { font-size: 13px; color: var(--muted); margin: 4px 0 0; font-weight: 300; }
+    .hero-actions { display: flex; gap: 10px; align-items: center; }
+    .hero-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
+    .hero-card {
+      padding: 28px 24px;
+      border-radius: 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      text-align: center;
+      backdrop-filter: blur(12px);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .hero-card:hover { border-color: rgba(88,166,255,0.3); }
+    .hero-card.savings {
+      background: linear-gradient(135deg, rgba(63,185,80,0.08), rgba(63,185,80,0.02));
+      border-color: rgba(63,185,80,0.3);
+      box-shadow: var(--glow-green);
+    }
+    .hero-card .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); font-weight: 500; }
+    .hero-card .card-value { font-family: 'JetBrains Mono', monospace; font-size: 40px; font-weight: 700; margin: 10px 0; line-height: 1; letter-spacing: -0.02em; }
+    .hero-card.savings .card-value { color: var(--good); }
+    .hero-card .card-sub { font-size: 13px; color: var(--muted); font-weight: 300; }
+    .confidence-badge { display: inline-block; padding: 3px 10px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-family: 'JetBrains Mono', monospace; }
+    .confidence-high { background: rgba(63,185,80,0.12); color: var(--good); }
+    .confidence-medium { background: rgba(88,166,255,0.12); color: var(--accent); }
+    .confidence-low { background: rgba(210,153,34,0.12); color: var(--warn); }
+
+    /* --- SUMMARY SENTENCE --- */
+    .summary-sentence { padding: 18px 24px; border-radius: 12px; background: rgba(63,185,80,0.04); border: 1px solid rgba(63,185,80,0.15); border-left: 4px solid var(--good); margin-bottom: 20px; font-size: 15px; line-height: 1.7; color: var(--ink); font-weight: 300; backdrop-filter: blur(12px); }
+    .summary-sentence strong { color: var(--good); font-weight: 600; }
+
+    /* --- SAVINGS STACK --- */
+    .savings-stack-section { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 20px; backdrop-filter: blur(12px); }
+    .savings-stack-section h3 { margin: 0 0 14px; font-size: 14px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .stack-bar-container { height: 32px; border-radius: 8px; overflow: hidden; display: flex; background: rgba(48,54,61,0.5); margin-bottom: 12px; }
+    .stack-segment { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; min-width: 2px; transition: width 0.4s ease; font-family: 'JetBrains Mono', monospace; }
+    .stack-legend { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+    .stack-legend-item { display: flex; align-items: center; gap: 6px; }
+    .stack-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+    /* --- BLOCKER CARDS --- */
+    .section { margin-bottom: 20px; }
+    .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .section-header h3 { margin: 0; font-size: 16px; font-weight: 500; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; background: rgba(88,166,255,0.1); color: var(--accent); font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em; }
+    .blocker-grid, .pool-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+    .blocker-card, .pool-card { padding: 18px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(12px); transition: border-color 0.2s; }
+    .blocker-card:hover, .pool-card:hover { border-color: rgba(88,166,255,0.25); }
+    .blocker-card-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .blocker-meta { display: grid; gap: 4px; font-size: 13px; color: var(--muted); font-weight: 300; }
+    .blocker-cost { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: var(--warn); margin-bottom: 6px; }
+    .blocker-action { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.12); font-size: 12px; color: var(--accent); font-weight: 300; }
+
+    /* --- POOL CARDS --- */
+    .pool-card-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .pool-card-cost { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
+    .pool-bar-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 10px; margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; font-weight: 400; }
+    .pool-bar { height: 6px; border-radius: 3px; background: rgba(48,54,61,0.5); overflow: hidden; }
+    .pool-fill { height: 100%; border-radius: 3px; }
+    .pool-fill.cpu { background: linear-gradient(90deg, #d29922, #e3b341); }
+    .pool-fill.mem { background: linear-gradient(90deg, #58a6ff, #79c0ff); }
+    .pool-meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 12px; font-weight: 300; }
+    .emptiable-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+    .emptiable-yes { background: rgba(63,185,80,0.12); color: var(--good); }
+    .emptiable-no { background: rgba(210,153,34,0.12); color: var(--warn); }
+
+    /* --- DAEMONSET TABLE --- */
+    .ds-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .ds-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 500; }
+    .ds-table td { padding: 10px 12px; border-bottom: 1px solid rgba(48,54,61,0.4); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .ds-table tr:last-child td { border-bottom: none; }
+    .ds-table .ds-cost { font-weight: 600; color: var(--accent); }
+
+    /* --- AI SIDEBAR --- */
+    .ai-sidebar { position: fixed; top: 0; right: 0; width: 420px; height: 100vh; background: var(--panel-solid); border-left: 1px solid var(--line); z-index: 1000; display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.25s ease; box-shadow: -8px 0 32px rgba(0,0,0,0.4); }
+    .ai-sidebar.open { transform: translateX(0); }
+    .ai-sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 999; opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+    .ai-sidebar-overlay.open { opacity: 1; pointer-events: auto; }
+    .ai-sidebar-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+    .ai-sidebar-header h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--ink); }
+    .ai-sidebar-close { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .ai-sidebar-close:hover { color: var(--ink); box-shadow: none; opacity: 1; }
+    .ai-sidebar-config { padding: 12px 20px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; flex-shrink: 0; }
+    .ai-chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 16px 20px; }
+    .ai-msg { padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.6; max-width: 90%; word-wrap: break-word; }
+    .ai-msg.user { align-self: flex-end; background: rgba(88,166,255,0.15); border: 1px solid rgba(88,166,255,0.2); color: var(--ink); }
+    .ai-msg.assistant { align-self: flex-start; background: rgba(48,54,61,0.5); border: 1px solid var(--line); color: var(--ink); }
+    .ai-msg.assistant pre { background: rgba(13,17,23,0.6); padding: 8px 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; margin: 8px 0; }
+    .ai-msg.assistant code { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .ai-msg.assistant p { margin: 4px 0; }
+    .ai-msg.error { align-self: center; background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3); color: var(--danger); font-size: 12px; }
+    .ai-msg.thinking { align-self: flex-start; color: var(--muted); font-style: italic; background: none; border: none; padding: 4px 14px; }
+    .ai-input-row { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); flex-shrink: 0; }
+    .ai-input-row input { flex: 1; }
+    .ai-input-row button { white-space: nowrap; }
+    .ai-empty { text-align: center; color: var(--muted); font-size: 13px; padding: 32px 16px; margin: auto 0; }
+    @media (max-width: 600px) {
+      .ai-sidebar { width: 100%; }
+    }
+
+    /* --- CONSTRAINT SIMULATOR --- */
+    .sim-section { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 20px; backdrop-filter: blur(12px); }
+    .sim-toggles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .sim-toggle { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: rgba(13,17,23,0.4); cursor: pointer; user-select: none; transition: border-color 0.2s, background 0.2s; font-size: 12px; color: var(--muted); }
+    .sim-toggle:hover { border-color: rgba(88,166,255,0.3); }
+    .sim-toggle.active { border-color: rgba(63,185,80,0.4); background: rgba(63,185,80,0.08); color: var(--ink); }
+    .sim-toggle input { display: none; }
+    .sim-switch { width: 32px; height: 18px; border-radius: 9px; background: rgba(48,54,61,0.8); position: relative; transition: background 0.2s; flex-shrink: 0; }
+    .sim-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform 0.2s, background 0.2s; }
+    .sim-toggle.active .sim-switch { background: var(--good); }
+    .sim-toggle.active .sim-switch::after { transform: translateX(14px); background: #fff; }
+    .sim-delta { padding: 12px 18px; border-radius: 10px; background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); margin-bottom: 14px; font-size: 14px; color: var(--ink); }
+    .sim-delta strong { color: var(--good); }
+    .sim-delta .sim-delta-warn { color: var(--warn); }
+    .sim-view-bar { display: flex; gap: 4px; margin-bottom: 14px; }
+    .sim-view-btn { font-size: 11px; padding: 6px 12px; border-radius: 6px; }
+    .sim-view-btn.active { background: rgba(88,166,255,0.2); border-color: rgba(88,166,255,0.4); }
+    .sim-pool-group { margin-bottom: 16px; }
+    .sim-pool-label { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .sim-pool-label .sim-pool-cost { font-family: 'JetBrains Mono', monospace; font-weight: 400; color: var(--accent); }
+    .sim-pool-nodes { display: flex; flex-wrap: wrap; gap: 6px; }
+    .sim-node { width: 52px; height: 68px; border-radius: 6px; border: 1px solid var(--line); background: rgba(13,17,23,0.5); display: flex; flex-direction: column; align-items: center; justify-content: flex-end; position: relative; overflow: hidden; transition: opacity 0.4s ease, filter 0.4s ease, border-color 0.4s ease, transform 0.4s ease; cursor: default; }
+    .sim-node .sim-fill { position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(180deg, rgba(63,185,80,0.6), rgba(63,185,80,0.3)); transition: height 0.5s ease; }
+    .sim-node .sim-fill.warn { background: linear-gradient(180deg, rgba(210,153,34,0.6), rgba(210,153,34,0.3)); }
+    .sim-node .sim-fill.danger { background: linear-gradient(180deg, rgba(248,81,73,0.5), rgba(248,81,73,0.25)); }
+    .sim-node .sim-node-label { position: relative; z-index: 1; font-size: 8px; font-family: 'JetBrains Mono', monospace; color: var(--muted); text-align: center; padding: 2px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
+    .sim-node .sim-node-pct { position: relative; z-index: 1; font-size: 10px; font-weight: 700; color: var(--ink); margin-bottom: 2px; }
+    .sim-node.removed { opacity: 0.12; filter: grayscale(1); transform: scale(0.9); }
+    .sim-node.densified { border-color: rgba(63,185,80,0.5); box-shadow: 0 0 8px rgba(63,185,80,0.15); }
+    .sim-node:hover { border-color: var(--accent); }
+    .sim-node:hover .sim-node-label { color: var(--ink); }
+    .sim-loading { text-align: center; color: var(--muted); font-size: 13px; padding: 12px; }
+    @media (max-width: 600px) {
+      .sim-toggles { flex-direction: column; }
+      .sim-node { width: 40px; height: 56px; }
+    }
+
+    /* --- ADVANCED TOGGLE --- */
+    .advanced-toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 14px 20px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 20px; font-size: 13px; font-weight: 500; user-select: none; color: var(--muted); transition: border-color 0.2s, color 0.2s; }
+    .advanced-toggle:hover { border-color: rgba(88,166,255,0.3); color: var(--ink); }
+    .advanced-toggle .arrow { transition: transform 0.2s; font-size: 10px; }
+    .advanced-toggle.open .arrow { transform: rotate(90deg); }
+    .advanced-body { display: none; margin-bottom: 20px; }
+    .advanced-body.open { display: block; }
+
+    /* --- FORM (inside advanced) --- */
+    .controls, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 20px; backdrop-filter: blur(12px); }
+    .controls form { display: grid; gap: 14px; }
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+    .label-row { display: inline-flex; align-items: center; gap: 6px; }
+    .hint { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--line); background: rgba(88,166,255,0.06); color: var(--accent); font-size: 10px; font-weight: 600; cursor: help; user-select: none; }
+    .tooltip-popup { position: fixed; z-index: 1000; max-width: 320px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: rgba(22,27,34,0.98); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 16px 48px rgba(0,0,0,0.5); pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity 120ms ease, transform 120ms ease; backdrop-filter: blur(16px); }
+    .tooltip-popup.visible { opacity: 1; transform: translateY(0); }
+    input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: rgba(13,17,23,0.6); color: var(--ink); font: inherit; font-size: 13px; transition: border-color 0.15s; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.15); }
+    textarea { min-height: 64px; resize: vertical; }
+    .checklist { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+    .checklist label { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-weight: 300; }
+    button { border: 0; border-radius: 8px; padding: 10px 20px; font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent); cursor: pointer; transition: opacity 0.15s, box-shadow 0.15s; letter-spacing: 0.01em; }
+    button:hover { opacity: 0.9; box-shadow: 0 0 16px rgba(88,166,255,0.25); }
+    button.secondary { background: rgba(88,166,255,0.1); color: var(--accent); border: 1px solid rgba(88,166,255,0.2); }
+    button.secondary:hover { background: rgba(88,166,255,0.18); box-shadow: none; }
+    .progress-shell { margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; background: rgba(48,54,61,0.3); overflow: hidden; }
+    .progress-bar { height: 6px; width: 0%; background: linear-gradient(90deg, var(--accent), var(--good)); transition: width 0.35s ease; box-shadow: 0 0 12px rgba(88,166,255,0.3); }
+    .progress-meta { margin-top: 8px; display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+    .solver-status { font-size: 11px; font-family: 'JetBrains Mono', monospace; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .warning { color: var(--warn); }
+    .good { color: var(--good); }
+
+    /* --- DETAIL SECTIONS (inside advanced) --- */
+    .boards { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+    .resource-charts { display: grid; gap: 16px; grid-template-columns: 1fr; }
+    .resource-section { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(12px); }
+    .resource-row { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .resource-row-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 14px; font-weight: 500; }
+    .chart-card { padding: 18px; border-radius: 12px; background: rgba(22,27,34,0.5); border: 1px solid var(--line); display: grid; gap: 12px; justify-items: center; text-align: center; }
+    .donut { width: 120px; height: 120px; border-radius: 50%; position: relative; display: grid; place-items: center; }
+    .donut::after { content: ''; width: 76px; height: 76px; border-radius: 50%; background: var(--panel-solid); position: absolute; }
+    .donut-label { position: relative; z-index: 1; font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600; }
+    .chart-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 500; }
+    .chart-sub { font-size: 12px; color: var(--muted); font-weight: 300; }
+    .summary { display: grid; gap: 12px; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 16px; }
+    .metric { padding: 16px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(12px); }
+    .metric .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 500; }
+    .metric .value { margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 700; }
+    .metric .sub { margin-top: 6px; font-size: 12px; color: var(--muted); font-weight: 300; }
+    .impact-list { display: grid; gap: 8px; }
+    .impact { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: var(--panel); backdrop-filter: blur(12px); }
+    .blocker-list { display: grid; gap: 8px; }
+    .blocker { border: 1px solid rgba(210,153,34,0.2); border-radius: 10px; padding: 14px; background: rgba(210,153,34,0.04); }
+    .nodes { display: grid; gap: 12px; max-height: 720px; overflow: auto; }
+    .binpack-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .binpack-column { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: rgba(22,27,34,0.4); display: grid; gap: 12px; }
+    .binpack-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+    .bin-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--panel); display: grid; gap: 8px; backdrop-filter: blur(12px); }
+    .bin-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .bin-card-title { font-size: 12px; font-weight: 600; word-break: break-word; }
+    .bin-card-sub { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+    .bin-shell { height: 120px; border-radius: 8px; border: 1px solid var(--line); background: rgba(48,54,61,0.3); position: relative; overflow: hidden; }
+    .bin-fill { position: absolute; left: 0; right: 0; bottom: 0; }
+    .bin-fill.cpu { background: linear-gradient(180deg, rgba(227,179,65,0.8), rgba(210,153,34,0.6)); }
+    .bin-fill.mem { background: linear-gradient(180deg, rgba(121,192,255,0.6), rgba(88,166,255,0.4)); }
+    .bin-fill.pods { background: linear-gradient(180deg, rgba(63,185,80,0.6), rgba(63,185,80,0.3)); }
+    .bin-metric { position: absolute; inset: 10px; display: flex; flex-direction: column; justify-content: space-between; z-index: 1; font-size: 11px; color: var(--ink); font-family: 'JetBrains Mono', monospace; }
+    .bin-meta { font-size: 11px; color: var(--muted); display: grid; gap: 3px; font-family: 'JetBrains Mono', monospace; }
+    .moves { display: grid; gap: 8px; max-height: 720px; overflow: auto; }
+    .move { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--panel); }
+    .move strong { display: block; font-size: 13px; }
+    .request-recommendations { display: grid; gap: 8px; max-height: 720px; overflow: auto; }
+    .request-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--panel); display: grid; gap: 6px; }
+    .request-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .request-card-title { font-size: 13px; font-weight: 600; word-break: break-word; }
+    .request-card-sub, .request-card-meta { font-size: 12px; color: var(--muted); font-weight: 300; }
+    .request-card-meta { display: grid; gap: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+    .scenario-board { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); display: grid; gap: 14px; margin-bottom: 16px; backdrop-filter: blur(12px); }
+    .scenario-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .scenario-grid, .scenario-summary-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .scenario-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: rgba(22,27,34,0.5); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+    .scenario-card:hover { border-color: rgba(88,166,255,0.3); }
+    .scenario-lever { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: rgba(22,27,34,0.5); }
+    .scenario-card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent), var(--glow-blue); background: rgba(88,166,255,0.04); }
+    .scenario-card-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+    .scenario-card-meta { display: grid; gap: 3px; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+
+    /* --- ACTION CARDS --- */
+    .action-card { padding: 14px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); display: grid; gap: 8px; transition: border-color 0.15s; backdrop-filter: blur(12px); }
+    .action-card:hover { border-color: rgba(88,166,255,0.25); }
+    .action-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    .action-rank { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; color: var(--muted); min-width: 24px; }
+    .action-title { font-size: 13px; font-weight: 600; flex: 1; }
+    .action-savings { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: var(--good); }
+    .action-meta { font-size: 12px; color: var(--muted); font-weight: 300; }
+    .action-cmd { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 8px 12px; border-radius: 6px; background: rgba(13,17,23,0.6); border: 1px solid var(--line); color: var(--accent-2); word-break: break-all; cursor: pointer; position: relative; }
+    .action-cmd:hover { border-color: var(--accent); }
+    .action-cmd::after { content: 'click to copy'; position: absolute; right: 8px; top: 8px; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .action-source { font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(88,166,255,0.08); color: var(--accent); }
+    .effort-badge { font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 2px 6px; border-radius: 4px; }
+    .effort-quick { background: rgba(63,185,80,0.1); color: var(--good); }
+    .effort-review { background: rgba(210,153,34,0.1); color: var(--warn); }
+    .effort-project { background: rgba(248,81,73,0.1); color: var(--danger, #f85149); }
+    .usage-cta { padding: 16px 20px; border-radius: 12px; background: rgba(210,153,34,0.06); border: 1px solid rgba(210,153,34,0.2); margin-bottom: 20px; font-size: 13px; color: var(--warn); display: flex; gap: 12px; align-items: flex-start; }
+    .usage-cta strong { color: var(--ink); }
+    .usage-cta code { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(13,17,23,0.6); color: var(--accent-2); }
+
+    /* --- USAGE RATIO BAR --- */
+    .usage-bar { display: inline-block; width: 48px; height: 6px; border-radius: 3px; background: rgba(48,54,61,0.5); overflow: hidden; vertical-align: middle; margin-right: 4px; }
+    .usage-fill { height: 100%; border-radius: 3px; }
+    .usage-low { background: var(--good); }
+    .usage-mid { background: var(--warn); }
+    .usage-high { background: var(--danger, #f85149); }
+
+    /* --- WATERFALL --- */
+    .waterfall-row { display: grid; grid-template-columns: 200px 1fr 100px; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(48,54,61,0.3); }
+    .waterfall-row:last-child { border-bottom: none; }
+    .waterfall-label { font-size: 13px; font-weight: 500; }
+    .waterfall-bar-track { height: 24px; border-radius: 4px; background: rgba(48,54,61,0.3); position: relative; overflow: hidden; }
+    .waterfall-bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; color: #fff; transition: width 0.4s ease; }
+    .waterfall-cumulative { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); text-align: right; }
+
+    /* --- LOADING STATE --- */
+    .loading-overlay { display: none; position: fixed; inset: 0; background: rgba(14,17,23,0.9); z-index: 100; place-items: center; backdrop-filter: blur(8px); }
+    .loading-overlay.active { display: grid; }
+    .loading-content { text-align: center; padding: 40px; }
+    .loading-content h2 { margin: 0 0 16px; }
+
+    /* --- SCROLLBAR --- */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(88,166,255,0.2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(88,166,255,0.35); }
+
+    @media (max-width: 1100px) {
+      .hero-cards { grid-template-columns: 1fr; }
+      .boards, .grid-4, .grid-3, .grid-2, .blocker-grid, .pool-grid { grid-template-columns: 1fr; }
+      .binpack-compare { grid-template-columns: 1fr; }
+      .summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <!-- AI SIDEBAR -->
+  <div class="ai-sidebar" id="ai-sidebar">
+    <div class="ai-sidebar-header">
+      <h3>AI Assistant</h3>
+      <button type="button" class="ai-sidebar-close" id="ai-sidebar-close">&times;</button>
+    </div>
+    <div class="ai-sidebar-config">
+      <select id="ai-provider">
+        <option value="claude">Claude (Anthropic)</option>
+        <option value="openai">OpenAI</option>
+      </select>
+      <div style="display:flex; gap:6px;">
+        <input type="password" id="ai-api-key" placeholder="API key (browser only)" style="flex:1;">
+        <button type="button" id="ai-save-key" class="secondary" style="padding:8px 12px; font-size:11px;">Save</button>
+      </div>
+    </div>
+    <div class="ai-chat-log" id="ai-chat-log">
+      <div class="ai-empty" id="ai-empty-state">Enter an API key and ask about your cluster optimization.</div>
+    </div>
+    <div class="ai-input-row">
+      <input type="text" id="ai-input" placeholder="Ask anything..." disabled>
+      <button type="button" id="ai-send" disabled>Send</button>
+    </div>
+  </div>
+  <div class="ai-sidebar-overlay" id="ai-sidebar-overlay"></div>
+
+  <div class="page">
+    <!-- HERO BAR -->
+    <div class="hero-bar">
+      <div>
+        <h1 class="hero-title">Cost Workbench</h1>
+        <p class="hero-subtitle">Kubernetes cluster cost explainability and optimization</p>
+      </div>
+      <div class="hero-actions">
+        <button type="button" id="run-solve-btn">Analyze Cluster</button>
+        <button type="button" class="secondary" id="run-important-scenarios">Run All Scenarios</button>
+        <button type="button" class="secondary" id="copy-summary-btn" style="font-size:12px; padding:8px 14px;">Copy Summary</button>
+        <button type="button" class="secondary" id="ai-toggle-btn" style="font-size:12px; padding:8px 14px; border-color:rgba(188,140,255,0.3); color:var(--purple);">AI Assistant</button>
+        <span id="status" class="solver-status"></span>
+      </div>
+    </div>
+
+    <!-- PROGRESS -->
+    <div class="progress-shell" id="progress-section" style="margin-bottom:20px;">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <div class="progress-meta" style="margin-bottom:20px;">
+      <span id="progress-stage">Idle</span>
+      <span id="progress-elapsed">0.0s</span>
+    </div>
+
+    <!-- HERO CARDS -->
+    <div class="hero-cards" id="hero-cards">
+      <div class="hero-card savings">
+        <div class="card-label" id="hero-savings-label">Savings Available</div>
+        <div class="card-value" id="hero-savings">--</div>
+        <div class="card-sub" id="hero-savings-sub">Run analysis to see savings</div>
+      </div>
+      <div class="hero-card">
+        <div class="card-label" id="hero-cost-label">Current Monthly Cost</div>
+        <div class="card-value" id="hero-cost">--</div>
+        <div class="card-sub" id="hero-cost-sub">--</div>
+      </div>
+      <div class="hero-card">
+        <div class="card-label">Nodes Removable</div>
+        <div class="card-value" id="hero-nodes">--</div>
+        <div class="card-sub" id="hero-nodes-sub">--</div>
+      </div>
+    </div>
+
+    <!-- HISTORY TREND -->
+    <div class="section" id="history-section" style="display:none;">
+      <div class="panel" style="padding:16px 20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <div style="font-size:13px; font-weight:500; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em;">Savings Over Time</div>
+          <span class="pill" id="history-pill">0 runs</span>
+        </div>
+        <div id="history-chart" style="height:80px; display:flex; align-items:flex-end; gap:3px;"></div>
+      </div>
+    </div>
+
+    <!-- SUMMARY SENTENCE -->
+    <div class="summary-sentence" id="summary-sentence">
+      Click <strong>Analyze Cluster</strong> to collect the current cluster state and compute optimization recommendations.
+    </div>
+
+    <!-- ACTION ITEMS -->
+    <div class="section" id="actions-section" style="display:none;">
+      <div class="section-header">
+        <h3>What To Do Next</h3>
+        <span class="pill" id="actions-pill">0 actions</span>
+      </div>
+      <div id="action-cards" style="display:grid; gap:10px;"></div>
+    </div>
+
+    <!-- SAVINGS STACK -->
+    <div class="savings-stack-section" id="savings-stack-section" style="display:none;">
+      <h3>Where The Money Is</h3>
+      <div class="stack-bar-container" id="savings-stack-bar"></div>
+      <div class="stack-legend" id="savings-stack-legend"></div>
+    </div>
+
+    <!-- CONSTRAINT SIMULATOR -->
+    <div class="sim-section" id="simulator-section" style="display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <h3 style="margin:0; font-size:14px; font-weight:500; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Constraint Simulator</h3>
+        <span class="pill" id="simulator-pill">interactive</span>
+      </div>
+      <div id="simulator-toggles" class="sim-toggles"></div>
+      <div id="simulator-delta" class="sim-delta" style="display:none;"></div>
+      <div id="simulator-view-bar" class="sim-view-bar" style="align-items:center;">
+        <button class="secondary sim-view-btn active" data-simview="grid">Animated Grid</button>
+        <button class="secondary sim-view-btn" data-simview="sidebyside">Side by Side</button>
+        <span style="margin-left:auto; font-size:11px; color:var(--muted);">bars show request allocation % of node capacity</span>
+      </div>
+      <div id="simulator-canvas"></div>
+    </div>
+
+    <!-- BLOCKERS -->
+    <div class="section" id="blockers-section" style="display:none;">
+      <div class="section-header">
+        <h3>What Blocks More Savings</h3>
+        <span class="pill" id="blockers-pill">0 blockers</span>
+      </div>
+      <div class="blocker-grid" id="blocker-cards"></div>
+    </div>
+
+    <!-- POOL CARDS -->
+    <div class="section" id="pools-section" style="display:none;">
+      <div class="section-header">
+        <h3>Node Pools</h3>
+        <span class="pill" id="pools-pill">0 pools</span>
+      </div>
+      <div class="pool-grid" id="pool-cards"></div>
+    </div>
+
+    <!-- WORKLOAD COST TABLE -->
+    <div class="section" id="workload-section" style="display:none;">
+      <div class="section-header">
+        <h3>Workload Cost &amp; Waste</h3>
+        <span class="pill" id="workload-pill">0 workloads</span>
+      </div>
+      <div class="panel" style="overflow-x:auto;">
+        <table class="ds-table" id="workload-table">
+          <thead>
+            <tr>
+              <th>Workload</th>
+              <th>Owner</th>
+              <th>CPU Req</th>
+              <th>CPU Rec</th>
+              <th>Mem Req</th>
+              <th>Mem Rec</th>
+              <th>CPU Use%</th>
+              <th>Mem Use%</th>
+              <th>Cost/mo</th>
+              <th>Savings</th>
+            </tr>
+          </thead>
+          <tbody id="workload-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- FLEET RECOMMENDATION -->
+    <div class="section" id="fleet-section" style="display:none;">
+      <div class="section-header">
+        <h3>Fleet Recommendation</h3>
+        <span class="pill" id="fleet-pill">0 node types</span>
+      </div>
+      <div class="pool-grid" id="fleet-cards"></div>
+    </div>
+
+    <!-- DAEMONSET TAX -->
+    <div class="section" id="daemonset-section" style="display:none;">
+      <div class="section-header">
+        <h3>DaemonSet Tax</h3>
+        <span class="pill" id="ds-pill">0 DaemonSets</span>
+      </div>
+      <div class="panel">
+        <table class="ds-table" id="ds-table">
+          <thead>
+            <tr>
+              <th>DaemonSet</th>
+              <th>CPU / Node</th>
+              <th>Memory / Node</th>
+              <th>Cluster-wide CPU</th>
+              <th>Cluster-wide Memory</th>
+            </tr>
+          </thead>
+          <tbody id="ds-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- NODE DRAINABILITY -->
+    <div class="section" id="drainability-section" style="display:none;">
+      <div class="section-header">
+        <h3>Node Drainability</h3>
+        <span class="pill" id="drainability-pill">0 nodes</span>
+      </div>
+      <div class="pool-grid" id="drainability-cards"></div>
+    </div>
+
+    <!-- PDB IMPACT -->
+    <div class="section" id="pdb-section" style="display:none;">
+      <div class="section-header">
+        <h3>Pod Disruption Budgets</h3>
+        <span class="pill" id="pdb-pill">0 PDBs</span>
+      </div>
+      <div id="pdb-cards" style="display:grid; gap:10px;"></div>
+    </div>
+
+    <!-- VPA STATUS -->
+    <div class="section" id="vpa-section" style="display:none;">
+      <div class="section-header">
+        <h3>VPA Status</h3>
+        <span class="pill" id="vpa-pill">0 VPAs</span>
+      </div>
+      <div id="vpa-content" style="display:grid; gap:12px;"></div>
+    </div>
+
+    <!-- ADVANCED TOGGLE -->
+    <div class="advanced-toggle" id="advanced-toggle">
+      <span class="arrow">&#9654;</span>
+      Advanced Settings &amp; Detailed Views
+    </div>
+
+    <!-- ADVANCED BODY -->
+    <div class="advanced-body" id="advanced-body">
+      <!-- FORM -->
+      <div class="controls" style="margin-bottom:16px;">
+        <form id="solve-form">
+          <div class="grid-2">
+            <div>
+              <label for="kubeconfig"><span class="label-row">Kubeconfig <span class="hint" title="Which Kubernetes credentials file to use.">?</span></span></label>
+              <input id="kubeconfig" name="kubeconfig" placeholder="/Users/you/.kube/config">
+            </div>
+            <div>
+              <label for="pricingFile"><span class="label-row">Pricing File <span class="hint" title="Optional pricing overrides for node costs.">?</span></span></label>
+              <input id="pricingFile" name="pricingFile" placeholder="./testdata/pricing.sample.json">
+            </div>
+          </div>
+          <div>
+            <label for="snapshotFile"><span class="label-row">Snapshot File <span class="hint" title="Optional saved cluster snapshot for offline analysis.">?</span></span></label>
+            <select id="snapshotSelect" name="snapshotSelect">
+              <option value="">Live cluster (no snapshot)</option>
+              <option value="__manual__">Custom path...</option>
+            </select>
+            <input id="snapshotFile" name="snapshotFile" placeholder="/tmp/<cluster>/state/snapshot.json" style="margin-top:8px; display:none;">
+          </div>
+          <div class="grid-4">
+            <div>
+              <label for="solver"><span class="label-row">Solver <span class="hint" title="Which optimization engine to use.">?</span></span></label>
+              <select id="solver" name="solver">
+                <option value="cp-sat-rust">CP-SAT</option>
+                <option value="gurobi">Gurobi</option>
+              </select>
+            </div>
+            <div>
+              <label for="cpuHeadroom"><span class="label-row">CPU Headroom <span class="hint" title="Reserve a percentage of CPU on every node.">?</span></span></label>
+              <input id="cpuHeadroom" type="number" step="0.01" min="0" max="0.99">
+            </div>
+            <div>
+              <label for="memoryHeadroom"><span class="label-row">Memory Headroom <span class="hint" title="Reserve a percentage of memory on every node.">?</span></span></label>
+              <input id="memoryHeadroom" type="number" step="0.01" min="0" max="0.99">
+            </div>
+            <div>
+              <label for="storageHeadroom"><span class="label-row">Storage Headroom <span class="hint" title="Reserve a percentage of ephemeral disk.">?</span></span></label>
+              <input id="storageHeadroom" type="number" step="0.01" min="0" max="0.99">
+            </div>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label for="podsHeadroom"><span class="label-row">Pod Headroom <span class="hint" title="Keep this many pod slots free on every node.">?</span></span></label>
+              <input id="podsHeadroom" type="number" step="1" min="0">
+            </div>
+            <div>
+              <label for="maxWorkloads"><span class="label-row">Max Workloads <span class="hint" title="Limit workloads in solve. 0 = all.">?</span></span></label>
+              <input id="maxWorkloads" type="number" step="1" min="0" placeholder="0 = all">
+            </div>
+            <div>
+              <label for="namespaces"><span class="label-row">Namespaces <span class="hint" title="Comma-separated namespace filter.">?</span></span></label>
+              <textarea id="namespaces" placeholder="comma-separated namespaces"></textarea>
+            </div>
+          </div>
+          <div>
+            <label for="disallowedPools"><span class="label-row">Disallowed Pools <span class="hint" title="Comma-separated pools to exclude.">?</span></span></label>
+            <textarea id="disallowedPools" placeholder="comma-separated pools"></textarea>
+          </div>
+          <div>
+            <label for="nodePoolLabelKeys"><span class="label-row">Node Pool Label Keys <span class="hint" title="Comma-separated node label keys for pool detection.">?</span></span></label>
+            <textarea id="nodePoolLabelKeys" placeholder="eks.amazonaws.com/nodegroup, cloud.google.com/gke-nodepool, agentpool"></textarea>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label for="cpuOvercommitRatio"><span class="label-row">CPU Overcommit Ratio <span class="hint" title="1.0 = strict. Higher = more aggressive CPU packing.">?</span></span></label>
+              <input id="cpuOvercommitRatio" type="number" step="0.01" min="0.1">
+            </div>
+            <div>
+              <label for="memoryOvercommitRatio"><span class="label-row">Memory Overcommit Ratio <span class="hint" title="1.0 = strict and safest.">?</span></span></label>
+              <input id="memoryOvercommitRatio" type="number" step="0.01" min="0.1">
+            </div>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label title="Replace raw requests with usage-adjusted effective demand."><input id="useUsageAdjustedRequests" type="checkbox"> Use usage-adjusted requests</label>
+            </div>
+            <div>
+              <label for="usageRiskPreset"><span class="label-row">Risk Preset</span></label>
+              <select id="usageRiskPreset">
+                <option value="custom">Custom</option>
+                <option value="safe">Safe</option>
+                <option value="balanced">Balanced</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+            </div>
+            <div>
+              <label for="usageRequestFloorRatio"><span class="label-row">Usage Request Floor</span></label>
+              <input id="usageRequestFloorRatio" type="number" step="0.01" min="0" max="1">
+            </div>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label for="cpuUsageSafetyFactor"><span class="label-row">CPU Safety Factor</span></label>
+              <input id="cpuUsageSafetyFactor" type="number" step="0.01" min="1">
+            </div>
+            <div>
+              <label for="memoryUsageSafetyFactor"><span class="label-row">Memory Safety Factor</span></label>
+              <input id="memoryUsageSafetyFactor" type="number" step="0.01" min="1">
+            </div>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label for="maxMemoryOverflowProbabilityPercent"><span class="label-row">Max Memory Overflow Prob.</span></label>
+              <input id="maxMemoryOverflowProbabilityPercent" type="number" step="0.1" min="0">
+            </div>
+            <div></div>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label title="Historical usage from Prometheus."><input id="historicalUsageEnabled" type="checkbox"> Use historical Prometheus usage</label>
+            </div>
+            <div>
+              <label for="historicalUsageLookback"><span class="label-row">Lookback</span></label>
+              <input id="historicalUsageLookback" placeholder="24h">
+            </div>
+            <div>
+              <label for="historicalUsageStep"><span class="label-row">Step</span></label>
+              <input id="historicalUsageStep" placeholder="5m">
+            </div>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label for="historicalUsageSecretNamespace"><span class="label-row">Secret Namespace</span></label>
+              <input id="historicalUsageSecretNamespace" placeholder="grafana-cloud">
+            </div>
+            <div>
+              <label for="historicalUsageSecretName"><span class="label-row">Secret Name</span></label>
+              <input id="historicalUsageSecretName" placeholder="grafana-external-creds">
+            </div>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label for="historicalUsagePrometheusUrl"><span class="label-row">Prometheus URL</span></label>
+              <input id="historicalUsagePrometheusUrl" placeholder="https://prometheus-...">
+            </div>
+            <div>
+              <label for="historicalUsagePrometheusUsername"><span class="label-row">Prometheus Username</span></label>
+              <input id="historicalUsagePrometheusUsername" placeholder="">
+            </div>
+            <div>
+              <label for="historicalUsagePrometheusToken"><span class="label-row">Prometheus Token</span></label>
+              <input id="historicalUsagePrometheusToken" placeholder="">
+            </div>
+          </div>
+          <div class="checklist">
+            <label title="Pretend taints do not exist."><input id="ignoreTaints" type="checkbox"> Ignore taints</label>
+            <label title="Skip unschedulable workloads."><input id="ignoreUnschedulableWorkloads" type="checkbox"> Ignore unschedulable</label>
+            <label title="Ignore soft scheduling preferences."><input id="relaxPreferredAffinity" type="checkbox"> Relax preferred affinity</label>
+            <label title="Soften required anti-affinity."><input id="relaxRequiredAntiAffinity" type="checkbox"> Relax anti-affinity</label>
+            <label title="Let the solver jointly optimize request sizes and placement. Uses recommended requests for workloads where usage data shows inflation."><input id="enableJointRightsizing" type="checkbox"> Joint rightsizing</label>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label for="costWeight"><span class="label-row">Cost Weight</span></label>
+              <input id="costWeight" type="number" step="1" min="0">
+            </div>
+            <div>
+              <label for="activeNodeWeight"><span class="label-row">Active Node Weight</span></label>
+              <input id="activeNodeWeight" type="number" step="1" min="0">
+            </div>
+            <div>
+              <label for="churnWeight"><span class="label-row">Churn Weight</span></label>
+              <input id="churnWeight" type="number" step="1" min="0">
+            </div>
+          </div>
+          <div class="grid-3">
+            <div>
+              <label for="memorySlackWeight"><span class="label-row">Memory Slack Weight</span></label>
+              <input id="memorySlackWeight" type="number" step="1" min="0">
+            </div>
+            <div>
+              <label for="cpuSlackWeight"><span class="label-row">CPU Slack Weight</span></label>
+              <input id="cpuSlackWeight" type="number" step="1" min="0">
+            </div>
+          </div>
+          <div class="grid-2">
+            <div>
+              <label for="verificationBackend"><span class="label-row">Verification Backend</span></label>
+              <select id="verificationBackend" name="verificationBackend">
+                <option value="scheduler-simulator">kube-scheduler-simulator</option>
+                <option value="local-precheck">Local Precheck</option>
+              </select>
+            </div>
+            <div>
+              <label for="verificationUrl"><span class="label-row">Simulator URL</span></label>
+              <input id="verificationUrl" name="verificationUrl" placeholder="http://127.0.0.1:1212">
+            </div>
+          </div>
+          <div style="display:flex; gap:12px; align-items:center;">
+            <button type="submit">Run Solver</button>
+            <button class="secondary" type="button" id="load-defaults">Reset Defaults</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- SCENARIO EXPLORER -->
+      <section class="scenario-board">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h2 style="margin:0;">Scenario Explorer</h2>
+            <p style="margin-top:6px;">Compare what-if scenarios to see which constraint relaxations unlock the most savings.</p>
+          </div>
+          <span class="pill" id="scenario-status-pill">No scenario presets loaded</span>
+        </div>
+        <div class="scenario-grid" id="scenario-grid"></div>
+        <div class="scenario-summary-grid" id="scenario-summary-grid"></div>
+      </section>
+
+      <!-- RESOURCE CHARTS -->
+      <section class="resource-charts" id="resource-charts"></section>
+
+      <!-- DETAILED VIEWS -->
+      <section class="summary" id="summary"></section>
+      <section class="boards">
+        <div class="panel">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+              <h2 style="margin:0;">Nodes</h2>
+              <div class="scenario-actions">
+                <button type="button" class="secondary" id="node-view-cpu-requests">CPU Req</button>
+                <button type="button" class="secondary" id="node-view-cpu-usage">CPU Use</button>
+                <button type="button" class="secondary" id="node-view-memory-requests">Mem Req</button>
+                <button type="button" class="secondary" id="node-view-memory-usage">Mem Use</button>
+              </div>
+            </div>
+            <span class="pill" id="node-removal-pill">No solve yet</span>
+          </div>
+          <div class="nodes" id="nodes"></div>
+        </div>
+        <div class="panel">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Recommended Moves</h2>
+            <span class="pill" id="move-count-pill">0 moves</span>
+          </div>
+          <div class="moves" id="moves"></div>
+        </div>
+      </section>
+      <section class="boards" style="margin-top:16px;">
+        <div class="panel" style="grid-column:1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Request Recommendations</h2>
+            <span class="pill">Usage-adjusted demand deltas</span>
+          </div>
+          <div class="request-recommendations" id="request-recommendations"></div>
+        </div>
+      </section>
+      <section class="boards" style="margin-top:16px;">
+        <div class="panel" style="grid-column:1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Verification</h2>
+            <span class="pill" id="verification-pill">Not run</span>
+          </div>
+          <div class="impact-list" id="verification"></div>
+        </div>
+      </section>
+      <section class="boards" style="margin-top:16px;">
+        <div class="panel" style="grid-column:1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Inflation Drivers</h2>
+            <span class="pill">Ranked by modeled monthly impact</span>
+          </div>
+          <div class="impact-list" id="inflation-drivers"></div>
+        </div>
+      </section>
+      <section class="boards" style="margin-top:16px;">
+        <div class="panel" style="grid-column:1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Constraint Impact Matrix</h2>
+            <span class="pill">First-pass estimate</span>
+          </div>
+          <div class="impact-list" id="impacts"></div>
+        </div>
+      </section>
+      <section class="boards" style="margin-top:16px;">
+        <div class="panel" style="grid-column:1 / -1;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">Diagnostics</h2>
+            <span class="pill">Baseline feasibility checks</span>
+          </div>
+          <div class="blocker-list" id="blockers"></div>
+        </div>
+      </section>
+    </div><!-- /advanced-body -->
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const form = document.getElementById('solve-form');
+    const summaryEl = document.getElementById('summary');
+    const resourceChartsEl = document.getElementById('resource-charts');
+    const nodesEl = document.getElementById('nodes');
+    const movesEl = document.getElementById('moves');
+    const moveCountPill = document.getElementById('move-count-pill');
+    const nodeRemovalPill = document.getElementById('node-removal-pill');
+    const nodeViewCpuRequestsBtn = document.getElementById('node-view-cpu-requests');
+    const nodeViewCpuUsageBtn = document.getElementById('node-view-cpu-usage');
+    const nodeViewMemoryRequestsBtn = document.getElementById('node-view-memory-requests');
+    const nodeViewMemoryUsageBtn = document.getElementById('node-view-memory-usage');
+    const verificationEl = document.getElementById('verification');
+    const verificationPill = document.getElementById('verification-pill');
+    const inflationDriversEl = document.getElementById('inflation-drivers');
+    const impactsEl = document.getElementById('impacts');
+    const blockersEl = document.getElementById('blockers');
+    const requestRecommendationsEl = document.getElementById('request-recommendations');
+    const progressBar = document.getElementById('progress-bar');
+    const progressStage = document.getElementById('progress-stage');
+    const progressElapsed = document.getElementById('progress-elapsed');
+    const scenarioGrid = document.getElementById('scenario-grid');
+    const scenarioSummaryGrid = document.getElementById('scenario-summary-grid');
+    const scenarioStatusPill = document.getElementById('scenario-status-pill');
+    const snapshotSelect = document.getElementById('snapshotSelect');
+    const tooltipEl = document.createElement('div');
+    tooltipEl.className = 'tooltip-popup';
+    document.body.appendChild(tooltipEl);
+    let eventSource;
+    let activeClusterName = 'default';
+    let activeScenarioName = '';
+    let currentNodeViewMode = 'memory-requests';
+    let latestRenderedReport = null;
+    let scenarioRuns = new Map();
+    let scenarioSummaryState = null;
+    let activeTooltipTarget = null;
+
+    nodeViewCpuRequestsBtn.addEventListener('click', () => setNodeViewMode('cpu-requests'));
+    nodeViewCpuUsageBtn.addEventListener('click', () => setNodeViewMode('cpu-usage'));
+    nodeViewMemoryRequestsBtn.addEventListener('click', () => setNodeViewMode('memory-requests'));
+    nodeViewMemoryUsageBtn.addEventListener('click', () => setNodeViewMode('memory-usage'));
+    updateNodeViewButtons();
+
+    // Advanced toggle
+    const advToggle = document.getElementById('advanced-toggle');
+    const advBody = document.getElementById('advanced-body');
+    advToggle.addEventListener('click', () => {
+      advToggle.classList.toggle('open');
+      advBody.classList.toggle('open');
+    });
+
+    // Top-level analyze button triggers form submit
+    document.getElementById('run-solve-btn').addEventListener('click', () => {
+      form.dispatchEvent(new Event('submit', { cancelable: true }));
+    });
+
+    const IMPORTANT_SCENARIOS = [
+      {
+        key: 'strict',
+        label: 'Strict',
+        description: 'All current placement constraints respected',
+        mutate: (scenario) => ({ ...scenario, IgnoreTaints: false, RelaxPreferredAffinity: false, RelaxRequiredAntiAffinity: false }),
+      },
+      {
+        key: 'no-taints',
+        label: 'Ignore Taints',
+        description: 'Upper bound if taints are not treated as hard blockers',
+        mutate: (scenario) => ({ ...scenario, IgnoreTaints: true }),
+      },
+      {
+        key: 'relaxed-affinity',
+        label: 'Relax Preferred Affinity',
+        description: 'Ignore soft placement preferences only',
+        mutate: (scenario) => ({ ...scenario, RelaxPreferredAffinity: true }),
+      },
+      {
+        key: 'relaxed-anti-affinity',
+        label: 'Relax Anti-Affinity',
+        description: 'Allow tighter packing by softening required anti-affinity',
+        mutate: (scenario) => ({ ...scenario, RelaxRequiredAntiAffinity: true }),
+      },
+      {
+        key: 'theoretical-max',
+        label: 'Theoretical Max',
+        description: 'Most relaxed scenario for upper-bound packing',
+        mutate: (scenario) => ({ ...scenario, IgnoreTaints: true, RelaxPreferredAffinity: true, RelaxRequiredAntiAffinity: true }),
+      },
+    ];
+
+    document.getElementById('copy-summary-btn').addEventListener('click', copySummary);
+    document.getElementById('load-defaults').addEventListener('click', loadDefaults);
+    document.getElementById('run-important-scenarios').addEventListener('click', runImportantScenarios);
+    form.addEventListener('submit', submitSolve);
+    snapshotSelect.addEventListener('change', onSnapshotSelectChange);
+
+    function initializeTooltips() {
+      document.querySelectorAll('[title]').forEach((node) => {
+        const text = (node.getAttribute('title') || '').trim();
+        if (!text) return;
+        node.dataset.tooltip = text;
+        node.removeAttribute('title');
+        if (!node.hasAttribute('tabindex') && node.classList.contains('hint')) node.setAttribute('tabindex', '0');
+        node.addEventListener('mouseenter', showTooltip);
+        node.addEventListener('mousemove', moveTooltip);
+        node.addEventListener('mouseleave', hideTooltip);
+        node.addEventListener('focus', showTooltip);
+        node.addEventListener('blur', hideTooltip);
+      });
+    }
+
+    function showTooltip(event) {
+      const target = event.currentTarget;
+      const text = target?.dataset?.tooltip || '';
+      if (!text) return;
+      activeTooltipTarget = target;
+      tooltipEl.textContent = text;
+      tooltipEl.classList.add('visible');
+      moveTooltip(event);
+    }
+
+    function moveTooltip(event) {
+      if (!activeTooltipTarget) return;
+      const rect = tooltipEl.getBoundingClientRect();
+      const pointerX = event.clientX ?? (activeTooltipTarget.getBoundingClientRect().left + 8);
+      const pointerY = event.clientY ?? activeTooltipTarget.getBoundingClientRect().bottom;
+      tooltipEl.style.left = `${Math.min(Math.max(12, pointerX + 14), window.innerWidth - rect.width - 12)}px`;
+      tooltipEl.style.top = `${Math.min(Math.max(12, pointerY + 16), window.innerHeight - rect.height - 12)}px`;
+    }
+
+    function hideTooltip() {
+      activeTooltipTarget = null;
+      tooltipEl.classList.remove('visible');
+    }
+
+    async function loadDefaults() {
+      const res = await fetch('/api/defaults');
+      const data = await res.json();
+      applyRequestToForm({ Kubeconfig: data.kubeconfig || '', PricingFile: data.pricingFile || '', SnapshotFile: data.snapshotFile || '', ClusterName: 'default', Scenario: data.scenario || {} });
+      activeClusterName = 'default';
+      document.getElementById('maxWorkloads').value = data.scenario.MaxWorkloads;
+      document.getElementById('namespaces').value = '';
+      document.getElementById('disallowedPools').value = '';
+      document.getElementById('nodePoolLabelKeys').value = Array.isArray(data.scenario.NodePoolLabelKeys) ? data.scenario.NodePoolLabelKeys.join(', ') : '';
+      document.getElementById('useUsageAdjustedRequests').checked = !!data.scenario.UseUsageAdjustedRequests;
+      document.getElementById('usageRiskPreset').value = data.scenario.UsageRiskPreset ?? 'custom';
+      document.getElementById('usageRequestFloorRatio').value = data.scenario.UsageRequestFloorRatio ?? 0.5;
+      document.getElementById('cpuUsageSafetyFactor').value = data.scenario.CPUUsageSafetyFactor ?? 1.5;
+      document.getElementById('memoryUsageSafetyFactor').value = data.scenario.MemoryUsageSafetyFactor ?? 2.0;
+      document.getElementById('maxMemoryOverflowProbabilityPercent').value = data.scenario.MaxMemoryOverflowProbabilityPercent ?? 1.0;
+      document.getElementById('historicalUsageEnabled').checked = !!data.scenario.HistoricalUsage?.Enabled;
+      document.getElementById('historicalUsageLookback').value = data.scenario.HistoricalUsage?.Lookback ?? '24h';
+      document.getElementById('historicalUsageStep').value = data.scenario.HistoricalUsage?.Step ?? '5m';
+      document.getElementById('historicalUsageSecretNamespace').value = data.scenario.HistoricalUsage?.SecretNamespace ?? 'grafana-cloud';
+      document.getElementById('historicalUsageSecretName').value = data.scenario.HistoricalUsage?.SecretName ?? 'grafana-external-creds';
+      document.getElementById('historicalUsagePrometheusUrl').value = data.scenario.HistoricalUsage?.PrometheusURL ?? '';
+      document.getElementById('historicalUsagePrometheusUsername').value = data.scenario.HistoricalUsage?.PrometheusUsername ?? '';
+      document.getElementById('historicalUsagePrometheusToken').value = data.scenario.HistoricalUsage?.PrometheusToken ?? '';
+      statusEl.textContent = '';
+      setProgress({percent: 0, message: 'Idle', elapsedMs: 0});
+      await loadSnapshots();
+      await loadLatestRun();
+    }
+
+    async function loadSnapshots() {
+      const res = await fetch('/api/snapshots');
+      if (!res.ok) return;
+      const data = await res.json();
+      const current = document.getElementById('snapshotFile').value.trim();
+      snapshotSelect.innerHTML = [
+        '<option value="">Live cluster (no snapshot)</option>',
+        ...(data.items || []).map(item => `<option value="${escapeHTML(item.snapshotFile)}">${escapeHTML(item.clusterName || 'unknown')}${item.collectedAt ? ` (${escapeHTML(item.collectedAt)})` : ''}</option>`),
+        '<option value="__manual__">Custom path...</option>',
+      ].join('');
+      syncSnapshotSelect(current);
+    }
+
+    function syncSnapshotSelect(snapshotPath) {
+      const snapshotInput = document.getElementById('snapshotFile');
+      const value = (snapshotPath || '').trim();
+      const hasOption = [...snapshotSelect.options].some(option => option.value === value);
+      if (!value) { snapshotSelect.value = ''; snapshotInput.style.display = 'none'; return; }
+      if (hasOption) { snapshotSelect.value = value; snapshotInput.style.display = 'none'; snapshotInput.value = value; return; }
+      snapshotSelect.value = '__manual__';
+      snapshotInput.style.display = 'block';
+      snapshotInput.value = value;
+    }
+
+    function onSnapshotSelectChange() {
+      const snapshotInput = document.getElementById('snapshotFile');
+      if (snapshotSelect.value === '__manual__') { snapshotInput.style.display = 'block'; snapshotInput.focus(); return; }
+      snapshotInput.style.display = 'none';
+      snapshotInput.value = snapshotSelect.value;
+    }
+
+    async function loadLatestRun() {
+      const res = await fetch('/api/latest');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.request) applyRequestToForm(data.request, data.stateRoot || '');
+      if (data.report) {
+        render(data.report);
+        activeScenarioName = (data.request?.ScenarioName || '').trim();
+        const solver = data.report.Optimization?.Solver || {};
+        statusEl.textContent = `${solver.Name || 'solver'}: ${solver.Status === 'ok' ? 'optimal' : (solver.Status || 'ok').split(';')[0]}`;
+        statusEl.className = 'solver-status good';
+      }
+      await loadSnapshots();
+      await loadScenarioRuns();
+      await loadScenarioSummary();
+      await loadHistory();
+      await loadHistory();
+    }
+
+    function inferClusterName(request, stateRoot = '') {
+      const explicit = (request.ClusterName || '').trim();
+      if (explicit && explicit !== 'default') return explicit;
+      const snapshotFile = (request.SnapshotFile || '').trim();
+      const match = (snapshotFile || stateRoot).match(/\/tmp\/([^/]+)\/state(?:\/|$)/);
+      if (match) return match[1];
+      return explicit || activeClusterName || 'default';
+    }
+
+    function applyRequestToForm(request, stateRoot = '') {
+      const scenario = request.Scenario || {};
+      activeClusterName = inferClusterName(request, stateRoot);
+      document.getElementById('kubeconfig').value = request.Kubeconfig || '';
+      document.getElementById('pricingFile').value = request.PricingFile || '';
+      document.getElementById('snapshotFile').value = request.SnapshotFile || '';
+      syncSnapshotSelect(request.SnapshotFile || '');
+      document.getElementById('solver').value = scenario.Solver || 'cp-sat-rust';
+      document.getElementById('cpuHeadroom').value = scenario.CPUHeadroomPercent ?? 0;
+      document.getElementById('memoryHeadroom').value = scenario.MemoryHeadroomPercent ?? 0;
+      document.getElementById('storageHeadroom').value = scenario.StorageHeadroomPercent ?? 0;
+      document.getElementById('podsHeadroom').value = scenario.PodsHeadroom ?? 0;
+      document.getElementById('maxWorkloads').value = scenario.MaxWorkloads ?? 0;
+      document.getElementById('namespaces').value = Array.isArray(scenario.NamespaceInclude) ? scenario.NamespaceInclude.join(', ') : '';
+      document.getElementById('disallowedPools').value = Array.isArray(scenario.DisallowedPools) ? scenario.DisallowedPools.join(', ') : '';
+      document.getElementById('nodePoolLabelKeys').value = Array.isArray(scenario.NodePoolLabelKeys) ? scenario.NodePoolLabelKeys.join(', ') : '';
+      document.getElementById('cpuOvercommitRatio').value = scenario.CPUOvercommitRatio ?? 1;
+      document.getElementById('memoryOvercommitRatio').value = scenario.MemoryOvercommitRatio ?? 1;
+      document.getElementById('useUsageAdjustedRequests').checked = !!scenario.UseUsageAdjustedRequests;
+      document.getElementById('usageRiskPreset').value = scenario.UsageRiskPreset ?? 'custom';
+      document.getElementById('usageRequestFloorRatio').value = scenario.UsageRequestFloorRatio ?? 0.5;
+      document.getElementById('cpuUsageSafetyFactor').value = scenario.CPUUsageSafetyFactor ?? 1.5;
+      document.getElementById('memoryUsageSafetyFactor').value = scenario.MemoryUsageSafetyFactor ?? 2.0;
+      document.getElementById('maxMemoryOverflowProbabilityPercent').value = scenario.MaxMemoryOverflowProbabilityPercent ?? 1.0;
+      document.getElementById('historicalUsageEnabled').checked = !!scenario.HistoricalUsage?.Enabled;
+      document.getElementById('historicalUsageLookback').value = scenario.HistoricalUsage?.Lookback ?? '24h';
+      document.getElementById('historicalUsageStep').value = scenario.HistoricalUsage?.Step ?? '5m';
+      document.getElementById('historicalUsageSecretNamespace').value = scenario.HistoricalUsage?.SecretNamespace ?? 'grafana-cloud';
+      document.getElementById('historicalUsageSecretName').value = scenario.HistoricalUsage?.SecretName ?? 'grafana-external-creds';
+      document.getElementById('historicalUsagePrometheusUrl').value = scenario.HistoricalUsage?.PrometheusURL ?? '';
+      document.getElementById('historicalUsagePrometheusUsername').value = scenario.HistoricalUsage?.PrometheusUsername ?? '';
+      document.getElementById('historicalUsagePrometheusToken').value = scenario.HistoricalUsage?.PrometheusToken ?? '';
+      document.getElementById('ignoreTaints').checked = !!scenario.IgnoreTaints;
+      document.getElementById('ignoreUnschedulableWorkloads').checked = scenario.IgnoreUnschedulableWorkloads !== false;
+      document.getElementById('relaxPreferredAffinity').checked = !!scenario.RelaxPreferredAffinity;
+      document.getElementById('relaxRequiredAntiAffinity').checked = !!scenario.RelaxRequiredAntiAffinity;
+      document.getElementById('enableJointRightsizing').checked = !!scenario.EnableJointRightsizing;
+      document.getElementById('verificationBackend').value = scenario.VerificationBackend || 'scheduler-simulator';
+      document.getElementById('verificationUrl').value = scenario.VerificationURL || '';
+      document.getElementById('costWeight').value = scenario.CostWeight ?? 0;
+      document.getElementById('activeNodeWeight').value = scenario.ActiveNodeWeight ?? 0;
+      document.getElementById('memorySlackWeight').value = scenario.MemorySlackWeight ?? 0;
+      document.getElementById('cpuSlackWeight').value = scenario.CPUSlackWeight ?? 0;
+      document.getElementById('churnWeight').value = scenario.ChurnWeight ?? 0;
+    }
+
+    async function loadScenarioRuns() {
+      const res = await fetch(`/api/scenarios/latest?cluster=${encodeURIComponent(activeClusterName || 'default')}`);
+      if (!res.ok) { scenarioGrid.innerHTML = '<p>No cached scenarios yet.</p>'; scenarioStatusPill.textContent = 'No cached scenarios yet'; return; }
+      const data = await res.json();
+      scenarioRuns = new Map((data.items || []).map(item => [item.scenarioName, item]));
+      renderScenarioRuns();
+    }
+
+    async function loadScenarioSummary() {
+      const res = await fetch(`/api/scenarios/summary?cluster=${encodeURIComponent(activeClusterName || 'default')}`);
+      if (!res.ok) { scenarioSummaryState = null; scenarioSummaryGrid.innerHTML = ''; return; }
+      const data = await res.json();
+      scenarioSummaryState = data;
+      renderScenarioSummary(data);
+    }
+
+    function renderScenarioRuns() {
+      if (!scenarioRuns.size) { scenarioGrid.innerHTML = '<p>No cached scenarios yet.</p>'; scenarioStatusPill.textContent = 'No cached scenarios yet'; return; }
+      const items = [...scenarioRuns.values()].sort((a, b) => (b.report?.Optimization?.SavingsMonthly?.Monthly || 0) - (a.report?.Optimization?.SavingsMonthly?.Monthly || 0));
+      scenarioStatusPill.textContent = `${items.length} cached scenarios`;
+      scenarioGrid.innerHTML = items.map(item => {
+        const savings = item.report?.Optimization?.SavingsMonthly?.Monthly || 0;
+        const optimized = item.report?.Optimization?.OptimizedMonthlyCost?.Monthly || 0;
+        const moves = item.report?.Optimization?.RecommendedMoves?.length || 0;
+        const activeNodes = item.report?.Optimization?.ActiveNodes?.length || 0;
+        return `<article class="scenario-card ${activeScenarioName === item.scenarioName ? 'active' : ''}" data-scenario-name="${escapeHTML(item.scenarioName)}">
+          <div class="scenario-card-title">${escapeHTML(presetLabel(item.scenarioName))}</div>
+          <div class="scenario-card-meta">
+            <div>${money(savings)} savings</div>
+            <div>${money(optimized)} optimized cost</div>
+            <div>${activeNodes} active nodes</div>
+            <div>${moves} moves</div>
+          </div>
+        </article>`;
+      }).join('');
+      scenarioGrid.querySelectorAll('[data-scenario-name]').forEach((el) => {
+        el.addEventListener('click', () => {
+          const item = scenarioRuns.get(el.getAttribute('data-scenario-name'));
+          if (!item) return;
+          activeScenarioName = item.scenarioName;
+          if (item.request) applyRequestToForm(item.request);
+          render(item.report);
+          renderScenarioRuns();
+          statusEl.textContent = `Viewing: ${presetLabel(item.scenarioName)}`;
+          statusEl.className = 'solver-status good';
+        });
+      });
+    }
+
+    function renderScenarioSummary(summary) {
+      const ranked = summary.rankedLevers || [];
+      if (!ranked.length) { scenarioSummaryGrid.innerHTML = ''; return; }
+      scenarioSummaryGrid.innerHTML = ranked.map(row => `<article class="scenario-lever">
+        <strong>${escapeHTML(presetLabel(row.scenarioName || 'unknown'))}</strong>
+        <div>${money(row.savingsMonthly || 0)} total savings</div>
+        <div>${row.activeNodes || 0} active nodes</div>
+        <div>${row.moves || 0} moves</div>
+        <div>Delta vs strict: ${money(row.deltaVsStrictSavings || 0)}</div>
+      </article>`).join('');
+    }
+
+    function copySummary() {
+      const r = latestRenderedReport;
+      if (!r) { alert('No analysis to copy. Run the solver first.'); return; }
+      const opt = r.Optimization || {};
+      const norm = r.Normalized || {};
+      const ex = r.Explainability || {};
+      const savings = opt.SavingsMonthly?.Monthly || 0;
+      const current = opt.CurrentMonthlyCost?.Monthly || norm.CurrentMonthlyCost?.Monthly || 0;
+      const nodes = norm.Nodes?.length || 0;
+      const active = opt.ActiveNodes?.length || 0;
+      const moves = opt.RecommendedMoves?.length || 0;
+
+      let lines = [];
+      lines.push(`## Cost Workbench — ${norm.ClusterName || 'cluster'}`);
+      lines.push('');
+      lines.push(`**Savings**: ${money(savings)}/mo | **Current**: ${money(current)}/mo | **Nodes removable**: ${nodes - active} of ${nodes}`);
+      lines.push('');
+
+      const wf = ex.SavingsWaterfall || {};
+      if (wf.Layers?.length) {
+        lines.push('**Savings breakdown:**');
+        for (const l of wf.Layers) {
+          lines.push(`- ${l.Label}: ${money(l.Savings?.Monthly || 0)} (${l.Confidence})`);
+        }
+        lines.push(`- **Total potential**: ${money(wf.Total?.Monthly || 0)}/mo`);
+        lines.push('');
+      }
+
+      const actions = ex.ActionItems || [];
+      if (actions.length) {
+        lines.push(`**Top actions (${actions.length}):**`);
+        for (const a of actions.slice(0, 5)) {
+          lines.push(`${a.Rank}. ${a.Title} — ${money(a.SavingsMonthly?.Monthly || 0)}/mo [${a.Risk}] [${a.Effort}]`);
+          if (a.KubectlCommand) lines.push(`   \`${a.KubectlCommand}\``);
+        }
+        lines.push('');
+      }
+
+      const fleet = opt.FleetRecommendation || [];
+      const candidates = fleet.filter(f => f.IsCandidate);
+      if (candidates.length) {
+        const fleetCost = fleet.reduce((s, f) => s + (f.MonthlyCost?.Monthly || 0), 0);
+        lines.push(`**Fleet recommendation**: ${money(fleetCost)}/mo (saves ${money(current - fleetCost)}/mo)`);
+        for (const f of fleet) {
+          lines.push(`- ${f.InstanceType.replace('candidate-','')} ${f.Count}x — ${money(f.MonthlyCost?.Monthly || 0)}/mo${f.IsCandidate ? ' (new)' : ''}`);
+        }
+        lines.push('');
+      }
+
+      const text = lines.join('\n');
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('copy-summary-btn');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy Summary'; }, 2000);
+      });
+    }
+
+    async function loadHistory() {
+      const section = document.getElementById('history-section');
+      const res = await fetch(`/api/history?cluster=${encodeURIComponent(activeClusterName || 'default')}`);
+      if (!res.ok) { section.style.display = 'none'; return; }
+      const data = await res.json();
+      const items = data.items || [];
+      if (items.length < 2) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('history-pill').textContent = `${items.length} runs`;
+      const maxSavings = Math.max(...items.map(i => i.savingsMonthly || 0), 1);
+      const chart = document.getElementById('history-chart');
+      chart.innerHTML = items.slice(-30).map((item, idx) => {
+        const pct = maxSavings > 0 ? ((item.savingsMonthly || 0) / maxSavings) * 100 : 0;
+        const ts = item.timestamp ? new Date(item.timestamp).toLocaleDateString() : '';
+        const isLast = idx === items.slice(-30).length - 1;
+        return `<div style="flex:1; min-width:8px; max-width:32px; height:${Math.max(pct, 4)}%; background:${isLast ? 'var(--good)' : 'var(--accent)'}; border-radius:3px 3px 0 0; position:relative; cursor:default;" title="${ts}: ${money(item.savingsMonthly || 0)}/mo savings, ${item.nodeCount || 0} nodes, ${item.workloadCount || 0} workloads"></div>`;
+      }).join('');
+    }
+
+    function presetLabel(name) { return IMPORTANT_SCENARIOS.find(s => s.key === name)?.label || name; }
+
+    function buildPayload(overrides = {}) {
+      const snapshotFile = document.getElementById('snapshotFile').value.trim();
+      return {
+        Kubeconfig: document.getElementById('kubeconfig').value.trim(),
+        PricingFile: document.getElementById('pricingFile').value.trim(),
+        SnapshotFile: snapshotFile,
+        ClusterName: snapshotFile ? (activeClusterName || 'default') : '',
+        ScenarioName: overrides.ScenarioName || '',
+        Scenario: {
+          Solver: document.getElementById('solver').value,
+          CPUHeadroomPercent: parseFloat(document.getElementById('cpuHeadroom').value || '0'),
+          MemoryHeadroomPercent: parseFloat(document.getElementById('memoryHeadroom').value || '0'),
+          StorageHeadroomPercent: parseFloat(document.getElementById('storageHeadroom').value || '0'),
+          PodsHeadroom: parseInt(document.getElementById('podsHeadroom').value || '0', 10),
+          MaxWorkloads: parseInt(document.getElementById('maxWorkloads').value || '0', 10),
+          NamespaceInclude: document.getElementById('namespaces').value.split(',').map(v => v.trim()).filter(Boolean),
+          DisallowedPools: document.getElementById('disallowedPools').value.split(',').map(v => v.trim()).filter(Boolean),
+          NodePoolLabelKeys: document.getElementById('nodePoolLabelKeys').value.split(',').map(v => v.trim()).filter(Boolean),
+          CPUOvercommitRatio: parseFloat(document.getElementById('cpuOvercommitRatio').value || '1'),
+          MemoryOvercommitRatio: parseFloat(document.getElementById('memoryOvercommitRatio').value || '1'),
+          UseUsageAdjustedRequests: document.getElementById('useUsageAdjustedRequests').checked,
+          UsageRiskPreset: document.getElementById('usageRiskPreset').value,
+          UsageRequestFloorRatio: parseFloat(document.getElementById('usageRequestFloorRatio').value || '0.5'),
+          CPUUsageSafetyFactor: parseFloat(document.getElementById('cpuUsageSafetyFactor').value || '1.5'),
+          MemoryUsageSafetyFactor: parseFloat(document.getElementById('memoryUsageSafetyFactor').value || '2.0'),
+          MaxMemoryOverflowProbabilityPercent: parseFloat(document.getElementById('maxMemoryOverflowProbabilityPercent').value || '1.0'),
+          HistoricalUsage: {
+            Enabled: document.getElementById('historicalUsageEnabled').checked,
+            Provider: 'prometheus',
+            Lookback: document.getElementById('historicalUsageLookback').value.trim() || '24h',
+            Step: document.getElementById('historicalUsageStep').value.trim() || '5m',
+            PrometheusURL: document.getElementById('historicalUsagePrometheusUrl').value.trim(),
+            PrometheusUsername: document.getElementById('historicalUsagePrometheusUsername').value.trim(),
+            PrometheusToken: document.getElementById('historicalUsagePrometheusToken').value.trim(),
+            SecretNamespace: document.getElementById('historicalUsageSecretNamespace').value.trim(),
+            SecretName: document.getElementById('historicalUsageSecretName').value.trim(),
+            SecretPrometheusURLKey: 'prom_host',
+            SecretPrometheusUsernameKey: 'prom_username',
+            SecretPrometheusTokenKey: 'alloy_token'
+          },
+          IgnoreTaints: document.getElementById('ignoreTaints').checked,
+          IgnoreUnschedulableWorkloads: document.getElementById('ignoreUnschedulableWorkloads').checked,
+          RelaxPreferredAffinity: document.getElementById('relaxPreferredAffinity').checked,
+          RelaxRequiredAntiAffinity: document.getElementById('relaxRequiredAntiAffinity').checked,
+          EnableJointRightsizing: document.getElementById('enableJointRightsizing').checked,
+          VerificationBackend: document.getElementById('verificationBackend').value,
+          VerificationURL: document.getElementById('verificationUrl').value.trim(),
+          CostWeight: parseInt(document.getElementById('costWeight').value || '0', 10),
+          ActiveNodeWeight: parseInt(document.getElementById('activeNodeWeight').value || '0', 10),
+          MemorySlackWeight: parseInt(document.getElementById('memorySlackWeight').value || '0', 10),
+          CPUSlackWeight: parseInt(document.getElementById('cpuSlackWeight').value || '0', 10),
+          ChurnWeight: parseInt(document.getElementById('churnWeight').value || '0', 10)
+        }
+      };
+    }
+
+    function strictBaseScenario(scenario) { return { ...scenario, IgnoreTaints: false, RelaxPreferredAffinity: false, RelaxRequiredAntiAffinity: false }; }
+
+    async function submitSolve(event) {
+      event.preventDefault();
+      statusEl.textContent = 'Solving...';
+      statusEl.className = 'solver-status';
+      if (eventSource) eventSource.close();
+      const payload = buildPayload();
+      const startRes = await fetch('/api/solve/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+      if (!startRes.ok) { statusEl.textContent = await startRes.text(); statusEl.classList.add('warning'); return; }
+      const { jobId } = await startRes.json();
+      eventSource = new EventSource(`/api/jobs/${jobId}/events`);
+      eventSource.onmessage = async (msg) => {
+        const update = JSON.parse(msg.data);
+        setProgress(update);
+        if (update.error) { statusEl.textContent = update.error; statusEl.className = 'solver-status warning'; }
+        if (update.done) {
+          eventSource.close();
+          const statusRes = await fetch(`/api/jobs/${jobId}/status`);
+          const status = await statusRes.json();
+          if (status.report) {
+            render(status.report);
+            activeScenarioName = payload.ScenarioName || '';
+            await loadScenarioRuns();
+            await loadScenarioSummary();
+      await loadHistory();
+            const solver = status.report.Optimization?.Solver || {};
+            statusEl.textContent = `${solver.Name || 'solver'}: ${solver.Status === 'ok' ? 'optimal' : (solver.Status || 'ok')}`;
+            statusEl.className = `solver-status ${solver.Status === 'ok' ? 'good' : 'warning'}`;
+          }
+        }
+      };
+      eventSource.onerror = async () => {
+        try {
+          const statusRes = await fetch(`/api/jobs/${jobId}/status`);
+          if (!statusRes.ok) return;
+          const status = await statusRes.json();
+          if (status.progress) setProgress(status.progress);
+          if (status.done) {
+            eventSource.close();
+            if (status.report) {
+              render(status.report);
+              activeScenarioName = payload.ScenarioName || '';
+              await loadScenarioRuns();
+              await loadScenarioSummary();
+      await loadHistory();
+              const solver = status.report.Optimization?.Solver || {};
+              statusEl.textContent = `${solver.Name || 'solver'}: ${solver.Status || 'ok'}`;
+              statusEl.className = `solver-status ${solver.Status === 'ok' ? 'good' : 'warning'}`;
+            } else if (status.error) { statusEl.textContent = status.error; statusEl.className = 'solver-status warning'; }
+          }
+        } catch (_) {}
+      };
+    }
+
+    async function runImportantScenarios() {
+      statusEl.textContent = 'Running scenarios...';
+      statusEl.className = 'solver-status';
+      scenarioStatusPill.textContent = 'Running preset scenarios';
+      for (const preset of IMPORTANT_SCENARIOS) {
+        const payload = buildPayload({ ScenarioName: preset.key });
+        payload.Scenario = preset.mutate(strictBaseScenario(payload.Scenario));
+        statusEl.textContent = `Running: ${preset.label}`;
+        const startRes = await fetch('/api/solve/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        if (!startRes.ok) { statusEl.textContent = `Failed: ${preset.label}`; statusEl.className = 'solver-status warning'; return; }
+        const { jobId } = await startRes.json();
+        const status = await waitForJob(jobId, preset.label);
+        if (status.report) {
+          scenarioRuns.set(preset.key, { scenarioName: preset.key, request: payload, report: status.report });
+          activeScenarioName = preset.key;
+          render(status.report);
+          renderScenarioRuns();
+        }
+      }
+      await loadScenarioRuns();
+      await loadScenarioSummary();
+      await loadHistory();
+      statusEl.textContent = 'All scenarios complete';
+      statusEl.className = 'solver-status good';
+    }
+
+    async function waitForJob(jobId, label) {
+      for (;;) {
+        const res = await fetch(`/api/jobs/${jobId}/status`);
+        const status = await res.json();
+        if (status.progress) { setProgress(status.progress); progressStage.textContent = `${label}: ${status.progress.message || status.progress.stage || 'Working'}`; }
+        if (status.done) return status;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+
+    function setProgress(update) {
+      progressBar.style.width = `${Math.max(0, Math.min(update.percent || 0, 100))}%`;
+      progressStage.textContent = update.message || update.stage || 'Working';
+      progressElapsed.textContent = `${((update.elapsedMs || 0) / 1000).toFixed(1)}s`;
+    }
+
+    function render(report) {
+      latestRenderedReport = report;
+      simCache.clear();
+      renderHero(report);
+      renderSummarySentence(report);
+      renderUsageCta(report);
+      renderActionItems(report);
+      renderSavingsStack(report);
+      renderSimulator(report);
+      renderBlockerCards(report);
+      renderPoolCards(report);
+      renderWorkloadTable(report);
+      renderFleetRecommendation(report);
+      renderNodeDrainability(report);
+      renderPdbImpact(report);
+      renderVpaStatus(report);
+      renderDaemonSetTax(report);
+      renderSummary(report);
+      renderNodes(report);
+      renderMoves(report);
+      renderRequestRecommendations(report);
+      renderVerification(report);
+      renderInflationDrivers(report);
+      renderImpacts(report);
+      renderAutoscalerGap(report);
+      renderPoolSummaries(report);
+      renderBlockers(report);
+    }
+
+    // === ANSWER-FIRST RENDERERS ===
+
+    function renderHero(report) {
+      const current = report.Normalized?.CurrentMonthlyCost?.Monthly || 0;
+      const savings = report.Optimization?.SavingsMonthly?.Monthly || 0;
+      const nodes = report.Normalized?.Nodes?.length || 0;
+      const activeNodes = report.Optimization?.ActiveNodes?.length || 0;
+      const removable = nodes - activeNodes;
+      const verification = report.Optimization?.Verification || {};
+      const confidence = verification.Confidence || (savings > 0 ? 'high' : 'unknown');
+
+      if (savings > 0) {
+        document.getElementById('hero-savings-label').textContent = 'Savings Available';
+        document.getElementById('hero-savings').textContent = money(savings);
+        document.getElementById('hero-savings-sub').innerHTML = `per month <span class="confidence-badge confidence-${confidence.toLowerCase()}">${escapeHTML(confidence)}</span>`;
+      } else if (removable > 0) {
+        document.getElementById('hero-savings-label').textContent = 'Consolidation';
+        document.getElementById('hero-savings').textContent = `${removable} nodes`;
+        document.getElementById('hero-savings-sub').innerHTML = `can be removed <span class="confidence-badge confidence-${confidence.toLowerCase()}">${escapeHTML(confidence)}</span>`;
+      } else {
+        document.getElementById('hero-savings-label').textContent = 'Savings Available';
+        document.getElementById('hero-savings').textContent = money(0);
+        document.getElementById('hero-savings-sub').textContent = 'cluster is compact';
+      }
+      const poolCount = new Set((report.Normalized?.Nodes || []).map(n => n.Pool || 'default')).size;
+      document.getElementById('hero-cost-label').textContent = current > 0 ? 'Current Monthly Cost' : 'Cluster Size';
+      document.getElementById('hero-cost').textContent = current > 0 ? money(current) : `${nodes} nodes`;
+      document.getElementById('hero-cost-sub').textContent = current > 0 ? `${nodes} nodes in cluster` : `across ${poolCount} pool${poolCount !== 1 ? 's' : ''}`;
+      document.getElementById('hero-nodes').textContent = `${removable} of ${nodes}`;
+      document.getElementById('hero-nodes-sub').textContent = removable > 0 ? `${((removable / nodes) * 100).toFixed(0)}% of fleet can be removed` : 'Cluster is already compact';
+    }
+
+    function renderSummarySentence(report) {
+      const el = document.getElementById('summary-sentence');
+      const savings = report.Optimization?.SavingsMonthly?.Monthly || 0;
+      const nodes = report.Normalized?.Nodes?.length || 0;
+      const activeNodes = report.Optimization?.ActiveNodes?.length || 0;
+      const removable = nodes - activeNodes;
+      const moves = report.Optimization?.RecommendedMoves?.length || 0;
+      const drivers = report.Explainability?.InflationDrivers || [];
+      const constraints = report.Normalized?.ConstraintImpacts || [];
+
+      if (savings <= 0 && removable <= 0) {
+        el.innerHTML = 'The cluster is already well-packed. No further consolidation savings were found under current constraints.';
+        return;
+      }
+
+      let parts = [];
+      if (savings > 0) {
+        parts.push(`You can save <strong>${money(savings)}/mo</strong> by consolidating ${removable} node${removable !== 1 ? 's' : ''} with ${moves} pod move${moves !== 1 ? 's' : ''}.`);
+      } else if (removable > 0) {
+        parts.push(`The solver can consolidate workloads onto <strong>${activeNodes} of ${nodes}</strong> nodes, removing <strong>${removable} node${removable !== 1 ? 's' : ''}</strong> (${Math.round(removable / nodes * 100)}% of fleet) with ${moves} pod move${moves !== 1 ? 's' : ''}.`);
+      }
+
+      const antiAffinity = constraints.find(c => c.name === 'required anti-affinity');
+      const taints = constraints.find(c => c.name === 'taints/tolerations');
+      if (antiAffinity && antiAffinity.workloadsAffected > 0) {
+        parts.push(`Anti-affinity rules affect ${antiAffinity.workloadsAffected} workloads, preventing tighter packing.`);
+      }
+      if (taints && taints.workloadsAffected > 2) {
+        parts.push(`Taints/tolerations constrain ${taints.workloadsAffected} workloads to specific nodes.`);
+      }
+      if (drivers.length > 0) {
+        const top = drivers[0];
+        parts.push(`Top cost driver: <strong>${escapeHTML(top.DisplayName || top.displayName || top.Key || 'unknown')}</strong> (${money(top.BlockedMonthlyCost?.Monthly || top.blockedMonthlyCost?.Monthly || 0)} blocked).`);
+      }
+
+      el.innerHTML = parts.join(' ');
+    }
+
+    function renderSavingsStack(report) {
+      const section = document.getElementById('savings-stack-section');
+      const waterfall = report.Explainability?.SavingsWaterfall || {};
+      const layers = waterfall.Layers || [];
+      const totalSavings = waterfall.Total?.Monthly || report.Optimization?.SavingsMonthly?.Monthly || 0;
+      if (totalSavings <= 0 && !layers.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+
+      const colors = { placement: 'var(--good)', rightsizing: 'var(--purple)', constraints: 'var(--accent)', daemonset: 'var(--gray)' };
+      const maxCumulative = layers.length ? layers[layers.length - 1].Cumulative?.Monthly || totalSavings : totalSavings;
+
+      const barEl = document.getElementById('savings-stack-bar');
+      const legendEl = document.getElementById('savings-stack-legend');
+
+      if (layers.length) {
+        barEl.style.display = 'none';
+        legendEl.innerHTML = `<div style="width:100%; display:grid; gap:6px;">
+          ${layers.map(l => {
+            const pct = maxCumulative > 0 ? ((l.Savings?.Monthly || 0) / maxCumulative) * 100 : 0;
+            const color = colors[l.Key] || 'var(--accent)';
+            return `<div class="waterfall-row">
+              <div class="waterfall-label">${escapeHTML(l.Label)} <span class="confidence-badge confidence-${l.Confidence || 'medium'}" style="font-size:9px;">${escapeHTML(l.Confidence || '')}</span></div>
+              <div class="waterfall-bar-track"><div class="waterfall-bar-fill" style="width:${pct}%; background:${color};">${money(l.Savings?.Monthly || 0)}</div></div>
+              <div class="waterfall-cumulative">${money(l.Cumulative?.Monthly || 0)}</div>
+            </div>`;
+          }).join('')}
+          <div style="text-align:right; font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:600; margin-top:4px;">Total potential: ${money(maxCumulative)}/mo</div>
+        </div>`;
+      } else {
+        barEl.style.display = '';
+        barEl.innerHTML = `<div class="stack-segment" style="width:100%; background:var(--good);">${money(totalSavings)}</div>`;
+        legendEl.innerHTML = `<div class="stack-legend-item"><div class="stack-dot" style="background:var(--good);"></div>Placement savings (safe): ${money(totalSavings)}</div>`;
+      }
+    }
+
+    function renderUsageCta(report) {
+      const existing = document.getElementById('usage-cta');
+      if (existing) existing.remove();
+      const hasUsage = report.Explainability?.HasUsageData;
+      if (hasUsage !== false || !report.Optimization) return;
+      const cta = document.createElement('div');
+      cta.id = 'usage-cta';
+      cta.className = 'usage-cta';
+      cta.innerHTML = `<div><strong>Unlock rightsizing recommendations.</strong> No CPU/memory usage data was found for this cluster. The solver can compute per-workload request recommendations when usage metrics are available.<br><br>Enable metrics-server for point-in-time usage, or connect Prometheus for historical analysis via <code>HistoricalUsage.Enabled = true</code> in Advanced Settings. With usage data, the workload table and action items will show specific request reductions and their savings.</div>`;
+      const sentinel = document.getElementById('actions-section') || document.getElementById('savings-stack-section');
+      if (sentinel) sentinel.parentNode.insertBefore(cta, sentinel);
+    }
+
+    function renderActionItems(report) {
+      const section = document.getElementById('actions-section');
+      const items = report.Explainability?.ActionItems || [];
+      if (!items.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('actions-pill').textContent = `${items.length} action${items.length !== 1 ? 's' : ''}`;
+
+      const groups = new Map();
+      for (const item of items) {
+        const key = item.Source || 'other';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      }
+
+      const groupLabels = { constraint_relaxation: 'Constraint Relaxation', request_rightsizing: 'Request Rightsizing' };
+      const container = document.getElementById('action-cards');
+      let html = '';
+      let gidx = 0;
+
+      for (const [source, group] of groups) {
+        const totalSavings = group.reduce((s, i) => s + (i.SavingsMonthly?.Monthly || 0), 0);
+        const label = groupLabels[source] || source;
+        const startOpen = source !== 'request_rightsizing';
+        const gid = `ag${gidx++}`;
+
+        html += `<div class="action-card" style="cursor:pointer; padding:12px 16px;" data-toggle="${gid}">
+          <div class="action-head">
+            <span style="font-size:10px; transition:transform 0.2s;${startOpen ? ' transform:rotate(90deg);' : ''}" class="ag-arrow">&#9654;</span>
+            <span class="action-title">${escapeHTML(label)}</span>
+            <span style="color:var(--muted); font-size:12px;">${group.length} action${group.length !== 1 ? 's' : ''}</span>
+            <span class="action-savings">${money(totalSavings)}/mo</span>
+          </div>
+        </div>
+        <div id="${gid}" style="display:${startOpen ? 'grid' : 'none'}; gap:6px; margin:6px 0 10px 0;">
+          ${group.map(item => `<article class="action-card" style="margin-left:16px;">
+            <div class="action-head">
+              <span class="action-rank">#${item.Rank}</span>
+              <span class="action-title">${escapeHTML(item.Title)}</span>
+              <span class="action-savings">${money(item.SavingsMonthly?.Monthly || 0)}/mo</span>
+              <span class="confidence-badge confidence-${(item.Risk || 'medium').toLowerCase()}">${escapeHTML(item.Risk || 'medium')}</span>
+              ${item.Effort ? `<span class="effort-badge effort-${item.Effort}">${escapeHTML(item.Effort)}</span>` : ''}
+            </div>
+            ${item.Reason ? `<div class="action-meta">${escapeHTML(item.Reason)}</div>` : ''}
+            ${item.CurrentValue && item.RecommendedValue ? `<div class="action-meta">${escapeHTML(item.CurrentValue)} &rarr; ${escapeHTML(item.RecommendedValue)}</div>` : ''}
+            ${item.KubectlCommand ? `<div class="action-cmd" onclick="event.stopPropagation(); navigator.clipboard.writeText(this.textContent.replace('click to copy','').trim())">${escapeHTML(item.KubectlCommand)}</div>` : ''}
+          </article>`).join('')}
+        </div>`;
+      }
+
+      container.innerHTML = html;
+      container.querySelectorAll('[data-toggle]').forEach(el => {
+        el.addEventListener('click', () => {
+          const target = document.getElementById(el.dataset.toggle);
+          if (!target) return;
+          const open = target.style.display === 'none';
+          target.style.display = open ? 'grid' : 'none';
+          el.querySelector('.ag-arrow').style.transform = open ? 'rotate(90deg)' : '';
+        });
+      });
+    }
+
+    function renderFleetRecommendation(report) {
+      const section = document.getElementById('fleet-section');
+      const fleet = report.Optimization?.FleetRecommendation || [];
+      const candidates = fleet.filter(f => f.IsCandidate);
+      if (!candidates.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('fleet-pill').textContent = `${fleet.length} node type${fleet.length !== 1 ? 's' : ''}`;
+      const totalCost = fleet.reduce((s, f) => s + (f.MonthlyCost?.Monthly || 0), 0);
+      const currentCost = report.Optimization?.CurrentMonthlyCost?.Monthly || 0;
+      document.getElementById('fleet-cards').innerHTML = `
+        <article class="pool-card" style="border-color:rgba(63,185,80,0.3);">
+          <div class="pool-card-title" style="color:var(--good);">Recommended Fleet</div>
+          <div class="pool-card-cost">${money(totalCost)}/mo</div>
+          ${fleet.map(f => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px;">
+              <div>
+                <span style="font-weight:600;">${escapeHTML(f.InstanceType.replace('candidate-',''))}</span>
+                ${f.IsCandidate ? '<span class="confidence-badge confidence-medium" style="margin-left:6px;">new</span>' : ''}
+              </div>
+              <div style="font-family:\'JetBrains Mono\',monospace;">${f.Count}x &middot; ${money(f.MonthlyCost?.Monthly || 0)}/mo</div>
+            </div>
+          `).join('')}
+          <div class="pool-meta" style="margin-top:12px;">
+            <span style="color:var(--good); font-weight:600;">Saves ${money(currentCost - totalCost)}/mo vs current fleet</span>
+          </div>
+        </article>
+        <article class="pool-card" style="opacity:0.6;">
+          <div class="pool-card-title">Current Fleet</div>
+          <div class="pool-card-cost">${money(currentCost)}/mo</div>
+          <div style="font-size:13px; color:var(--muted);">${report.Normalized?.Nodes?.length || 0} nodes across ${(report.Normalized?.PoolSummaries || []).length || 1} pool${(report.Normalized?.PoolSummaries || []).length !== 1 ? 's' : ''}</div>
+        </article>
+      `;
+    }
+
+    let allWorkloadRows = [];
+    let activeWorkloadFilter = null;
+
+    function renderWorkloadTable(report, filter) {
+      const section = document.getElementById('workload-section');
+      const rows = report ? (report.Explainability?.WorkloadCostTable || []) : allWorkloadRows;
+      if (report) allWorkloadRows = rows;
+      if (filter !== undefined) activeWorkloadFilter = filter;
+      if (!rows.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+
+      let filtered = rows;
+      let filterChip = '';
+      if (activeWorkloadFilter) {
+        if (activeWorkloadFilter === '__rightsizing__') {
+          filtered = rows.filter(r => (r.SavingsIfRightsized?.Monthly || 0) > 0);
+          filterChip = `<div id="workload-filter-chip" style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:8px; background:rgba(88,166,255,0.1); border:1px solid rgba(88,166,255,0.2); font-size:12px; color:var(--accent); margin-bottom:10px; cursor:pointer;" onclick="clearWorkloadFilter()">Showing: workloads with rightsizing savings <span style="font-weight:700;">&times;</span></div>`;
+        } else {
+          filtered = rows.filter(r => (r.Constraints || []).some(c => c.toLowerCase().includes(activeWorkloadFilter.toLowerCase())));
+          filterChip = `<div id="workload-filter-chip" style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:8px; background:rgba(88,166,255,0.1); border:1px solid rgba(88,166,255,0.2); font-size:12px; color:var(--accent); margin-bottom:10px; cursor:pointer;" onclick="clearWorkloadFilter()">Showing: workloads affected by ${escapeHTML(activeWorkloadFilter)} <span style="font-weight:700;">&times;</span></div>`;
+        }
+      }
+
+      document.getElementById('workload-pill').textContent = activeWorkloadFilter ? `${filtered.length} of ${rows.length}` : `${rows.length} workloads`;
+
+      const tbody = document.getElementById('workload-tbody');
+      const existing = document.getElementById('workload-filter-chip');
+      if (existing) existing.remove();
+      if (filterChip) tbody.closest('.section')?.querySelector('.section-header')?.insertAdjacentHTML('afterend', filterChip);
+
+      tbody.innerHTML = filtered.slice(0, 30).map(r => {
+        const cpuPct = r.CpuUsageRatio || 0;
+        const memPct = r.MemoryUsageRatio || 0;
+        const cpuCls = cpuPct < 0.3 ? 'usage-low' : cpuPct < 0.7 ? 'usage-mid' : 'usage-high';
+        const memCls = memPct < 0.3 ? 'usage-low' : memPct < 0.7 ? 'usage-mid' : 'usage-high';
+        const savings = r.SavingsIfRightsized?.Monthly || 0;
+        const levels = r.CandidateLevels || [];
+        const levelInfo = levels.length > 1 ? `<span class="pill" style="font-size:9px;">${levels.length} levels</span>` : '';
+        const constraints = r.Constraints || [];
+        const constraintDetail = constraints.length
+          ? `<tr class="wk-detail" style="display:none;"><td colspan="10" style="padding:8px 12px; background:rgba(22,27,34,0.4);"><div style="font-size:11px; color:var(--muted);">
+              <strong>Constraints:</strong> ${constraints.map(c => escapeHTML(c)).join(', ') || 'none'}<br>
+              ${levels.length > 1 ? `<strong>Candidate levels:</strong> ${levels.map(l => `${escapeHTML(l.Label)} (${cpuLabel(l.Requests?.MilliCPU || 0)}, ${bytesLabel(l.Requests?.MemoryBytes || 0)}, risk ${l.RiskScore})`).join(' | ')}` : ''}
+            </div></td></tr>`
+          : '';
+        return `<tr style="cursor:pointer;${savings > 0 ? ' color:var(--ink);' : ''}" onclick="this.nextElementSibling?.style && (this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? '' : 'none')">
+          <td>${escapeHTML(r.Namespace)}/${escapeHTML(r.Name)}</td>
+          <td style="color:var(--muted)" title="${escapeHTML(r.OwnerKind || '')}/${escapeHTML(r.OwnerName || '')}">${escapeHTML(cleanOwner(r.OwnerKind, r.OwnerName))}</td>
+          <td>${cpuLabel(r.CurrentCpuMilli || 0)}</td>
+          <td>${cpuLabel(r.RecommendedCpuMilli || 0)}</td>
+          <td>${bytesLabel(r.CurrentMemoryBytes || 0)}</td>
+          <td>${bytesLabel(r.RecommendedMemoryBytes || 0)}</td>
+          <td><span class="usage-bar"><span class="usage-fill ${cpuCls}" style="width:${Math.min(cpuPct * 100, 100)}%"></span></span>${(cpuPct * 100).toFixed(0)}%</td>
+          <td><span class="usage-bar"><span class="usage-fill ${memCls}" style="width:${Math.min(memPct * 100, 100)}%"></span></span>${(memPct * 100).toFixed(0)}%</td>
+          <td>${money(r.MonthlyCost?.Monthly || 0)}</td>
+          <td style="${savings > 0 ? 'color:var(--good);font-weight:600' : ''}">${savings > 0 ? money(savings) + ' ' + levelInfo : '—'}</td>
+        </tr>${constraintDetail}`;
+      }).join('');
+    }
+
+    function filterWorkloadsByBlocker(filterKey) {
+      activeWorkloadFilter = filterKey;
+      renderWorkloadTable(null);
+      document.getElementById('workload-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function clearWorkloadFilter() {
+      activeWorkloadFilter = null;
+      const chip = document.getElementById('workload-filter-chip');
+      if (chip) chip.remove();
+      renderWorkloadTable(null);
+    }
+
+    // --- CONSTRAINT SIMULATOR ---
+    let simBaselineReport = null;
+    let simViewMode = 'grid';
+    let simRunning = false;
+    const simCache = new Map();
+
+    const simToggles = [
+      { key: 'IgnoreTaints', label: 'Ignore Taints' },
+      { key: 'RelaxRequiredAntiAffinity', label: 'Relax Anti-Affinity' },
+      { key: 'RelaxPreferredAffinity', label: 'Relax Affinity' },
+      { key: 'EnableJointRightsizing', label: 'Rightsizing' },
+    ];
+
+    function renderSimulator(report) {
+      const section = document.getElementById('simulator-section');
+      const nodes = report.Normalized?.Nodes || [];
+      if (!nodes.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      simBaselineReport = report;
+
+      const togglesEl = document.getElementById('simulator-toggles');
+      togglesEl.innerHTML = simToggles.map(t =>
+        `<label class="sim-toggle" data-simkey="${t.key}">
+          <input type="checkbox" data-simkey="${t.key}">
+          <span class="sim-switch"></span>
+          <span>${t.label}</span>
+        </label>`
+      ).join('');
+
+      togglesEl.querySelectorAll('input[data-simkey]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          cb.closest('.sim-toggle').classList.toggle('active', cb.checked);
+          runSimulation();
+        });
+      });
+
+      document.querySelectorAll('[data-simview]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-simview]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          simViewMode = btn.dataset.simview;
+          const anyActive = [...document.querySelectorAll('#simulator-toggles input[data-simkey]')].some(cb => cb.checked);
+          if (anyActive) { runSimulation(); } else if (simBaselineReport) { renderSimulatorGrid(simBaselineReport); }
+        });
+      });
+
+      renderSimulatorGrid(report);
+    }
+
+    async function runSimulation() {
+      if (simRunning) return;
+      const overrides = {};
+      let anyActive = false;
+      document.querySelectorAll('#simulator-toggles input[data-simkey]').forEach(cb => {
+        if (cb.checked) { overrides[cb.dataset.simkey] = true; anyActive = true; }
+      });
+
+      const deltaEl = document.getElementById('simulator-delta');
+      if (!anyActive) {
+        deltaEl.style.display = 'none';
+        renderSimulatorGrid(simBaselineReport);
+        document.getElementById('simulator-pill').textContent = 'interactive';
+        return;
+      }
+
+      const cacheKey = Object.keys(overrides).sort().join(',');
+      const cached = simCache.get(cacheKey);
+      if (cached) {
+        applySimResult(cached, overrides);
+        return;
+      }
+
+      simRunning = true;
+      document.getElementById('simulator-pill').textContent = 'solving...';
+
+      try {
+        const payload = buildPayload();
+        Object.assign(payload.Scenario, overrides);
+        const res = await fetch('/api/solve', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        const simReport = await res.json();
+        if (simReport.error) throw new Error(simReport.error);
+        simCache.set(cacheKey, simReport);
+        applySimResult(simReport, overrides);
+      } catch (err) {
+        document.getElementById('simulator-delta').style.display = '';
+        document.getElementById('simulator-delta').innerHTML = `<span class="sim-delta-warn">Simulation failed: ${escapeHTML(err.message)}</span>`;
+        document.getElementById('simulator-pill').textContent = 'error';
+      }
+
+      simRunning = false;
+    }
+
+    function applySimResult(simReport, overrides) {
+      const deltaEl = document.getElementById('simulator-delta');
+      const allNodes = simBaselineReport.Normalized?.Nodes || [];
+      const totalNodes = allNodes.length;
+      const simActive = new Set(simReport.Optimization?.ActiveNodes || []);
+      const simNodeCount = simActive.size;
+      const simCost = simReport.Optimization?.OptimizedMonthlyCost?.Monthly || 0;
+      const simSavings = simReport.Optimization?.SavingsMonthly?.Monthly || 0;
+      const baselineSavings = simBaselineReport.Optimization?.SavingsMonthly?.Monthly || 0;
+      const deltaSavings = simSavings - baselineSavings;
+      const nodesRemoved = totalNodes - simNodeCount;
+
+      const activeLabels = simToggles.filter(t => overrides[t.key]).map(t => t.label).join(' + ');
+      deltaEl.style.display = '';
+      deltaEl.innerHTML = `<strong>${activeLabels}</strong>: packs into <strong>${simNodeCount}</strong> of ${totalNodes} nodes (${nodesRemoved} removable). Optimized cost: <strong>${money(simCost)}/mo</strong>, saving <strong>${money(simSavings)}/mo</strong>${deltaSavings !== 0 ? ` (<strong>${deltaSavings > 0 ? '+' : ''}${money(deltaSavings)}/mo</strong> vs baseline)` : ''}`;
+
+      document.getElementById('simulator-pill').textContent = `${nodesRemoved} nodes removable`;
+
+      if (simViewMode === 'grid') {
+        renderSimulatorGridWithOptimized(simReport, simActive);
+      } else {
+        renderSimulatorSideBySide(simBaselineReport, simReport, simActive);
+      }
+    }
+
+    function renderSimulatorGrid(report) {
+      const canvas = document.getElementById('simulator-canvas');
+      const nodes = report.Normalized?.Nodes || [];
+      const requestByNode = currentRequestedByNode(report);
+      const pools = groupNodesByPool(nodes);
+
+      let html = '';
+      for (const [poolName, poolNodes] of pools) {
+        const poolCost = poolNodes.reduce((s, n) => s + (n.Price?.Monthly || 0), 0);
+        html += `<div class="sim-pool-group">
+          <div class="sim-pool-label">${escapeHTML(poolName)} <span style="font-weight:400;">(${poolNodes.length} nodes)</span> <span class="sim-pool-cost">${money(poolCost)}/mo</span></div>
+          <div class="sim-pool-nodes">`;
+
+        for (const node of poolNodes) {
+          const agg = requestByNode.get(node.Name) || { cpu: 0, mem: 0 };
+          html += renderSimNode(node, agg.cpu, agg.mem, false, false);
+        }
+        html += '</div></div>';
+      }
+      canvas.innerHTML = html;
+    }
+
+    function renderSimulatorGridWithOptimized(simReport, simActive) {
+      const canvas = document.getElementById('simulator-canvas');
+      const nodes = simBaselineReport.Normalized?.Nodes || [];
+      const optimizedByNode = optimizedWorkloadByNode(simReport);
+      const currentByNode = currentRequestedByNode(simBaselineReport);
+      const pools = groupNodesByPool(nodes);
+
+      let html = '';
+      for (const [poolName, poolNodes] of pools) {
+        const activeInPool = poolNodes.filter(n => simActive.has(n.Name)).length;
+        const poolCost = poolNodes.filter(n => simActive.has(n.Name)).reduce((s, n) => s + (n.Price?.Monthly || 0), 0);
+        html += `<div class="sim-pool-group">
+          <div class="sim-pool-label">${escapeHTML(poolName)} <span style="font-weight:400;">(${activeInPool}/${poolNodes.length} active)</span> <span class="sim-pool-cost">${money(poolCost)}/mo</span></div>
+          <div class="sim-pool-nodes">`;
+
+        for (const node of poolNodes) {
+          const isActive = simActive.has(node.Name);
+          const opt = optimizedByNode.get(node.Name);
+          const cur = currentByNode.get(node.Name) || { cpu: 0, mem: 0 };
+          const hasWork = opt && (opt.cpuRequests > 0 || opt.memRequests > 0);
+          const optCpuPct = hasWork ? (opt.cpuRequests / (cap.MilliCPU || 1)) : 0;
+          const optMemPct = hasWork ? (opt.memRequests / (cap.MemoryBytes || 1)) : 0;
+          const substantialWork = Math.max(optCpuPct, optMemPct) > 0.05;
+          const cpuUsed = isActive && substantialWork ? opt.cpuRequests : cur.cpu;
+          const memUsed = isActive && substantialWork ? opt.memRequests : cur.mem;
+          const isRemoved = !isActive || !substantialWork;
+          const isDensified = isActive && hasWork && (opt.cpuRequests > cur.cpu * 1.1 || opt.memRequests > cur.mem * 1.1);
+          html += renderSimNode(node, isRemoved ? 0 : cpuUsed, isRemoved ? 0 : memUsed, isRemoved, isDensified);
+        }
+        html += '</div></div>';
+      }
+      canvas.innerHTML = html;
+    }
+
+    function renderSimNode(node, cpuUsed, memUsed, isRemoved, isDensified) {
+      const cap = node.EffectiveCapacity || {};
+      const cpuPct = Math.min((cpuUsed / (cap.MilliCPU || 1)) * 100, 100);
+      const memPct = Math.min((memUsed / (cap.MemoryBytes || 1)) * 100, 100);
+      const pct = Math.max(cpuPct, memPct);
+      const fillCls = pct > 85 ? 'danger' : pct > 65 ? 'warn' : '';
+      const shortName = node.Name.length > 8 ? node.Name.slice(-8) : node.Name;
+      const classes = `sim-node${isRemoved ? ' removed' : ''}${isDensified ? ' densified' : ''}`;
+      return `<div class="${classes}" data-nodename="${escapeHTML(node.Name)}" title="${escapeHTML(node.Name)}\n${node.InstanceType || ''}\nCPU: ${cpuPct.toFixed(0)}% | Mem: ${memPct.toFixed(0)}%\n${money(node.Price?.Monthly || 0)}/mo">
+        <div class="sim-fill ${fillCls}" style="height:${pct}%;"></div>
+        <div class="sim-node-pct">${isRemoved ? '' : pct.toFixed(0) + '%'}</div>
+        <div class="sim-node-label">${escapeHTML(shortName)}</div>
+      </div>`;
+    }
+
+    function groupNodesByPool(nodes) {
+      const pools = new Map();
+      for (const node of nodes) {
+        const pool = node.Pool || 'default';
+        if (!pools.has(pool)) pools.set(pool, []);
+        pools.get(pool).push(node);
+      }
+      return pools;
+    }
+
+    function renderSimulatorSideBySide(baseline, simulated, simActive) {
+      const canvas = document.getElementById('simulator-canvas');
+      const nodes = baseline.Normalized?.Nodes || [];
+      const currentByNode = currentRequestedByNode(baseline);
+      const optimizedByNode = optimizedWorkloadByNode(simulated);
+      const pools = groupNodesByPool(nodes);
+
+      let leftHtml = '', rightHtml = '';
+      for (const [poolName, poolNodes] of pools) {
+        const simCount = poolNodes.filter(n => {
+          const opt = optimizedByNode.get(n.Name);
+          if (!simActive.has(n.Name) || !opt) return false;
+          const c = n.EffectiveCapacity || {};
+          return Math.max(opt.cpuRequests / (c.MilliCPU || 1), opt.memRequests / (c.MemoryBytes || 1)) > 0.05;
+        }).length;
+        leftHtml += `<div class="sim-pool-group"><div class="sim-pool-label">${escapeHTML(poolName)} (${poolNodes.length} nodes)</div><div class="sim-pool-nodes">`;
+        rightHtml += `<div class="sim-pool-group"><div class="sim-pool-label">${escapeHTML(poolName)} (${simCount} active)</div><div class="sim-pool-nodes">`;
+
+        for (const node of poolNodes) {
+          const cur = currentByNode.get(node.Name) || { cpu: 0, mem: 0 };
+          const opt = optimizedByNode.get(node.Name);
+          const isActive = simActive.has(node.Name);
+          const hasWork = opt && (opt.cpuRequests > 0 || opt.memRequests > 0);
+          const cap = node.EffectiveCapacity || {};
+          const optPct = hasWork ? Math.max(opt.cpuRequests / (cap.MilliCPU || 1), opt.memRequests / (cap.MemoryBytes || 1)) : 0;
+          const substantialWork = optPct > 0.05;
+          leftHtml += renderSimNode(node, cur.cpu, cur.mem, false, false);
+          if (isActive && substantialWork) {
+            rightHtml += renderSimNode(node, opt.cpuRequests, opt.memRequests, false, false);
+          }
+        }
+
+        leftHtml += '</div></div>';
+        rightHtml += '</div></div>';
+      }
+
+      canvas.innerHTML = `<div class="binpack-compare">
+        <section class="binpack-column"><div class="bin-card-head"><div class="bin-card-title">Current</div></div>${leftHtml}</section>
+        <section class="binpack-column"><div class="bin-card-head"><div class="bin-card-title" style="color:var(--good);">After Relaxation</div></div>${rightHtml}</section>
+      </div>`;
+    }
+
+    function renderBlockerCards(report) {
+      const section = document.getElementById('blockers-section');
+      const drivers = report.Explainability?.InflationDrivers || [];
+      const constraints = report.Normalized?.ConstraintImpacts || [];
+      const autoscalerBlockers = report.Optimization?.ResourceSummary?.AutoscalerBlockers || [];
+
+      const cards = [];
+
+      for (const driver of drivers) {
+        const blocked = driver.BlockedMonthlyCost?.Monthly || driver.blockedMonthlyCost?.Monthly || 0;
+        const affectedCount = driver.AffectedWorkloadCount || driver.affectedWorkloadCount || 0;
+        if (blocked <= 0 && affectedCount <= 0) continue;
+        cards.push({
+          title: driver.DisplayName || driver.displayName || driver.Key || 'Unknown',
+          key: driver.Key || driver.key || '',
+          cost: blocked,
+          workloads: driver.AffectedWorkloadCount || driver.affectedWorkloadCount || 0,
+          nodes: driver.BlockedNodeCount || driver.blockedNodeCount || 0,
+          action: driver.RecommendedAction || driver.recommendedAction || '',
+          confidence: driver.Confidence || driver.confidence || 'medium',
+          summary: driver.Summary || driver.summary || '',
+          topEntities: driver.TopEntities || driver.top_entities || [],
+        });
+      }
+
+      for (const ci of constraints) {
+        if (ci.estimatedMonthly <= 0 && ci.workloadsAffected <= 0) continue;
+        if (cards.find(c => c.title.toLowerCase().includes(ci.name.toLowerCase()))) continue;
+        cards.push({
+          title: ci.name,
+          key: ci.name,
+          cost: ci.estimatedMonthly,
+          workloads: ci.workloadsAffected,
+          nodes: 0,
+          action: '',
+          confidence: 'low',
+          summary: `${ci.reasonCount} constraint hits across ${ci.workloadsAffected} workloads`,
+          topEntities: [],
+        });
+      }
+
+      for (const ab of autoscalerBlockers) {
+        const blocked = ab.BlockedMonthlyCost?.Monthly || 0;
+        const abWorkloads = ab.BlockedWorkloadCount || 0;
+        if (blocked <= 0 && abWorkloads <= 0) continue;
+        const alreadyCovered = cards.find(c => c.title.toLowerCase().includes('safe-to-evict') || c.title.toLowerCase().includes('autoscaler'));
+        if (alreadyCovered) continue;
+        cards.push({
+          title: ab.Kind || 'Autoscaler blocker',
+          key: 'autoscaler',
+          cost: blocked,
+          workloads: ab.BlockedWorkloadCount || 0,
+          nodes: ab.BlockedNodeCount || 0,
+          action: 'Review safe-to-evict annotations on blocked pods',
+          confidence: 'high',
+          summary: `${ab.BlockedNodeCount || 0} nodes cannot be scaled down`,
+          topEntities: ab.BlockedNodes || [],
+        });
+      }
+
+      cards.sort((a, b) => b.cost - a.cost);
+
+      if (!cards.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('blockers-pill').textContent = `${cards.length} blocker${cards.length !== 1 ? 's' : ''}`;
+
+      const whatIfMutations = {
+        'taints/tolerations': { IgnoreTaints: true },
+        'required anti-affinity': { RelaxRequiredAntiAffinity: true },
+        'required affinity': { RelaxPreferredAffinity: true },
+        'node selectors': { IgnoreTaints: true },
+      };
+
+      document.getElementById('blocker-cards').innerHTML = cards.map((card, idx) => {
+        const canWhatIf = whatIfMutations[card.title];
+        const filterKey = card.key === 'requests' ? '__rightsizing__' : card.title;
+        const topList = card.topEntities.length
+          ? `<div style="margin-top:8px; font-size:11px; color:var(--muted);"><div style="margin-bottom:4px; font-weight:500;">Top affected:</div>${card.topEntities.slice(0, 5).map(e => `<div style="padding:1px 0; font-family:'JetBrains Mono',monospace; font-size:11px;">${escapeHTML(e)}</div>`).join('')}${card.topEntities.length > 5 ? `<div style="color:var(--accent); font-size:10px;">+${card.topEntities.length - 5} more</div>` : ''}</div>`
+          : '';
+        return `
+        <article class="blocker-card" style="cursor:pointer;" data-filter-key="${filterKey.replace(/"/g, '&quot;')}">
+          <div class="blocker-card-title">${escapeHTML(card.title)}</div>
+          <div class="blocker-cost">${card.cost > 0 ? `${money(card.cost)}/mo blocked` : `${card.workloads} workloads constrained`}</div>
+          <div class="blocker-meta">
+            <div>${card.workloads} workloads affected</div>
+            ${card.nodes > 0 ? `<div>${card.nodes} nodes blocked</div>` : ''}
+            <div>${escapeHTML(card.summary)}</div>
+          </div>
+          ${topList}
+          <div style="margin-top:8px;">
+            <span class="confidence-badge confidence-${card.confidence}">${escapeHTML(card.confidence)}</span>
+            ${canWhatIf ? `<button class="secondary" style="font-size:11px; padding:4px 10px; margin-left:8px;" data-whatif="${idx}">What if relaxed?</button>` : ''}
+          </div>
+          ${card.action ? `<div class="blocker-action">${escapeHTML(card.action)}</div>` : ''}
+          <div id="whatif-result-${idx}" style="display:none; margin-top:8px; padding:10px; border-radius:8px; background:rgba(63,185,80,0.06); border:1px solid rgba(63,185,80,0.2); font-size:13px;"></div>
+        </article>
+      `}).join('');
+
+      document.querySelectorAll('[data-filter-key]').forEach(card => {
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('[data-whatif]')) return;
+          filterWorkloadsByBlocker(card.dataset.filterKey);
+        });
+      });
+
+      document.querySelectorAll('[data-whatif]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const idx = btn.dataset.whatif;
+          const card = cards[idx];
+          const mutation = whatIfMutations[card.title];
+          if (!mutation) return;
+          const resultEl = document.getElementById(`whatif-result-${idx}`);
+          btn.textContent = 'Running...';
+          btn.disabled = true;
+          const payload = buildPayload();
+          Object.assign(payload.Scenario, mutation);
+          try {
+            const res = await fetch('/api/solve', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+            const data = await res.json();
+            if (data.error) { resultEl.innerHTML = `<span style="color:var(--warn);">${escapeHTML(data.error)}</span>`; }
+            else {
+              const relaxedSavings = data.Optimization?.SavingsMonthly?.Monthly || 0;
+              const currentSavings = latestRenderedReport?.Optimization?.SavingsMonthly?.Monthly || 0;
+              const delta = relaxedSavings - currentSavings;
+              const relaxedNodes = data.Optimization?.ActiveNodes?.length || 0;
+              const currentNodes = latestRenderedReport?.Optimization?.ActiveNodes?.length || 0;
+              resultEl.innerHTML = `<strong style="color:var(--good);">+${money(delta)}/mo additional savings</strong> if this constraint is relaxed. Active nodes: ${relaxedNodes} (vs ${currentNodes} current). Total savings: ${money(relaxedSavings)}/mo.`;
+            }
+          } catch (err) { resultEl.innerHTML = `<span style="color:var(--warn);">Failed: ${escapeHTML(err.message)}</span>`; }
+          resultEl.style.display = '';
+          btn.textContent = 'What if relaxed?';
+          btn.disabled = false;
+        });
+      });
+    }
+
+    function renderPoolCards(report) {
+      const section = document.getElementById('pools-section');
+      const pools = report.Normalized?.PoolSummaries || report.Optimization?.ResourceSummary?.PoolSummaries || [];
+      if (!pools.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('pools-pill').textContent = `${pools.length} pool${pools.length !== 1 ? 's' : ''}`;
+
+      const emptiabilityMap = new Map((report.Explainability?.PoolEmptiability || []).map(p => [p.Pool, p]));
+
+      document.getElementById('pool-cards').innerHTML = pools.map(pool => {
+        const cpuPct = pool.TotalCPUCapacityMilli ? ((pool.AllocatedCPURequestMilli || 0) / pool.TotalCPUCapacityMilli * 100) : 0;
+        const memPct = pool.TotalMemoryCapacityBytes ? ((pool.AllocatedMemoryRequestBytes || 0) / pool.TotalMemoryCapacityBytes * 100) : 0;
+        const emp = emptiabilityMap.get(pool.Pool);
+        const empBadge = emp
+          ? (emp.Emptiable
+              ? `<span class="emptiable-badge emptiable-yes">CAN BE DRAINED</span>`
+              : `<span class="emptiable-badge emptiable-no">PINNED</span>`)
+          : '';
+        const empDetail = emp && !emp.Emptiable && emp.PinnedWorkloads?.length
+          ? `<div style="margin-top:8px; font-size:12px; color:var(--muted);">
+              <div style="color:var(--warn); margin-bottom:4px;">${emp.PinnedWorkloads.length} workload${emp.PinnedWorkloads.length !== 1 ? 's' : ''} pinned to this pool:</div>
+              ${emp.PinnedWorkloads.slice(0, 5).map(w => `<div style="font-family:'JetBrains Mono',monospace; font-size:11px;">${escapeHTML(w)}</div>`).join('')}
+              ${emp.PinnedWorkloads.length > 5 ? `<div style="color:var(--muted);">+${emp.PinnedWorkloads.length - 5} more</div>` : ''}
+              ${emp.PinReasons?.length ? `<div style="margin-top:4px; color:var(--muted);">Reasons: ${emp.PinReasons.map(r => escapeHTML(r)).join(', ')}</div>` : ''}
+            </div>`
+          : emp?.Emptiable
+            ? `<div style="margin-top:8px; font-size:12px; color:var(--good);">All workloads on this pool have feasible placement elsewhere. This pool can be safely drained to save ${money(emp.MonthlyCost?.Monthly || 0)}/mo.</div>`
+            : '';
+        return `
+          <article class="pool-card">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:8px;">
+              <div class="pool-card-title">${escapeHTML(pool.Pool || 'default')}</div>
+              ${empBadge}
+            </div>
+            <div class="pool-card-cost">${money(pool.CurrentMonthlyCost?.Monthly || 0)}/mo</div>
+            <div class="pool-bar-label"><span>CPU ${cpuPct.toFixed(0)}%</span><span>${cpuLabel(pool.AllocatedCPURequestMilli || 0)} / ${cpuLabel(pool.TotalCPUCapacityMilli || 0)}</span></div>
+            <div class="pool-bar"><div class="pool-fill cpu" style="width:${Math.min(cpuPct, 100)}%"></div></div>
+            <div class="pool-bar-label"><span>Memory ${memPct.toFixed(0)}%</span><span>${bytesLabel(pool.AllocatedMemoryRequestBytes || 0)} / ${bytesLabel(pool.TotalMemoryCapacityBytes || 0)}</span></div>
+            <div class="pool-bar"><div class="pool-fill mem" style="width:${Math.min(memPct, 100)}%"></div></div>
+            <div class="pool-meta">
+              <span>${pool.NodeCount || 0} nodes</span>
+              <span>${(pool.FragmentationPercent || 0).toFixed(1)}% fragmentation</span>
+            </div>
+            ${empDetail}
+          </article>
+        `;
+      }).join('');
+    }
+
+    function renderNodeDrainability(report) {
+      const section = document.getElementById('drainability-section');
+      const nodes = report.Explainability?.NodeDrainability || [];
+      const nonDrainable = nodes.filter(n => !n.Drainable);
+      if (!nonDrainable.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      const drainable = nodes.filter(n => n.Drainable).length;
+      document.getElementById('drainability-pill').textContent = `${drainable} drainable / ${nodes.length} active`;
+      document.getElementById('drainability-cards').innerHTML = nonDrainable.slice(0, 12).map(n => `
+        <article class="pool-card">
+          <div style="display:flex; justify-content:space-between; align-items:baseline;">
+            <div class="pool-card-title">${escapeHTML(n.Node)}</div>
+            <span class="emptiable-badge emptiable-no">PINNED</span>
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:14px; margin:4px 0;">${money(n.MonthlyCost)}/mo</div>
+          <div style="font-size:12px; color:var(--muted);">${n.Pool || 'default'} pool | ${n.WorkloadCount} workloads</div>
+          ${n.PinnedWorkloads?.length ? `
+            <div style="margin-top:8px; font-size:12px; color:var(--warn);">${n.PinnedWorkloads.length} pinned:</div>
+            ${n.PinnedWorkloads.slice(0, 3).map(w => `<div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--muted);">${escapeHTML(w)}</div>`).join('')}
+            ${n.PinnedWorkloads.length > 3 ? `<div style="font-size:11px; color:var(--muted);">+${n.PinnedWorkloads.length - 3} more</div>` : ''}
+            <div style="margin-top:4px; font-size:11px; color:var(--muted);">Reasons: ${(n.PinReasons || []).join(', ')}</div>
+          ` : ''}
+        </article>
+      `).join('');
+    }
+
+    function renderPdbImpact(report) {
+      const section = document.getElementById('pdb-section');
+      const pdbs = report.Explainability?.PdbImpacts || [];
+      if (!pdbs.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('pdb-pill').textContent = `${pdbs.length} PDB${pdbs.length !== 1 ? 's' : ''}`;
+      const anyBlocking = pdbs.some(pdb => pdb.DisruptionBudget <= 0);
+      const statusNote = anyBlocking
+        ? `<div style="padding:10px 16px; border-radius:8px; background:rgba(248,81,73,0.06); border:1px solid rgba(248,81,73,0.2); color:var(--danger); font-size:13px; margin-bottom:12px;">One or more PDBs are blocking node drain — pods cannot be evicted.</div>`
+        : `<div style="padding:10px 16px; border-radius:8px; background:rgba(63,185,80,0.06); border:1px solid rgba(63,185,80,0.15); color:var(--good); font-size:13px; margin-bottom:12px;">PDBs are not blocking any node consolidation.</div>`;
+      document.getElementById('pdb-cards').innerHTML = statusNote + pdbs.map(pdb => {
+        const critical = pdb.DisruptionBudget <= 0;
+        return `<article class="action-card" style="${critical ? 'border-color:rgba(248,81,73,0.3);' : ''}">
+          <div class="action-head">
+            <span class="action-title">${escapeHTML(pdb.Namespace)}/${escapeHTML(pdb.Name)}</span>
+            <span class="pill" style="${critical ? 'background:rgba(248,81,73,0.12); color:var(--danger,#f85149);' : ''}">${pdb.DisruptionBudget} disruptions allowed</span>
+          </div>
+          <div class="action-meta">${pdb.MinAvailable ? `minAvailable: ${pdb.MinAvailable}` : ''}${pdb.MaxUnavailable ? `maxUnavailable: ${pdb.MaxUnavailable}` : ''} | ${pdb.MatchedPods} pods | ${pdb.AffectedNodes} nodes</div>
+          <div class="action-meta">${escapeHTML(pdb.Summary)}</div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderVpaStatus(report) {
+      const section = document.getElementById('vpa-section');
+      const overview = report.Explainability?.VpaOverview || {};
+      const modes = report.Explainability?.VpaUpdateModeImpacts || [];
+      const gaps = report.Explainability?.VpaPolicyGaps || [];
+      const missing = report.Explainability?.MissingVpaOpportunities || {};
+      const hasVpas = overview.WorkloadsWithVpa > 0 || missing.OverprovisionedCount > 0;
+      if (!hasVpas) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('vpa-pill').textContent = `${overview.WorkloadsWithVpa || 0} VPAs`;
+
+      let html = '';
+
+      html += `<div class="pool-grid">
+        <article class="pool-card">
+          <div class="pool-card-title">VPA Coverage</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; margin:4px 0;">${overview.WorkloadsWithVpa || 0} / ${overview.TotalWorkloads || 0}</div>
+          <div style="font-size:12px; color:var(--muted);">workloads have VPA</div>
+          ${Object.entries(overview.UpdateModeCounts || {}).map(([mode, count]) =>
+            `<div style="font-size:12px; margin-top:4px;"><span class="pill" style="font-size:9px;">${mode}</span> ${count}</div>`
+          ).join('')}
+        </article>`;
+
+      if (overview.SafetyMarginFraction > 0) {
+        html += `<article class="pool-card">
+          <div class="pool-card-title">Safety Margin</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; margin:4px 0;">${(overview.SafetyMarginFraction * 100).toFixed(0)}%</div>
+          <div style="font-size:12px; color:var(--muted);">recommender buffer on all targets</div>
+          <div style="font-size:12px; margin-top:4px; color:var(--warn);">${money(overview.SafetyMarginCost?.Monthly || 0)}/mo in margin overhead</div>
+          ${overview.RecommenderArgs?.length ? `<div style="font-size:11px; margin-top:8px; color:var(--muted);">Args: ${overview.RecommenderArgs.join(' ')}</div>` : ''}
+        </article>`;
+      }
+
+      if (missing.OverprovisionedCount > 0) {
+        html += `<article class="pool-card" style="border-color:rgba(210,153,34,0.3);">
+          <div class="pool-card-title" style="color:var(--warn);">Missing VPA</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; margin:4px 0;">${missing.OverprovisionedCount}</div>
+          <div style="font-size:12px; color:var(--muted);">overprovisioned workloads without VPA</div>
+          <div style="font-size:12px; margin-top:4px; color:var(--warn);">${money(missing.TotalWaste?.Monthly || 0)}/mo wasted</div>
+        </article>`;
+      } else if (missing.WorkloadsWithoutVpa > 0) {
+        html += `<article class="pool-card" style="border-color:rgba(139,148,158,0.3);">
+          <div class="pool-card-title" style="color:var(--muted);">Without VPA</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; margin:4px 0;">${missing.WorkloadsWithoutVpa}</div>
+          <div style="font-size:12px; color:var(--muted);">workloads have no VPA configured</div>
+        </article>`;
+      }
+      html += '</div>';
+
+      if (modes.length) {
+        html += `<div style="margin-top:8px;"><strong style="font-size:13px;">VPAs in Off Mode</strong></div>`;
+        html += modes.map(m => `<article class="action-card" style="margin-top:6px;">
+          <div class="action-head">
+            <span class="action-title">${escapeHTML(m.VpaName)} (${escapeHTML(m.Namespace)})</span>
+            <span class="confidence-badge confidence-low">${escapeHTML(m.UpdateMode)}</span>
+            <span class="action-savings">${money(m.SavingsIfAuto?.Monthly || 0)}/mo</span>
+          </div>
+          <div class="action-meta">Target: ${escapeHTML(m.TargetWorkload)} — recommendations exist but are not applied</div>
+          <div class="action-cmd" onclick="event.stopPropagation(); navigator.clipboard.writeText(this.textContent.replace('click to copy','').trim())">${escapeHTML(m.KubectlCommand)}</div>
+        </article>`).join('');
+      }
+
+      if (gaps.length) {
+        html += `<div style="margin-top:8px;"><strong style="font-size:13px;">VPA Policy Gaps</strong></div>`;
+        html += gaps.map(g => `<article class="action-card" style="margin-top:6px; border-color:rgba(210,153,34,0.2);">
+          <div class="action-head">
+            <span class="action-title">${escapeHTML(g.VpaName)} / ${escapeHTML(g.ContainerName)}</span>
+            <span class="pill">${escapeHTML(g.Resource)} ${escapeHTML(g.BoundType)}</span>
+          </div>
+          <div class="action-meta">${escapeHTML(g.Summary)}</div>
+        </article>`).join('');
+      }
+
+      document.getElementById('vpa-content').innerHTML = html;
+    }
+
+    function renderDaemonSetTax(report) {
+      const section = document.getElementById('daemonset-section');
+      const daemonSets = report.Snapshot?.DaemonSets || report.snapshot?.daemon_sets || [];
+      const nodeCount = report.Normalized?.Nodes?.length || 0;
+      if (!daemonSets.length || !nodeCount) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('ds-pill').textContent = `${daemonSets.length} DaemonSet${daemonSets.length !== 1 ? 's' : ''}`;
+      const tbody = document.getElementById('ds-tbody');
+      tbody.innerHTML = daemonSets.map(ds => {
+        const cpuPerNode = ds.Requests?.MilliCPU || ds.requests?.milli_cpu || 0;
+        const memPerNode = ds.Requests?.MemoryBytes || ds.requests?.memory_bytes || 0;
+        return `<tr>
+          <td>${escapeHTML((ds.Namespace || ds.namespace || '') + '/' + (ds.Name || ds.name || ''))}</td>
+          <td>${cpuLabel(cpuPerNode)}</td>
+          <td>${bytesLabel(memPerNode)}</td>
+          <td>${cpuLabel(cpuPerNode * nodeCount)}</td>
+          <td>${bytesLabel(memPerNode * nodeCount)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // === ORIGINAL DETAIL RENDERERS ===
+
+    function renderSummary(report) {
+      const current = report.Normalized?.CurrentMonthlyCost?.Monthly || 0;
+      const optimized = report.Optimization?.OptimizedMonthlyCost?.Monthly || current;
+      const savings = report.Optimization?.SavingsMonthly?.Monthly || 0;
+      const nodes = report.Normalized?.Nodes?.length || 0;
+      const activeNodes = report.Optimization?.ActiveNodes?.length || 0;
+      const blockers = report.Optimization?.Blockers?.length || 0;
+      const resourceSummary = report.Optimization?.ResourceSummary || {};
+      const currentResources = resourceSummary.Current || {};
+      const optimizedResources = resourceSummary.Optimized || {};
+      const currentFragmentation = resourceSummary.CurrentFragmentationPercent ?? computeCurrentFragmentation(report);
+      const optimizedFragmentation = resourceSummary.OptimizedFragmentationPercent ?? 0;
+
+      summaryEl.innerHTML = [
+        metric('Current Cost', money(current), `${nodes} nodes`),
+        metric('Optimized Cost', money(optimized), `${activeNodes} active`),
+        metric('Savings', money(savings), savings > 0 ? 'Monthly reduction' : 'No savings'),
+        metric('Moves', `${report.Optimization?.RecommendedMoves?.length || 0}`, 'Pod reschedules'),
+        metric('Blockers', `${blockers}`, 'Hard blockers'),
+        metric('Frag Delta', `${(currentFragmentation - optimizedFragmentation).toFixed(1)} pts`, `${currentFragmentation.toFixed(1)}% → ${optimizedFragmentation.toFixed(1)}%`)
+      ].join('');
+
+      resourceChartsEl.innerHTML = `
+        <div class="resource-section">
+          <div class="resource-row-title">Current</div>
+          <div class="resource-row">
+            ${donutCard('CPU', currentResources.AllocatedCPURequestMilli || 0, currentResources.TotalCPUCapacityMilli || 0, cpuLabel(currentResources.AllocatedCPURequestMilli || 0), `${cpuLabel(currentResources.UnallocatedCPURequestMilli || 0)} free`)}
+            ${donutCard('Memory', currentResources.AllocatedMemoryRequestBytes || 0, currentResources.TotalMemoryCapacityBytes || 0, bytesLabel(currentResources.AllocatedMemoryRequestBytes || 0), `${bytesLabel(currentResources.UnallocatedMemoryRequestBytes || 0)} free`)}
+            ${donutCard('Fragmentation', currentFragmentation, 100, `${currentFragmentation.toFixed(1)}%`, 'CPU/memory imbalance')}
+          </div>
+        </div>
+        <div class="resource-section">
+          <div class="resource-row-title">Optimized</div>
+          <div class="resource-row">
+            ${donutCard('CPU', optimizedResources.AllocatedCPURequestMilli || 0, optimizedResources.TotalCPUCapacityMilli || 0, cpuLabel(optimizedResources.AllocatedCPURequestMilli || 0), `${cpuLabel(optimizedResources.UnallocatedCPURequestMilli || 0)} free`)}
+            ${donutCard('Memory', optimizedResources.AllocatedMemoryRequestBytes || 0, optimizedResources.TotalMemoryCapacityBytes || 0, bytesLabel(optimizedResources.AllocatedMemoryRequestBytes || 0), `${bytesLabel(optimizedResources.UnallocatedMemoryRequestBytes || 0)} free`)}
+            ${donutCard('Fragmentation', optimizedFragmentation, 100, `${optimizedFragmentation.toFixed(1)}%`, 'After optimization')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderNodes(report) {
+      const nodes = report.Normalized?.Nodes || [];
+      const requestByNode = currentRequestedByNode(report);
+      const optimizedByNode = optimizedWorkloadByNode(report);
+      const active = new Set(report.Optimization?.ActiveNodes || []);
+      const removable = nodes.filter(n => !active.has(n.Name)).map(n => n.Name);
+      const modeLabel = nodeMetricModeLabel();
+      nodeRemovalPill.textContent = removable.length ? `${modeLabel} | Removable: ${removable.join(', ')}` : `${modeLabel} | Compact`;
+      const currentSample = sampleCurrentNodes(nodes, requestByNode);
+      const optimizedSample = sampleOptimizedNodes(nodes, optimizedByNode, active);
+
+      nodesEl.innerHTML = `
+        ${renderMemoryRisk(report)}
+        <div class="binpack-compare">
+          <section class="binpack-column">
+            <div class="bin-card-head"><div><div class="bin-card-title">Current</div><div class="bin-card-sub">Top 10 by request-vs-usage gap</div></div><span class="pill">${escapeHTML(modeLabel)}</span></div>
+            <div class="binpack-grid">${currentSample.map(node => renderBinCard(node, requestByNode.get(node.Name) || { cpu: 0, mem: 0 }, 'current')).join('')}</div>
+          </section>
+          <section class="binpack-column">
+            <div class="bin-card-head"><div><div class="bin-card-title">Optimized</div><div class="bin-card-sub">Top 10 densest active nodes</div></div><span class="pill">${escapeHTML(modeLabel)}</span></div>
+            <div class="binpack-grid">${optimizedSample.map(node => renderBinCard(node, optimizedByNode.get(node.Name) || { cpuRequests: 0, memRequests: 0, cpuUsage: 0, memUsage: 0, pods: 0 }, 'optimized')).join('')}</div>
+          </section>
+        </div>
+      `;
+    }
+
+    function renderMemoryRisk(report) {
+      const summary = report.Explainability?.MemoryRisk || {};
+      const current = summary.Current || {};
+      const optimized = summary.Optimized || {};
+      if (!current.Risk && !optimized.Risk) return '';
+      const model = summary.Model || 'observed_peak_proxy';
+      return `<section class="impact" style="margin-bottom:16px; border-color:#c6d3da;">
+        <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+          <strong>Memory Risk</strong>
+          <span class="pill">${escapeHTML(model === 'historical_coincidence' ? 'Historical' : 'Peak Proxy')}</span>
+        </div>
+        <div class="scenario-summary-grid" style="margin-top:12px;">
+          ${renderMemoryRiskCard('Current', current)}
+          ${renderMemoryRiskCard('Optimized', optimized)}
+        </div>
+      </section>`;
+    }
+
+    function renderMemoryRiskCard(label, risk) {
+      return `<article class="impact">
+        <div style="display:flex; justify-content:space-between; gap:12px;"><strong>${escapeHTML(label)}</strong><span class="pill">${escapeHTML((risk.Risk || 'unknown').toUpperCase())}</span></div>
+        <div style="margin-top:6px;">Peak pressure: ${percentFixed(risk.MaxPressurePercent || 0)}</div>
+        <div>Overflow prob: ${percentFixed(risk.OverflowProbabilityPercent || 0)}</div>
+        <div style="margin-top:6px; color:#5b645f;">${escapeHTML(risk.Summary || '')}</div>
+      </article>`;
+    }
+
+    function renderMoves(report) {
+      const moves = report.Optimization?.RecommendedMoves || [];
+      moveCountPill.textContent = `${moves.length} moves`;
+      movesEl.innerHTML = moves.length ? moves.map(move => `<article class="move"><strong>${escapeHTML(move.Namespace)}/${escapeHTML(move.Pod)}</strong><div>${escapeHTML(move.FromNode)} → ${escapeHTML(move.ToNode)}</div><div style="margin-top:6px; color:#5b645f;">${escapeHTML(move.Reason)}</div></article>`).join('') : '<p>No moves recommended.</p>';
+    }
+
+    function renderRequestRecommendations(report) {
+      const workloads = report.Normalized?.Workloads || [];
+      const recs = workloads.map(buildRequestRecommendation).filter(Boolean).sort((a, b) => b.memoryBytesSaved !== a.memoryBytesSaved ? b.memoryBytesSaved - a.memoryBytesSaved : b.cpuMilliSaved - a.cpuMilliSaved);
+      if (!recs.length) { requestRecommendationsEl.innerHTML = '<p>Enable usage-adjusted requests for workload-level deltas.</p>'; return; }
+      requestRecommendationsEl.innerHTML = recs.slice(0, 50).map(row => `<article class="request-card"><div class="request-card-head"><div class="request-card-title">${escapeHTML(row.namespace)}/${escapeHTML(row.name)}</div><span class="pill">${escapeHTML(row.ownerKind || 'workload')}</span></div><div class="request-card-meta"><div>CPU: ${cpuLabel(row.current.MilliCPU || 0)} → ${cpuLabel(row.recommended.MilliCPU || 0)}</div><div>Mem: ${bytesLabel(row.current.MemoryBytes || 0)} → ${bytesLabel(row.recommended.MemoryBytes || 0)}</div></div></article>`).join('');
+    }
+
+    function buildRequestRecommendation(workload) {
+      const current = workload.CurrentRequests || workload.Requests || {};
+      const recommended = workload.RecommendedRequests || workload.Requests || {};
+      const usage = workload.Usage || {};
+      const cpuMilliSaved = (current.MilliCPU || 0) - (recommended.MilliCPU || 0);
+      const memoryBytesSaved = (current.MemoryBytes || 0) - (recommended.MemoryBytes || 0);
+      if (cpuMilliSaved <= 0 && memoryBytesSaved <= 0) return null;
+      return { namespace: workload.Namespace || '', name: workload.Name || '', ownerKind: workload.OwnerKind || '', ownerName: workload.OwnerName || '', currentNode: workload.CurrentNode || '', current, recommended, usage, cpuMilliSaved, memoryBytesSaved };
+    }
+
+    function renderVerification(report) {
+      const v = report.Optimization?.Verification || {};
+      verificationPill.textContent = `${v.Confidence || 'unknown'} confidence`;
+      verificationEl.innerHTML = [
+        `<div class="impact-item"><strong>Backend</strong> ${v.Backend || 'n/a'}</div>`,
+        `<div class="impact-item"><strong>Status</strong> ${v.Status || 'n/a'}</div>`,
+        `<div class="impact-item"><strong>Verified</strong> ${v.VerifiedMoves || 0} | <strong>Rejected</strong> ${v.RejectedMoves || 0}</div>`,
+      ].join('');
+    }
+
+    function renderInflationDrivers(report) {
+      const drivers = report.Explainability?.InflationDrivers || [];
+      if (!drivers.length) { inflationDriversEl.innerHTML = '<p>No inflation drivers detected.</p>'; return; }
+      inflationDriversEl.innerHTML = drivers.map(d => `<article class="impact">
+        <div style="display:flex; justify-content:space-between; gap:12px;"><strong>${escapeHTML(d.DisplayName || d.displayName || d.Key || 'driver')}</strong><span class="pill">${escapeHTML(d.Confidence || d.confidence || 'unknown')}</span></div>
+        <div style="margin-top:6px;">Blocked: ${money(d.BlockedMonthlyCost?.Monthly || d.blockedMonthlyCost?.Monthly || 0)} | ${d.AffectedWorkloadCount || d.affectedWorkloadCount || 0} workloads</div>
+        <div style="margin-top:6px; color:#5b645f;">${escapeHTML(d.Summary || d.summary || '')}</div>
+        ${(d.RecommendedAction || d.recommendedAction) ? `<div style="margin-top:6px;"><strong>Action:</strong> ${escapeHTML(d.RecommendedAction || d.recommendedAction)}</div>` : ''}
+      </article>`).join('');
+    }
+
+    function renderImpacts(report) {
+      const impacts = report.Normalized?.ConstraintImpacts || [];
+      impactsEl.innerHTML = impacts.length ? impacts.map(i => `<article class="impact"><strong>${escapeHTML(i.name)}</strong><div style="margin-top:6px;">${i.workloadsAffected} workloads | ${i.reasonCount} hits | ${money(i.estimatedMonthly)} blocked</div></article>`).join('') : '<p>No constraint data.</p>';
+    }
+
+    function renderAutoscalerGap(report) {
+      const blockers = report.Optimization?.ResourceSummary?.AutoscalerBlockers || [];
+      if (!blockers.length) return;
+      const cards = blockers.map(b => `<article class="impact" style="border-color:#c77442;"><strong>Autoscaler Blocked</strong><div style="margin-top:6px;">${money(b.BlockedMonthlyCost?.Monthly || 0)}/mo stuck behind ${escapeHTML(b.Kind || 'blocker')}</div><div>${b.BlockedNodeCount || 0} removable nodes blocked, ${b.BlockedWorkloadCount || 0} workloads</div></article>`).join('');
+      impactsEl.innerHTML = cards + impactsEl.innerHTML;
+    }
+
+    function renderPoolSummaries(report) {
+      const pools = report.Normalized?.PoolSummaries || [];
+      if (!pools.length) return;
+      const poolImpacts = new Map(((scenarioSummaryState?.poolImpacts) || []).map(i => [i.pool, i]));
+      const cards = pools.map(pool => {
+        const impact = poolImpacts.get(pool.Pool);
+        return `<article class="impact"><strong>Pool: ${escapeHTML(pool.Pool || 'unassigned')}</strong><div style="margin-top:6px;">${pool.NodeCount || 0} nodes | ${money(pool.CurrentMonthlyCost?.Monthly || 0)} | ${(pool.FragmentationPercent || 0).toFixed(1)}% frag</div>${impact ? `<div>What-if delta: ${money(impact.deltaVsStrictSavings || 0)}</div>` : ''}</article>`;
+      }).join('');
+      impactsEl.innerHTML = cards + impactsEl.innerHTML;
+    }
+
+    function renderBlockers(report) {
+      const blockers = report.Optimization?.Blockers || [];
+      blockersEl.innerHTML = blockers.length ? blockers.map(b => `<article class="blocker"><strong>${escapeHTML(b.Scope || 'diagnostic')}</strong><div style="margin-top:6px;">${escapeHTML(b.Message || '')}</div></article>`).join('') : '<p>No diagnostics. Solve was feasible.</p>';
+    }
+
+    // === UTILITIES ===
+
+    function metric(label, value, sub) { return `<div class="metric"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`; }
+
+    function donutCard(title, value, total, label, sub) {
+      const pct = percent(value, total);
+      const deg = Math.max(0, Math.min(360, (pct / 100) * 360));
+      return `<div class="chart-card"><div class="chart-title">${escapeHTML(title)}</div><div class="donut" style="background: conic-gradient(var(--accent) 0deg, var(--accent) ${deg}deg, rgba(48,54,61,0.5) ${deg}deg, rgba(48,54,61,0.5) 360deg);"><div class="donut-label">${escapeHTML(label)}</div></div><div class="chart-sub">${escapeHTML(sub)}</div></div>`;
+    }
+
+    function setNodeViewMode(mode) { currentNodeViewMode = mode; updateNodeViewButtons(); if (latestRenderedReport) renderNodes(latestRenderedReport); }
+
+    function updateNodeViewButtons() {
+      [[nodeViewCpuRequestsBtn, 'cpu-requests'], [nodeViewCpuUsageBtn, 'cpu-usage'], [nodeViewMemoryRequestsBtn, 'memory-requests'], [nodeViewMemoryUsageBtn, 'memory-usage']].forEach(([btn, mode]) => btn.classList.toggle('secondary', currentNodeViewMode !== mode));
+    }
+
+    function currentRequestedByNode(report) {
+      const usageByNode = new Map();
+      for (const w of (report.Normalized?.Workloads || [])) {
+        if (!w.CurrentNode) continue;
+        const e = usageByNode.get(w.CurrentNode) || { cpu: 0, mem: 0 };
+        const r = w.CurrentRequests || w.Requests || {};
+        e.cpu += r.MilliCPU || 0;
+        e.mem += r.MemoryBytes || 0;
+        usageByNode.set(w.CurrentNode, e);
+      }
+      return usageByNode;
+    }
+
+    function optimizedWorkloadByNode(report) {
+      const moves = report.Optimization?.RecommendedMoves || [];
+      const moveTarget = new Map(moves.map(m => [`${m.Namespace || ''}/${m.Pod || ''}`, m.ToNode || '']));
+      const byNode = new Map();
+      for (const w of (report.Normalized?.Workloads || [])) {
+        const target = moveTarget.get(`${w.Namespace || ''}/${w.Name || ''}`) || w.CurrentNode || '';
+        if (!target) continue;
+        const e = byNode.get(target) || { cpuRequests: 0, memRequests: 0, cpuUsage: 0, memUsage: 0, pods: 0 };
+        const r = w.Requests || {};
+        const u = w.Usage || {};
+        e.cpuRequests += r.MilliCPU || 0;
+        e.memRequests += r.MemoryBytes || 0;
+        e.cpuUsage += u.CPUUsageMilli || 0;
+        e.memUsage += u.MemoryBytes || 0;
+        e.pods += 1;
+        byNode.set(target, e);
+      }
+      return byNode;
+    }
+
+    function nodeMetricModeLabel() {
+      switch (currentNodeViewMode) {
+        case 'cpu-requests': return 'CPU Requests';
+        case 'cpu-usage': return 'CPU Usage';
+        case 'memory-usage': return 'Memory Usage';
+        default: return 'Memory Requests';
+      }
+    }
+
+    function sampleCurrentNodes(nodes, requestByNode) {
+      return nodes.map(node => {
+        const req = requestByNode.get(node.Name) || { cpu: 0, mem: 0 };
+        const score = currentNodeViewMode.startsWith('cpu') ? Math.max(0, req.cpu - (node.Usage?.CPUUsageMilli || 0)) : Math.max(0, req.mem - (node.Usage?.MemoryBytes || 0));
+        return { node, score };
+      }).sort((a, b) => b.score - a.score).slice(0, 10).map(i => i.node);
+    }
+
+    function sampleOptimizedNodes(nodes, optimizedByNode, active) {
+      return nodes.filter(n => !active.size || active.has(n.Name)).map(node => {
+        const o = optimizedByNode.get(node.Name) || { cpuRequests: 0, memRequests: 0, cpuUsage: 0, memUsage: 0 };
+        return { node, score: selectedNodeMetricPercent(node, o) };
+      }).sort((a, b) => b.score - a.score).slice(0, 10).map(i => i.node);
+    }
+
+    function renderBinCard(node, aggregate, mode) {
+      const cpuCap = node.EffectiveCapacity?.MilliCPU || 0;
+      const memCap = node.EffectiveCapacity?.MemoryBytes || 0;
+      const podsCap = node.EffectiveCapacity?.Pods || 0;
+      const source = mode === 'optimized' ? aggregate : { cpuRequests: aggregate.cpu || 0, memRequests: aggregate.mem || 0, cpuUsage: node.Usage?.CPUUsageMilli || 0, memUsage: node.Usage?.MemoryBytes || 0 };
+      const cpuUsed = currentNodeViewMode === 'cpu-usage' ? (source.cpuUsage || 0) : (source.cpuRequests || 0);
+      const memUsed = currentNodeViewMode === 'memory-usage' ? (source.memUsage || 0) : (source.memRequests || 0);
+      const podsUsed = mode === 'optimized' ? (aggregate.pods || 0) : (node.CurrentPods || 0);
+      const pct = selectedNodeMetricPercent(node, source);
+      const cappedPct = Math.min(pct, 100);
+      const cls = currentNodeViewMode.startsWith('cpu') ? 'cpu' : 'mem';
+      return `<article class="bin-card">
+        <div class="bin-card-head"><div class="bin-card-title">${escapeHTML(node.Name)}</div><div class="bin-card-sub">${money(node.Price?.Monthly || 0)}</div></div>
+        <div class="bin-shell"><div class="bin-fill ${cls}" style="height:${cappedPct}%;"></div><div class="bin-metric"><div><strong>${pct.toFixed(1)}%</strong></div><div>${mode}</div></div></div>
+        <div class="bin-meta">
+          <div>${escapeHTML(node.InstanceType || node.Pool || 'unknown')}</div>
+          <div>CPU: ${cpuLabel(cpuUsed)} / ${cpuLabel(cpuCap)}</div>
+          <div>Mem: ${bytesLabel(memUsed)} / ${bytesLabel(memCap)}</div>
+          <div>Pods: ${podsUsed} / ${podsCap || 0}</div>
+        </div>
+      </article>`;
+    }
+
+    function selectedNodeMetricPercent(node, agg) {
+      if (currentNodeViewMode.startsWith('cpu')) return percent(currentNodeViewMode === 'cpu-usage' ? (agg.cpuUsage || 0) : (agg.cpuRequests || 0), node.EffectiveCapacity?.MilliCPU || 0);
+      return percent(currentNodeViewMode === 'memory-usage' ? (agg.memUsage || 0) : (agg.memRequests || 0), node.EffectiveCapacity?.MemoryBytes || 0);
+    }
+
+    function percent(value, total) { return total ? (value / total) * 100 : 0; }
+    function percentFixed(v) { return `${Number(v || 0).toFixed(1)}%`; }
+
+    function computeCurrentFragmentation(report) {
+      const nodes = report.Normalized?.Nodes || [];
+      const workloads = report.Normalized?.Workloads || [];
+      const usageByNode = new Map();
+      for (const w of workloads) { if (!w.CurrentNode) continue; const e = usageByNode.get(w.CurrentNode) || { cpu: 0, mem: 0 }; e.cpu += w.Requests?.MilliCPU || 0; e.mem += w.Requests?.MemoryBytes || 0; usageByNode.set(w.CurrentNode, e); }
+      let weighted = 0, totalWeight = 0;
+      for (const n of nodes) { const cap = n.EffectiveCapacity || {}; const cc = Math.max(0, cap.MilliCPU || 0); const mc = Math.max(0, cap.MemoryBytes || 0); if (!cc || !mc) continue; const u = usageByNode.get(n.Name) || { cpu: 0, mem: 0 }; const imbalance = Math.abs(Math.max(0, cc - u.cpu) / cc - Math.max(0, mc - u.mem) / mc); const w = cc + mc; weighted += imbalance * w; totalWeight += w; }
+      return totalWeight ? (weighted / totalWeight) * 100 : 0;
+    }
+
+    function cleanOwner(kind, name) { if (!name) return ''; if (kind === 'ReplicaSet') name = name.replace(/-[a-f0-9]{7,10}$/, ''); return name; }
+    function money(v) { return new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits:0}).format(v || 0); }
+    function cpuLabel(v) { return `${(v / 1000).toFixed(1)} cores`; }
+    function bytesLabel(v) { const gib = 1024*1024*1024; const mib = 1024*1024; return (v || 0) >= gib ? `${(v / gib).toFixed(1)} GiB` : `${(v / mib).toFixed(1)} MiB`; }
+    function escapeHTML(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    // --- AI CHAT SIDEBAR ---
+    (function initAiChat() {
+      const sidebar = document.getElementById('ai-sidebar');
+      const overlay = document.getElementById('ai-sidebar-overlay');
+      const toggleBtn = document.getElementById('ai-toggle-btn');
+      const closeBtn = document.getElementById('ai-sidebar-close');
+      const providerEl = document.getElementById('ai-provider');
+      const keyEl = document.getElementById('ai-api-key');
+      const saveBtn = document.getElementById('ai-save-key');
+      const chatLog = document.getElementById('ai-chat-log');
+      const inputEl = document.getElementById('ai-input');
+      const sendBtn = document.getElementById('ai-send');
+      const emptyState = document.getElementById('ai-empty-state');
+      let chatMessages = [];
+      let streaming = false;
+
+      function openSidebar() { sidebar.classList.add('open'); overlay.classList.add('open'); inputEl.focus(); }
+      function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.remove('open'); }
+      toggleBtn.addEventListener('click', () => sidebar.classList.contains('open') ? closeSidebar() : openSidebar());
+      closeBtn.addEventListener('click', closeSidebar);
+      overlay.addEventListener('click', closeSidebar);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sidebar.classList.contains('open')) closeSidebar(); });
+
+      const savedProvider = localStorage.getItem('ksolver_ai_provider');
+      const savedKey = localStorage.getItem('ksolver_ai_key');
+      if (savedProvider) providerEl.value = savedProvider;
+      if (savedKey) {
+        keyEl.value = savedKey;
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+      }
+
+      saveBtn.addEventListener('click', () => {
+        const key = keyEl.value.trim();
+        if (!key) return;
+        localStorage.setItem('ksolver_ai_provider', providerEl.value);
+        localStorage.setItem('ksolver_ai_key', key);
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        saveBtn.textContent = 'Saved';
+        setTimeout(() => { saveBtn.textContent = 'Save'; }, 1500);
+      });
+
+      providerEl.addEventListener('change', () => {
+        localStorage.setItem('ksolver_ai_provider', providerEl.value);
+      });
+
+      function appendMsg(role, content, cls) {
+        if (emptyState) emptyState.style.display = 'none';
+        const div = document.createElement('div');
+        div.className = `ai-msg ${cls || role}`;
+        if (role === 'assistant') {
+          div.innerHTML = renderMarkdown(content);
+        } else {
+          div.textContent = content;
+        }
+        chatLog.appendChild(div);
+        chatLog.scrollTop = chatLog.scrollHeight;
+        return div;
+      }
+
+      function renderMarkdown(text) {
+        let html = escapeHTML(text);
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\n/g, '<br>');
+        return html;
+      }
+
+      async function sendMessage() {
+        const msg = inputEl.value.trim();
+        const key = keyEl.value.trim() || localStorage.getItem('ksolver_ai_key');
+        if (!msg || !key || streaming) return;
+
+        streaming = true;
+        sendBtn.disabled = true;
+        inputEl.value = '';
+
+        chatMessages.push({ role: 'user', content: msg });
+        appendMsg('user', msg);
+
+        const thinkingDiv = appendMsg('assistant', 'Thinking...', 'thinking');
+
+        try {
+          const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              provider: providerEl.value,
+              api_key: key,
+              messages: chatMessages,
+            }),
+          });
+
+          if (!res.ok) {
+            const errBody = await res.json().catch(() => ({ error: res.statusText }));
+            thinkingDiv.remove();
+            appendMsg('error', `Error: ${errBody.error || res.statusText}`, 'error');
+            chatMessages.pop();
+            streaming = false;
+            sendBtn.disabled = false;
+            return;
+          }
+
+          thinkingDiv.remove();
+          const assistantDiv = appendMsg('assistant', '', 'assistant');
+          let fullText = '';
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const data = line.slice(6);
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.done) break;
+                if (parsed.text) {
+                  fullText += parsed.text;
+                  assistantDiv.innerHTML = renderMarkdown(fullText);
+                  chatLog.scrollTop = chatLog.scrollHeight;
+                }
+              } catch {}
+            }
+          }
+
+          chatMessages.push({ role: 'assistant', content: fullText });
+        } catch (err) {
+          thinkingDiv.remove();
+          appendMsg('error', `Network error: ${err.message}`, 'error');
+          chatMessages.pop();
+        }
+
+        streaming = false;
+        sendBtn.disabled = false;
+        inputEl.focus();
+      }
+
+      sendBtn.addEventListener('click', sendMessage);
+      inputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+    })();
+
+    initializeTooltips();
+    loadDefaults();
+  </script>
+</body>
+</html>

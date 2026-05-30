@@ -1,0 +1,394 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+# ── TEAM: PLATFORM ──────────────────────────────────────────
+# Ingress controller: high CPU, low memory (lopsided)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-nginx
+  namespace: demo
+  labels:
+    team: platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app: ingress-nginx
+        team: platform
+    spec:
+      containers:
+        - name: nginx
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "128Mi"
+            limits:
+              cpu: "2"
+              memory: "256Mi"
+---
+# Cert-manager: tiny footprint
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager
+  namespace: demo
+  labels:
+    team: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cert-manager
+  template:
+    metadata:
+      labels:
+        app: cert-manager
+        team: platform
+    spec:
+      containers:
+        - name: cm
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+---
+# ── TEAM: BACKEND ───────────────────────────────────────────
+# API server: balanced requests, 3 replicas with anti-affinity
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: demo
+  labels:
+    team: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+        team: backend
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: api-server
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: api
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "384Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+# Worker: memory-heavy, wildly overprovisioned
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  namespace: demo
+  labels:
+    team: backend
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+        team: backend
+    spec:
+      containers:
+        - name: worker
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "1Gi"
+            limits:
+              cpu: "200m"
+              memory: "2Gi"
+---
+# Redis cache: pinned to worker node via nodeSelector
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: demo
+  labels:
+    team: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        team: backend
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: solver-lab-worker
+      containers:
+        - name: redis
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+---
+# ── TEAM: ML ────────────────────────────────────────────────
+# ML training job: tolerates gpu taint, pinned to worker2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-trainer
+  namespace: demo
+  labels:
+    team: ml
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-trainer
+  template:
+    metadata:
+      labels:
+        app: ml-trainer
+        team: ml
+    spec:
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+      nodeSelector:
+        workload-type: gpu
+      containers:
+        - name: trainer
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+---
+# ML inference: tolerates gpu taint but NOT pinned (prefers gpu nodes)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-inference
+  namespace: demo
+  labels:
+    team: ml
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ml-inference
+  template:
+    metadata:
+      labels:
+        app: ml-inference
+        team: ml
+    spec:
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 80
+              preference:
+                matchExpressions:
+                  - key: workload-type
+                    operator: In
+                    values:
+                      - gpu
+      containers:
+        - name: inference
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "768Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+# ── TEAM: DATA ──────────────────────────────────────────────
+# Kafka consumer: many replicas, small requests
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+  namespace: demo
+  labels:
+    team: data
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+        team: data
+    spec:
+      containers:
+        - name: consumer
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "200m"
+              memory: "512Mi"
+---
+# Spark driver: big memory, low CPU (extremely lopsided)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-driver
+  namespace: demo
+  labels:
+    team: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-driver
+  template:
+    metadata:
+      labels:
+        app: spark-driver
+        team: data
+    spec:
+      containers:
+        - name: spark
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "3Gi"
+            limits:
+              cpu: "500m"
+              memory: "4Gi"
+---
+# ── DAEMONSETS ──────────────────────────────────────────────
+# Heavy monitoring agent
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: datadog-agent
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app: datadog-agent
+  template:
+    metadata:
+      labels:
+        app: datadog-agent
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "384Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+# Log shipper
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentbit
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app: fluentbit
+  template:
+    metadata:
+      labels:
+        app: fluentbit
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: fb
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+# ── CRONJOBS (as Deployments with 0-1 replicas) ────────────
+# Batch report generator: huge request, runs rarely
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-generator
+  namespace: demo
+  labels:
+    team: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: report-generator
+  template:
+    metadata:
+      labels:
+        app: report-generator
+        team: backend
+    spec:
+      containers:
+        - name: report
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "2"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "4Gi"

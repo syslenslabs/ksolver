@@ -1,0 +1,37 @@
+[package]
+name = "ksolver"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[features]
+default = []
+rust-cp-sat = ["dep:cp_sat"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ksolver"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = { version = "0.7", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+cp_sat = { git = "https://github.com/bmjask/cp_sat.git", branch = "support-ortools-9-15", optional = true }
+csv = "1.3"
+dirs = "6"
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
+kube = { version = "0.97", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
+k8s-openapi = { version = "0.23", default-features = false, features = ["v1_31"] }
+lazy_static = "1.5"
+prometheus = { version = "0.14", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

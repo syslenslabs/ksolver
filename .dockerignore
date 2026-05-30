@@ -1,0 +1,8 @@
+.git
+.gitignore
+.claude
+.ksolver
+target
+docs
+*.md
+vendor/.github
