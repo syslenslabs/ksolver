@@ -29,6 +29,7 @@
       --glow-green: 0 0 20px rgba(63,185,80,0.15);
       --glow-blue: 0 0 20px rgba(88,166,255,0.1);
     }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -379,6 +380,7 @@
         <button type="button" class="secondary" id="run-important-scenarios">Run All Scenarios</button>
         <button type="button" class="secondary" id="copy-summary-btn" style="font-size:12px; padding:8px 14px;">Copy Summary</button>
         <button type="button" class="secondary" id="ai-toggle-btn" style="font-size:12px; padding:8px 14px; border-color:rgba(188,140,255,0.3); color:var(--purple);">AI Assistant</button>
+        <span id="solve-indicator" style="display:none; align-items:center; gap:6px; font-size:12px; color:var(--accent); font-weight:500;"><span style="width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 1.2s ease-in-out infinite;"></span>Solving...</span>
         <span id="status" class="solver-status"></span>
       </div>
     </div>
@@ -1029,6 +1031,7 @@
       setProgress({percent: 0, message: 'Idle', elapsedMs: 0});
       await loadSnapshots();
       await loadLatestRun();
+      await reconnectActiveJob();
     }
 
     async function loadSnapshots() {
@@ -1342,6 +1345,13 @@
       const startRes = await fetch('/api/solve/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
       if (!startRes.ok) { statusEl.textContent = await startRes.text(); statusEl.classList.add('warning'); return; }
       const { jobId } = await startRes.json();
+      connectToJob(jobId, payload.ScenarioName || '');
+    }
+
+    function connectToJob(jobId, scenarioName) {
+      sessionStorage.setItem('activeJobId', jobId);
+      setSolveIndicator(true);
+      if (eventSource) eventSource.close();
       eventSource = new EventSource(`/api/jobs/${jobId}/events`);
       eventSource.onmessage = async (msg) => {
         const update = JSON.parse(msg.data);
@@ -1349,14 +1359,16 @@
         if (update.error) { statusEl.textContent = update.error; statusEl.className = 'solver-status warning'; }
         if (update.done) {
           eventSource.close();
+          sessionStorage.removeItem('activeJobId');
+          setSolveIndicator(false);
           const statusRes = await fetch(`/api/jobs/${jobId}/status`);
           const status = await statusRes.json();
           if (status.report) {
             render(status.report);
-            activeScenarioName = payload.ScenarioName || '';
+            activeScenarioName = scenarioName;
             await loadScenarioRuns();
             await loadScenarioSummary();
-      await loadHistory();
+            await loadHistory();
             const solver = status.report.Optimization?.Solver || {};
             statusEl.textContent = `${solver.Name || 'solver'}: ${solver.Status === 'ok' ? 'optimal' : (solver.Status || 'ok')}`;
             statusEl.className = `solver-status ${solver.Status === 'ok' ? 'good' : 'warning'}`;
@@ -1366,24 +1378,50 @@
       eventSource.onerror = async () => {
         try {
           const statusRes = await fetch(`/api/jobs/${jobId}/status`);
-          if (!statusRes.ok) return;
+          if (!statusRes.ok) { sessionStorage.removeItem('activeJobId'); setSolveIndicator(false); return; }
           const status = await statusRes.json();
           if (status.progress) setProgress(status.progress);
           if (status.done) {
             eventSource.close();
+            sessionStorage.removeItem('activeJobId');
+            setSolveIndicator(false);
             if (status.report) {
               render(status.report);
-              activeScenarioName = payload.ScenarioName || '';
+              activeScenarioName = scenarioName;
               await loadScenarioRuns();
               await loadScenarioSummary();
-      await loadHistory();
+              await loadHistory();
               const solver = status.report.Optimization?.Solver || {};
               statusEl.textContent = `${solver.Name || 'solver'}: ${solver.Status || 'ok'}`;
               statusEl.className = `solver-status ${solver.Status === 'ok' ? 'good' : 'warning'}`;
             } else if (status.error) { statusEl.textContent = status.error; statusEl.className = 'solver-status warning'; }
           }
-        } catch (_) {}
+        } catch (_) { sessionStorage.removeItem('activeJobId'); setSolveIndicator(false); }
       };
+    }
+
+    function setSolveIndicator(active) {
+      const el = document.getElementById('solve-indicator');
+      if (el) el.style.display = active ? 'flex' : 'none';
+    }
+
+    async function reconnectActiveJob() {
+      const jobId = sessionStorage.getItem('activeJobId');
+      if (!jobId) return;
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/status`);
+        if (!res.ok) { sessionStorage.removeItem('activeJobId'); return; }
+        const status = await res.json();
+        if (status.done) {
+          sessionStorage.removeItem('activeJobId');
+          if (status.report) render(status.report);
+          return;
+        }
+        statusEl.textContent = 'Reconnected to active solve...';
+        statusEl.className = 'solver-status';
+        if (status.progress) setProgress(status.progress);
+        connectToJob(jobId, '');
+      } catch (_) { sessionStorage.removeItem('activeJobId'); }
     }
 
     async function runImportantScenarios() {
@@ -1941,8 +1979,9 @@
           const opt = optimizedByNode.get(node.Name);
           const cur = currentByNode.get(node.Name) || { cpu: 0, mem: 0 };
           const hasWork = opt && (opt.cpuRequests > 0 || opt.memRequests > 0);
-          const optCpuPct = hasWork ? (opt.cpuRequests / (cap.MilliCPU || 1)) : 0;
-          const optMemPct = hasWork ? (opt.memRequests / (cap.MemoryBytes || 1)) : 0;
+          const nodeCap = node.EffectiveCapacity || {};
+          const optCpuPct = hasWork ? (opt.cpuRequests / (nodeCap.MilliCPU || 1)) : 0;
+          const optMemPct = hasWork ? (opt.memRequests / (nodeCap.MemoryBytes || 1)) : 0;
           const substantialWork = Math.max(optCpuPct, optMemPct) > 0.05;
           const cpuUsed = isActive && substantialWork ? opt.cpuRequests : cur.cpu;
           const memUsed = isActive && substantialWork ? opt.memRequests : cur.mem;

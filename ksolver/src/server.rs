@@ -53,6 +53,7 @@ pub fn app(options: ServerOptions) -> Router {
         .route("/api/solve", post(solve))
         .route("/api/analyze", post(solve))
         .route("/api/solve/start", post(start_solve))
+        .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/:id/status", get(job_status))
         .route("/api/jobs/:id/events", get(job_events))
         .route("/api/chat", post(chat))
@@ -319,6 +320,22 @@ async fn start_solve(
     (StatusCode::ACCEPTED, Json(json!({"jobId": id})))
 }
 
+async fn list_jobs(State(state): State<AppState>) -> Json<Value> {
+    let jobs = state.jobs.list().await;
+    let list: Vec<Value> = jobs
+        .iter()
+        .map(|j| {
+            json!({
+                "id": j.id,
+                "progress": j.progress,
+                "done": j.done,
+                "error": j.error,
+            })
+        })
+        .collect();
+    Json(json!(list))
+}
+
 async fn job_status(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     debug!(job_id = %id, path = "/api/jobs/:id/status", "job status requested");
     match state.jobs.get(&id).await {
@@ -557,6 +574,21 @@ impl JobManager {
         });
 
         id
+    }
+
+    async fn list(&self) -> Vec<JobStateSnapshot> {
+        let inner = self.inner.lock().await;
+        inner
+            .jobs
+            .values()
+            .map(|job| JobStateSnapshot {
+                id: job.id.clone(),
+                progress: job.progress.clone(),
+                report: None,
+                done: job.done,
+                error: job.error.clone(),
+            })
+            .collect()
     }
 
     async fn get(&self, id: &str) -> Option<JobStateSnapshot> {
