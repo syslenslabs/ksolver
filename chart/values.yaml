@@ -3,7 +3,7 @@ namespace: ksolver
 replicaCount: 1
 
 image:
-  repository: us-central1-docker.pkg.dev/syslens-dev/syslens/ksolver
+  repository: ghcr.io/syslenslabs/ksolver
   pullPolicy: Always
   tag: latest
 
