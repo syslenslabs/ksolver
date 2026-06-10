@@ -292,6 +292,52 @@ impl KubeCollector {
         );
         Ok(snapshot)
     }
+
+    pub async fn refresh_usage(&self, snapshot: &mut ClusterSnapshot) -> bool {
+        let (node_usage_result, pod_usage_result) = tokio::join!(
+            fetch_node_metrics(&self.client),
+            fetch_pod_metrics(&self.client),
+        );
+        let node_usage = match node_usage_result {
+            Ok(m) => m,
+            Err(err) => {
+                warn!(error = %err, "metrics refresh: failed to fetch node metrics");
+                BTreeMap::new()
+            }
+        };
+        let pod_usage = match pod_usage_result {
+            Ok(m) => m,
+            Err(err) => {
+                warn!(error = %err, "metrics refresh: failed to fetch pod metrics");
+                BTreeMap::new()
+            }
+        };
+        for node in &mut snapshot.nodes {
+            if let Some(u) = node_usage.get(&node.name) {
+                node.usage = u.clone();
+            }
+        }
+        for pod in &mut snapshot.pods {
+            let key = namespaced_name(&pod.namespace, &pod.name);
+            if let Some(u) = pod_usage.get(&key) {
+                pod.usage = u.clone();
+            }
+        }
+        let found = snapshot
+            .pods
+            .iter()
+            .any(|p| p.usage.cpu_usage_milli > 0 || p.usage.memory_bytes > 0);
+        if found {
+            info!(
+                pods_with_usage = pod_usage.len(),
+                nodes_with_usage = node_usage.len(),
+                "metrics refresh: usage data patched into cached snapshot"
+            );
+        } else {
+            info!("metrics refresh: no usage data found from metrics-server");
+        }
+        found
+    }
 }
 
 fn format_error_chain(err: &Error) -> String {
@@ -360,6 +406,11 @@ fn is_transient_kube_error(err: &Error) -> bool {
         || chain.contains("connection reset")
         || chain.contains("temporarily unavailable")
         || chain.contains("dns error")
+        || chain.contains("service unavailable")
+        || chain.contains("no endpoints available")
+        || chain.contains("not found")
+        || chain.contains("currently unable to handle")
+        || chain.contains("try again later")
 }
 
 pub(crate) async fn build_client(kubeconfig: &str) -> Result<Client> {

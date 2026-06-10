@@ -72,6 +72,7 @@ impl ExplainabilityBuilder {
             action_items,
             savings_waterfall,
             workload_cost_table,
+            constraint_cost_table: Default::default(),
         }
     }
 }

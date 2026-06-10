@@ -143,6 +143,20 @@
       .ai-sidebar { width: 100%; }
     }
 
+    /* --- CONSTRAINT COST TABLE --- */
+    .constraint-cost-section { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 20px; backdrop-filter: blur(12px); }
+    .constraint-cost-section .section-header h3 { margin: 0; font-size: 14px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .constraint-cost-row { display: grid; grid-template-columns: 1fr 90px 70px 110px 1fr; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 12px; background: rgba(13,17,23,0.4); border: 1px solid rgba(48,54,61,0.4); margin-bottom: 8px; transition: border-color 0.2s; }
+    .constraint-cost-row:hover { border-color: rgba(88,166,255,0.25); }
+    .constraint-cost-bar-wrap { height: 6px; border-radius: 3px; background: rgba(48,54,61,0.5); overflow: hidden; margin-bottom: 6px; }
+    .constraint-cost-bar { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #3fb950, #56d364); transition: width 0.4s ease; }
+    .constraint-cost-name { font-size: 14px; font-weight: 600; color: var(--ink); }
+    .constraint-cost-meta { font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-align: center; }
+    .constraint-cost-delta { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; color: var(--warn); text-align: right; }
+    .constraint-cost-action { font-size: 12px; color: var(--accent); font-weight: 300; }
+    .constraint-cost-total { padding: 12px 16px; border-radius: 10px; background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); margin-top: 4px; font-size: 14px; color: var(--ink); font-weight: 300; }
+    .constraint-cost-total strong { color: var(--good); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
     /* --- CONSTRAINT SIMULATOR --- */
     .sim-section { padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 20px; backdrop-filter: blur(12px); }
     .sim-toggles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
@@ -198,8 +212,8 @@
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
     .label-row { display: inline-flex; align-items: center; gap: 6px; }
     .hint { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--line); background: rgba(88,166,255,0.06); color: var(--accent); font-size: 10px; font-weight: 600; cursor: help; user-select: none; }
-    .tooltip-popup { position: fixed; z-index: 1000; max-width: 320px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: rgba(22,27,34,0.98); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 16px 48px rgba(0,0,0,0.5); pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity 120ms ease, transform 120ms ease; backdrop-filter: blur(16px); }
-    .tooltip-popup.visible { opacity: 1; transform: translateY(0); }
+    .tooltip-popup { position: fixed; z-index: 1000; max-width: 320px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: rgba(22,27,34,0.98); color: var(--ink); font-size: 12px; line-height: 1.5; box-shadow: 0 16px 48px rgba(0,0,0,0.5); pointer-events: none; opacity: 0; transition: opacity 30ms ease; backdrop-filter: blur(16px); }
+    .tooltip-popup.visible { opacity: 1; }
     input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: rgba(13,17,23,0.6); color: var(--ink); font: inherit; font-size: 13px; transition: border-color 0.15s; }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(88,166,255,0.15); }
     textarea { min-height: 64px; resize: vertical; }
@@ -411,6 +425,16 @@
     <!-- SUMMARY SENTENCE -->
     <div class="summary-sentence" id="summary-sentence">
       Click <strong>Analyze Cluster</strong> to collect the current cluster state and compute optimization recommendations.
+    </div>
+
+    <!-- CONSTRAINT COST TABLE -->
+    <div class="constraint-cost-section" id="constraint-cost-section" style="display:none;">
+      <div class="section-header">
+        <h3>What Each Constraint Costs You</h3>
+        <span class="pill" id="constraint-cost-pill">0 constraints</span>
+      </div>
+      <div id="constraint-cost-rows"></div>
+      <div id="constraint-cost-total" class="constraint-cost-total" style="display:none;"></div>
     </div>
 
     <!-- ACTION ITEMS -->
@@ -1409,6 +1433,7 @@
       simCache.clear();
       renderHero(report);
       renderSummarySentence(report);
+      renderConstraintCosts(report);
       renderUsageCta(report);
       renderActionItems(report);
       renderSavingsStack(report);
@@ -1501,6 +1526,44 @@
       }
 
       el.innerHTML = parts.join(' ');
+    }
+
+    function renderConstraintCosts(report) {
+      const section = document.getElementById('constraint-cost-section');
+      const table = report.Explainability?.ConstraintCostTable || {};
+      const rows = table.Rows || [];
+      if (!rows.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      document.getElementById('constraint-cost-pill').textContent = `${rows.length} constraint${rows.length !== 1 ? 's' : ''}`;
+
+      const maxDelta = table.TheoreticalMaxSavings?.Monthly || 1;
+      const container = document.getElementById('constraint-cost-rows');
+      let html = '';
+      for (const row of rows) {
+        const delta = row.Delta?.Monthly || 0;
+        if (delta <= 0) continue;
+        const pct = Math.min(100, (delta / maxDelta) * 100);
+        html += `<div class="constraint-cost-row">
+          <div>
+            <div class="constraint-cost-bar-wrap"><div class="constraint-cost-bar" style="width:${pct}%"></div></div>
+            <div class="constraint-cost-name">${escapeHTML(row.DisplayName || row.ConstraintKey)}</div>
+          </div>
+          <div class="constraint-cost-meta">${row.AffectedWorkloadCount || 0} workloads</div>
+          <div class="constraint-cost-meta">${row.AffectedNodeCount || 0} nodes</div>
+          <div class="constraint-cost-delta">${money(delta)}/mo</div>
+          <div class="constraint-cost-action">${escapeHTML(row.Action || '')}</div>
+        </div>`;
+      }
+      container.innerHTML = html;
+
+      const totalEl = document.getElementById('constraint-cost-total');
+      const theoreticalMax = table.TheoreticalMaxSavings?.Monthly || 0;
+      if (theoreticalMax > 0) {
+        totalEl.style.display = '';
+        totalEl.innerHTML = `Total potential if all constraints relaxed: <strong>${money(theoreticalMax)}/mo</strong>`;
+      } else {
+        totalEl.style.display = 'none';
+      }
     }
 
     function renderSavingsStack(report) {

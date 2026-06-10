@@ -626,6 +626,44 @@ pub struct ExplainabilityReport {
     pub savings_waterfall: SavingsWaterfall,
     #[serde(default)]
     pub workload_cost_table: Vec<WorkloadCostRow>,
+    #[serde(default)]
+    pub constraint_cost_table: ConstraintCostTable,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ConstraintCostRow {
+    #[serde(default)]
+    pub constraint_key: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub baseline_savings: Money,
+    #[serde(default)]
+    pub relaxed_savings: Money,
+    #[serde(default)]
+    pub delta: Money,
+    #[serde(default)]
+    pub affected_workload_count: i32,
+    #[serde(default)]
+    pub affected_node_count: i32,
+    #[serde(default)]
+    pub nodes_removable_baseline: i32,
+    #[serde(default)]
+    pub nodes_removable_relaxed: i32,
+    #[serde(default)]
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ConstraintCostTable {
+    #[serde(default)]
+    pub rows: Vec<ConstraintCostRow>,
+    #[serde(default)]
+    pub baseline_savings: Money,
+    #[serde(default)]
+    pub theoretical_max_savings: Money,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

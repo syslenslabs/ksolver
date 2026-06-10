@@ -3,7 +3,10 @@ use crate::cpsat_rust;
 use crate::explainability;
 use crate::historical_usage::{overlay_historical_pod_usage, resolve_historical_usage_config};
 use crate::metrics::{self, SolveMetricLabels};
-use crate::model::{AnalysisReport, ProgressUpdate, SolveRequest, SolverInfo};
+use crate::model::{
+    AnalysisReport, ConstraintCostRow, ConstraintCostTable, Money, ProgressUpdate, SolveRequest,
+    SolverInfo,
+};
 use crate::normalizer::{Normalizer, Options as NormalizerOptions};
 use crate::optimizer_input::{
     baseline_solution, build_input, build_input_strict, diagnose_current_assignment,
@@ -181,6 +184,22 @@ impl Analyzer {
                 KubeCollector::new(cluster_name.clone(), req.kubeconfig.clone()).await?;
             collector.collect().await?
         };
+        let has_usage = snapshot
+            .pods
+            .iter()
+            .any(|p| p.usage.cpu_usage_milli > 0 || p.usage.memory_bytes > 0);
+        if !has_usage && req.snapshot_file.is_empty() {
+            info!("no usage data in snapshot; attempting metrics refresh");
+            if let Ok(collector) =
+                KubeCollector::new(cluster_name.clone(), req.kubeconfig.clone()).await
+            {
+                if collector.refresh_usage(&mut snapshot).await {
+                    if let Err(err) = cache.write_snapshot(&snapshot).await {
+                        warn!(error = %err, "failed to update cached snapshot with usage data");
+                    }
+                }
+            }
+        }
         if let Some(historical) = historical_usage.as_ref() {
             emit_progress(
                 &progress,
@@ -289,7 +308,7 @@ impl Analyzer {
                 normalized
             } else {
                 let normalized =
-                    Normalizer::new(pricing_catalog, normalizer_options).normalize(&snapshot);
+                    Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(&snapshot);
                 if let Err(err) = cache
                     .write_normalized(&normalization_key, &normalized)
                     .await
@@ -302,7 +321,7 @@ impl Analyzer {
             }
         } else {
             info!("usage-adjusted requests enabled; bypassing cached normalized cluster");
-            Normalizer::new(pricing_catalog, normalizer_options).normalize(&snapshot)
+            Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(&snapshot)
         };
         info!(
             nodes = normalized.nodes.len(),
@@ -507,6 +526,7 @@ impl Analyzer {
                                                 available: retry_info.available,
                                                 status: retry_status,
                                             },
+                                            pricing_catalog,
                                         )
                                         .await;
                                 }
@@ -602,6 +622,15 @@ impl Analyzer {
             "optimization plan complete"
         );
 
+        let constraint_cost_table = compute_constraint_costs(
+            &progress,
+            &start,
+            &snapshot,
+            &pricing_catalog,
+            &effective_scenario,
+            &plan,
+        );
+
         emit_progress(
             &progress,
             &start,
@@ -622,6 +651,7 @@ impl Analyzer {
             explainability: Default::default(),
         };
         explainability::populate_report(&mut report);
+        report.explainability.constraint_cost_table = constraint_cost_table;
         apply_memory_risk_gate(&mut report, &effective_scenario);
         if let Err(err) = cache.write_report(&report).await {
             warn!(error = %err, path = %cache.root().display(), "failed to persist analysis report");
@@ -655,6 +685,7 @@ impl Analyzer {
         input: crate::model::OptimizationInput,
         solution: crate::model::OptimizationSolution,
         solver_info: SolverInfo,
+        pricing_catalog: crate::pricing::PricingCatalog,
     ) -> Result<AnalysisReport> {
         let effective_scenario = apply_usage_risk_preset(&req.scenario);
         let mut plan = Planner::new().build_plan(&normalized, &input, &solution, solver_info);
@@ -679,6 +710,15 @@ impl Analyzer {
             "optimization plan complete"
         );
 
+        let constraint_cost_table = compute_constraint_costs(
+            &progress,
+            &start,
+            &snapshot,
+            &pricing_catalog,
+            &effective_scenario,
+            &plan,
+        );
+
         emit_progress(
             &progress,
             &start,
@@ -700,6 +740,7 @@ impl Analyzer {
             explainability: Default::default(),
         };
         explainability::populate_report(&mut report);
+        report.explainability.constraint_cost_table = constraint_cost_table;
         apply_memory_risk_gate(&mut report, &effective_scenario);
         if let Err(err) = cache.write_report(&report).await {
             warn!(error = %err, path = %cache.root().display(), "failed to persist analysis report");
@@ -716,6 +757,190 @@ impl Analyzer {
             }
         }
         Ok(report)
+    }
+}
+
+struct ConstraintScenario {
+    key: &'static str,
+    display_name: &'static str,
+    action_template: &'static str,
+    mutate: fn(&mut crate::model::ScenarioConfig),
+}
+
+const CONSTRAINT_SCENARIOS: &[ConstraintScenario] = &[
+    ConstraintScenario {
+        key: "taints",
+        display_name: "Taints & Tolerations",
+        action_template: "Review taint policies",
+        mutate: |s| s.ignore_taints = true,
+    },
+    ConstraintScenario {
+        key: "anti_affinity",
+        display_name: "Required Anti-Affinity",
+        action_template: "Review anti-affinity rules",
+        mutate: |s| s.relax_required_anti_affinity = true,
+    },
+    ConstraintScenario {
+        key: "affinity",
+        display_name: "Preferred Affinity",
+        action_template: "Review preferred affinity",
+        mutate: |s| s.relax_preferred_affinity = true,
+    },
+    ConstraintScenario {
+        key: "rightsizing",
+        display_name: "Request Rightsizing",
+        action_template: "Right-size requests",
+        mutate: |s| s.enable_joint_rightsizing = true,
+    },
+];
+
+fn compute_constraint_costs(
+    progress: &Option<Box<ProgressFn>>,
+    start: &Instant,
+    snapshot: &crate::model::ClusterSnapshot,
+    pricing_catalog: &crate::pricing::PricingCatalog,
+    baseline_scenario: &crate::model::ScenarioConfig,
+    baseline_plan: &crate::model::OptimizationPlan,
+) -> ConstraintCostTable {
+    let baseline_savings = baseline_plan.savings_monthly.clone();
+    let total_nodes = snapshot.nodes.len() as i32;
+    let baseline_active = baseline_plan.active_nodes.len() as i32;
+    let baseline_removable = total_nodes - baseline_active;
+
+    let mut rows = Vec::new();
+    let scenario_count = CONSTRAINT_SCENARIOS.len() + 1;
+
+    for (i, cs) in CONSTRAINT_SCENARIOS.iter().enumerate() {
+        emit_progress(
+            progress,
+            start,
+            "constraint-cost",
+            &format!(
+                "Analyzing constraint: {} ({}/{})",
+                cs.display_name,
+                i + 1,
+                scenario_count
+            ),
+            85 + ((i as i32 + 1) * 12 / scenario_count as i32),
+            false,
+            "",
+        );
+
+        let mut scenario = baseline_scenario.clone();
+        (cs.mutate)(&mut scenario);
+
+        match solve_scenario_quick(snapshot, pricing_catalog, &scenario) {
+            Some(plan) => {
+                let relaxed_savings = plan.savings_monthly.clone();
+                let delta_monthly = relaxed_savings.monthly - baseline_savings.monthly;
+                let relaxed_active = plan.active_nodes.len() as i32;
+                let relaxed_removable = total_nodes - relaxed_active;
+
+                let moves_changed = plan.recommended_moves.len() as i32;
+
+                if delta_monthly > 0.01 {
+                    rows.push(ConstraintCostRow {
+                        constraint_key: cs.key.to_string(),
+                        display_name: cs.display_name.to_string(),
+                        baseline_savings: baseline_savings.clone(),
+                        relaxed_savings,
+                        delta: Money {
+                            currency: baseline_savings.currency.clone(),
+                            monthly: delta_monthly,
+                        },
+                        affected_workload_count: moves_changed,
+                        affected_node_count: (relaxed_removable - baseline_removable).max(0),
+                        nodes_removable_baseline: baseline_removable,
+                        nodes_removable_relaxed: relaxed_removable,
+                        action: format!(
+                            "{} \u{2014} {} workloads affected",
+                            cs.action_template, moves_changed
+                        ),
+                    });
+                }
+            }
+            None => {
+                warn!(
+                    constraint = cs.key,
+                    "constraint cost scenario solve failed, skipping"
+                );
+            }
+        }
+    }
+
+    emit_progress(
+        progress,
+        start,
+        "constraint-cost",
+        &format!(
+            "Analyzing constraint: Theoretical Max ({}/{})",
+            scenario_count, scenario_count
+        ),
+        97,
+        false,
+        "",
+    );
+
+    let mut max_scenario = baseline_scenario.clone();
+    for cs in CONSTRAINT_SCENARIOS {
+        (cs.mutate)(&mut max_scenario);
+    }
+    let theoretical_max_savings =
+        solve_scenario_quick(snapshot, pricing_catalog, &max_scenario)
+            .map(|p| p.savings_monthly)
+            .unwrap_or_else(|| baseline_savings.clone());
+
+    rows.sort_by(|a, b| b.delta.monthly.partial_cmp(&a.delta.monthly).unwrap_or(std::cmp::Ordering::Equal));
+
+    info!(
+        rows = rows.len(),
+        baseline = baseline_savings.monthly,
+        theoretical_max = theoretical_max_savings.monthly,
+        "constraint cost table computed"
+    );
+
+    ConstraintCostTable {
+        rows,
+        baseline_savings,
+        theoretical_max_savings,
+    }
+}
+
+fn solve_scenario_quick(
+    snapshot: &crate::model::ClusterSnapshot,
+    pricing_catalog: &crate::pricing::PricingCatalog,
+    scenario: &crate::model::ScenarioConfig,
+) -> Option<crate::model::OptimizationPlan> {
+    let normalizer_options = NormalizerOptions {
+        cpu_headroom_percent: scenario.cpu_headroom_percent,
+        memory_headroom_percent: scenario.memory_headroom_percent,
+        storage_headroom_percent: scenario.storage_headroom_percent,
+        pods_headroom: scenario.pods_headroom,
+        disallowed_pools: scenario.disallowed_pools.clone(),
+        node_pool_label_keys: scenario.node_pool_label_keys.clone(),
+        ignore_taints: scenario.ignore_taints,
+        relax_preferred_affinity: scenario.relax_preferred_affinity,
+        relax_required_anti_affinity: scenario.relax_required_anti_affinity,
+        cpu_overcommit_ratio: scenario.cpu_overcommit_ratio,
+        memory_overcommit_ratio: scenario.memory_overcommit_ratio,
+        use_usage_adjusted_requests: scenario.use_usage_adjusted_requests,
+        usage_request_floor_ratio: scenario.usage_request_floor_ratio,
+        cpu_usage_safety_factor: scenario.cpu_usage_safety_factor,
+        memory_usage_safety_factor: scenario.memory_usage_safety_factor,
+        max_memory_overflow_probability_percent: scenario.max_memory_overflow_probability_percent,
+    };
+    let normalized = Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(snapshot);
+    let input = build_input(&normalized, scenario.ignore_unschedulable_workloads);
+
+    match cpsat_rust::solve(&input, scenario) {
+        Ok((solution, solver_info)) => {
+            let plan = Planner::new().build_plan(&normalized, &input, &solution, solver_info);
+            Some(plan)
+        }
+        Err(err) => {
+            warn!(error = %err, "constraint cost quick solve failed");
+            None
+        }
     }
 }
 
