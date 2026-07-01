@@ -107,7 +107,23 @@ Best-effort pod anti-affinity is modeled for `requiredDuringScheduling` terms wi
 
 **Dry-run binding plan.** `GET /api/scheduler/binding-plan` renders, from the latest decision, the exact `Binding` subresource payloads (`apiVersion: v1`, `kind: Binding`, `metadata`, `target: Node`) that a real binder *would* POST for each placed pod — one entry per placement, with `dry_run: true`, `trace_sequence`, and `solve_millis` so staleness is visible. Each entry also carries a **`readiness`** (`ready`, or `stale` with a reason) computed against the *latest* cluster snapshot — the stale/conflict guard a real binder must run before applying: it flags a vanished target node, a pod gone from the snapshot, a pod recreated under the same name (uid changed), or a pod already scheduled. (It is a stale/conflict check, not a full scheduler-predicate revalidation.) The dashboard shows the plan with a readiness column. This is the actionable, inspectable output of shadow mode and the groundwork for real binding (a separate, authorization-gated phase); it is **rendered, never applied** — shadow still issues only read/watch/list. A dedicated `no-mutation` test guards both the renderer (no API-call/kube-client symbols) and the shadow loop (no `Binding`/create/patch/delete/evict/replace calls).
 
-Shadow mode issues only read/watch/list. Minimal RBAC (read-only):
+**Real binding (Phase 3, opt-in — mutates the cluster).** By default ksolver binds nothing. Setting `KSOLVER_ENABLE_REAL_BINDING=true` arms the executor: after each solve it POSTs a `pods/binding` for every decision whose readiness re-check is `ready`, actually scheduling the pod onto the chosen node. Safety controls:
+
+- `KSOLVER_ENABLE_REAL_BINDING` (default `false`) — master switch; when unset/false the scheduler is read-only and no mutation-capable client is even created.
+- `KSOLVER_REAL_BINDING_DRY_RUN` (default `false`) — send bindings with server-side `dryRun=All`: the apiserver validates them but persists nothing. Use this first to confirm the path before going live.
+- `KSOLVER_MAX_BINDS_PER_PASS` (default `10`) — throttle on bindings applied per solve.
+- Every candidate gets a **final live re-check immediately before the POST** (`should_apply`): the pod must still exist, match uid, be owned by our scheduler, be un-terminating, unbound, and Pending — otherwise it is skipped. A post-response parse error is reconciled against live state so a bind that actually succeeded is never miscounted as failed. Per-pod errors never abort the pass. Metrics: `ksolver_shadow_bound_total`, `ksolver_shadow_bind_skipped_total`, `ksolver_shadow_bind_failed_total`.
+- All mutation lives in one module (`scheduler/binder.rs`); a `no-mutation` test keeps `shadow.rs` and the plan renderer free of direct mutating calls.
+
+When real binding is enabled the service account also needs `create` on the pod binding subresource:
+
+```yaml
+  - apiGroups: [""]
+    resources: [pods/binding]
+    verbs: [create]
+```
+
+Shadow mode (default) issues only read/watch/list. Minimal RBAC (read-only):
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
