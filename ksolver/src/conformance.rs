@@ -94,9 +94,9 @@ pub(crate) fn build_single_node_payload(
 
 /// True when the pod carries a construct that `feasible_on_node` does not model (so a
 /// divergence from kube-scheduler is EXPECTED, not a bug): required pod affinity/anti-affinity,
-/// DoNotSchedule topology spread, non-empty priority/priorityClassName, or required node
-/// affinity using `matchFields` (which we intentionally ignore). Multi-term matchExpressions
-/// node affinity is NOT here — that's now modeled correctly (OR-of-terms fix).
+/// DoNotSchedule topology spread, or non-empty priority/priorityClassName. Required node
+/// affinity (both matchExpressions OR-of-terms and matchFields metadata.name) is now modeled,
+/// so it is NOT bucketed here.
 pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
     let Some(spec) = pod.spec.as_ref() else {
         return false;
@@ -131,22 +131,6 @@ pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
                 .unwrap_or(false)
         {
             return true;
-        }
-        // Required node affinity with any matchFields is unmodeled.
-        if let Some(na) = aff.node_affinity.as_ref() {
-            if let Some(req) = na
-                .required_during_scheduling_ignored_during_execution
-                .as_ref()
-            {
-                if req.node_selector_terms.iter().any(|t| {
-                    t.match_fields
-                        .as_ref()
-                        .map(|f| !f.is_empty())
-                        .unwrap_or(false)
-                }) {
-                    return true;
-                }
-            }
         }
     }
     false
@@ -487,7 +471,7 @@ mod tests {
         });
         assert!(pod_has_unmodeled_constructs(&aa));
 
-        // matchFields node affinity: unmodeled.
+        // matchFields node affinity: now MODELED (metadata.name) => NOT bucketed.
         let mut mf = pod_named("ns", "mf");
         mf.spec.as_mut().unwrap().affinity = Some(corev1::Affinity {
             node_affinity: Some(corev1::NodeAffinity {
@@ -505,7 +489,7 @@ mod tests {
             }),
             ..Default::default()
         });
-        assert!(pod_has_unmodeled_constructs(&mf));
+        assert!(!pod_has_unmodeled_constructs(&mf));
 
         // priorityClassName: unmodeled.
         let mut pr = pod_named("ns", "pr");

@@ -99,11 +99,11 @@ pub struct Pod {
     #[serde(default)]
     pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
     /// Required node affinity as OR-of-terms: the outer Vec is OR (nodeSelectorTerms), each
-    /// inner Vec is AND (a term's matchExpressions). matchFields are not modeled, so a
-    /// matchFields-only term is an empty inner Vec; matching SKIPS empty inner Vecs (they are
-    /// not match-all branches), and if no non-empty group remains the pod is unconstrained.
+    /// `NodeAffinityGroup` is one term (its matchExpressions ANDed against labels, matchFields
+    /// ANDed against node fields). No required affinity ⇒ unconstrained; required affinity whose
+    /// terms are all empty ⇒ selects nothing (kube semantics).
     #[serde(default)]
-    pub required_node_affinity: Vec<Vec<NodeAffinityTerm>>,
+    pub required_node_affinity: Vec<NodeAffinityGroup>,
     #[serde(default)]
     pub topology_spread_constraints: i32,
     #[serde(default)]
@@ -302,6 +302,17 @@ pub struct NodeAffinityTerm {
     pub operator: String,
     #[serde(default)]
     pub values: Vec<String>,
+}
+
+/// One `nodeSelectorTerm`: `match_expressions` are evaluated against node LABELS, `match_fields`
+/// against node FIELDS (k8s allows only `metadata.name`, operators In/NotIn, exactly one value).
+/// A term matches iff all its expressions AND all its fields match.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeAffinityGroup {
+    #[serde(default)]
+    pub match_expressions: Vec<NodeAffinityTerm>,
+    #[serde(default)]
+    pub match_fields: Vec<NodeAffinityTerm>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
