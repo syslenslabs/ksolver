@@ -71,6 +71,19 @@
             vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)], vec![]);
         assert!(classify(&p, &cfg()).unwrap().unmodeled_constraints.is_empty());
     }
+
+    #[test]
+    fn schedule_anyway_spread_is_not_a_caveat() {
+        use k8s_openapi::api::core::v1 as corev1;
+        let mut p = pod("ksolver", None, Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)], vec![]);
+        if let Some(spec) = p.spec.as_mut() {
+            spec.topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+                max_skew: 1, topology_key: "zone".to_string(), when_unsatisfiable: "ScheduleAnyway".to_string(), ..Default::default()
+            }]);
+        }
+        assert!(classify(&p, &cfg()).unwrap().unmodeled_constraints.is_empty());
+    }
 ```
 
 - [ ] **Step 2: Run → fail.** `cargo test -p ksolver scheduler::pod_filter` → FAIL.
@@ -90,7 +103,14 @@
                 unmodeled_constraints.push("pod anti-affinity".to_string());
             }
         }
-        if spec.topology_spread_constraints.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+        // Only DoNotSchedule spread is a HARD feasibility constraint; ScheduleAnyway
+        // is soft (scoring) and must NOT be flagged as a "could violate" caveat.
+        let hard_spread = spec
+            .topology_spread_constraints
+            .as_ref()
+            .map(|v| v.iter().any(|c| c.when_unsatisfiable == "DoNotSchedule"))
+            .unwrap_or(false);
+        if hard_spread {
             unmodeled_constraints.push("topology spread".to_string());
         }
     }
@@ -111,7 +131,7 @@ git commit -m "feat(scheduler): detect unmodeled pod affinity/anti-affinity/spre
 
 **Files:** `trace.rs`, `decision.rs` (+ tests).
 
-- [ ] **Step 1: Add field.** In `trace.rs` `PodDecision`, add `#[serde(default)] pub caveats: Vec<String>,`. Update the `PodDecision` literal in `trace.rs` tests (`caveats: vec![]`).
+- [ ] **Step 1: Add field.** In `trace.rs` `PodDecision`, add `#[serde(default)] pub caveats: Vec<String>,`. Update the `PodDecision` literal in `trace.rs` tests (`caveats: vec![]`). Add a serde backcompat test: deserialize a `PodDecision` JSON that omits `caveats` and assert it yields an empty vec (proves `#[serde(default)]`).
 
 - [ ] **Step 2: Failing test.** In `decision.rs` tests, add a case where a pending pod has `unmodeled_constraints = vec!["pod anti-affinity".into()]` and is placed; assert the resulting `PodDecision.caveats` contains it. (Extend the `ppod` helper to accept caveats, or set the field on a built pod.)
 
@@ -159,6 +179,9 @@ git commit -m "feat(scheduler): count and log caveated shadow decisions"
 - Disclosure only: feasibility/solver/placement unchanged; a caveat annotates, never alters, a decision.
 - Node affinity is already modeled → not a caveat; only pod affinity, pod anti-affinity, topology spread are flagged.
 - New serde fields default-empty → backward compatible traces.
-- Addresses the real gap (offline solver only warns about these) at the per-decision level; full modeling of pod affinity/anti-affinity/spread remains a deferred, larger phase.
+- Addresses the real gap (offline solver only warns about these) at the per-decision level; full modeling of pod affinity/anti-affinity/spread remains a deferred, larger phase. **Caveats disclose but do NOT close the correctness gap** (codex #7) — a future phase should actually enforce required pod anti-affinity against existing pods; this phase only makes the limitation honest.
+- Topology-spread caveat is raised ONLY for `DoNotSchedule` (hard) constraints; `ScheduleAnyway` (soft/scoring) is not flagged (codex #3).
+- Node affinity is already modeled → not a caveat; only pod affinity, pod anti-affinity, and hard topology spread are flagged.
+- New serde fields default-empty → backward compatible; a round-trip test proves it.
 - Still binds nothing; no-mutation guard unaffected.
 ```
