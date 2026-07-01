@@ -212,6 +212,7 @@ pub fn build_pending_input(
 
     // 5. Build one workload per feasible, homogeneous gang.
     let mut workloads = Vec::new();
+    let mut anti_affinity_pairs: Vec<(String, String)> = Vec::new();
     for (id, mut members) in gangs {
         members.sort_by(|a, b| a.name.cmp(&b.name));
         // Look up every member's normalized workload; skip whole gang if any missing.
@@ -249,6 +250,20 @@ pub fn build_pending_input(
             continue;
         }
         let aa_selectors = &members[0].anti_affinity_host_selectors;
+        // Self-anti-affine: a modeled selector matches EVERY member's own labels, so the
+        // gang's replicas must spread (<=1 per node). Requires >1 member. Matching all
+        // members (not just the representative) is required because gang homogeneity does
+        // not include labels.
+        let self_anti = members.len() > 1
+            && aa_selectors.iter().any(|s| {
+                member_workloads
+                    .iter()
+                    .all(|w| selector_matches(s, &w.labels))
+            });
+        // Co-location (one node) and self-spread (<=1 per node) are contradictory.
+        if colocate && self_anti {
+            continue;
+        }
         let n = members.len() as i64;
         // Co-located gangs must fit the WHOLE gang on one node -> filter by total;
         // spread gangs need one replica per feasible node -> filter per replica.
@@ -309,12 +324,16 @@ pub fn build_pending_input(
             colocate,
             ..Default::default()
         });
+        // Self-anti-affine, non-colocated gang -> solver spreads it <=1 replica per node.
+        if self_anti && !colocate {
+            anti_affinity_pairs.push((id.clone(), id.clone()));
+        }
     }
 
     OptimizationInput {
         nodes,
         workloads,
-        anti_affinity_pairs: Vec::new(),
+        anti_affinity_pairs,
     }
 }
 
@@ -680,6 +699,119 @@ mod tests {
         };
         let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
         assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
+    }
+
+    fn labeled_pending(
+        ns: &str,
+        name: &str,
+        feasible: &[&str],
+        labels: &[(&str, &str)],
+    ) -> NormalizedWorkload {
+        let mut w = workload(ns, name, "", 1000, 2, 1, feasible);
+        w.labels = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        w
+    }
+
+    fn gang_member_aa(
+        ns: &str,
+        name: &str,
+        gang: &str,
+        selectors: &[&[(&str, &str)]],
+        colocate: bool,
+    ) -> PendingGpuPod {
+        PendingGpuPod {
+            uid: format!("uid-{name}"),
+            namespace: ns.into(),
+            name: name.into(),
+            gpu_request: 1,
+            gang_key: Some(format!("{ns}/{gang}")),
+            colocate,
+            unmodeled_constraints: vec![],
+            anti_affinity_host_selectors: selectors
+                .iter()
+                .map(|s| {
+                    s.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn self_anti_affine_gang_gets_anti_affinity_pair() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 16000, 64, 110, 8),
+                node("n2", 16000, 64, 110, 8),
+                node("n3", 16000, 64, 110, 8),
+            ],
+            workloads: vec![
+                labeled_pending("team", "m0", &["n1", "n2", "n3"], &[("app", "trainer")]),
+                labeled_pending("team", "m1", &["n1", "n2", "n3"], &[("app", "trainer")]),
+                labeled_pending("team", "m2", &["n1", "n2", "n3"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let sel: &[&[(&str, &str)]] = &[&[("app", "trainer")]];
+        let input = build_pending_input(
+            &cluster,
+            &[
+                gang_member_aa("team", "m0", "job", sel, false),
+                gang_member_aa("team", "m1", "job", sel, false),
+                gang_member_aa("team", "m2", "job", sel, false),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 1);
+        assert!(input
+            .anti_affinity_pairs
+            .contains(&("gang:team/job".to_string(), "gang:team/job".to_string())));
+    }
+
+    #[test]
+    fn mixed_label_gang_gets_no_anti_affinity_pair() {
+        // selector app=trainer but only m0 carries the label -> not all members match.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "m0", &["n1", "n2"], &[("app", "trainer")]),
+                labeled_pending("team", "m1", &["n1", "n2"], &[("app", "other")]),
+            ],
+            ..Default::default()
+        };
+        let sel: &[&[(&str, &str)]] = &[&[("app", "trainer")]];
+        let input = build_pending_input(
+            &cluster,
+            &[
+                gang_member_aa("team", "m0", "job", sel, false),
+                gang_member_aa("team", "m1", "job", sel, false),
+            ],
+        );
+        assert!(input.anti_affinity_pairs.is_empty());
+    }
+
+    #[test]
+    fn colocate_plus_self_anti_affine_gang_excluded() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "m0", &["n1", "n2"], &[("app", "trainer")]),
+                labeled_pending("team", "m1", &["n1", "n2"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let sel: &[&[(&str, &str)]] = &[&[("app", "trainer")]];
+        let input = build_pending_input(
+            &cluster,
+            &[
+                gang_member_aa("team", "m0", "job", sel, true),
+                gang_member_aa("team", "m1", "job", sel, true),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 0);
     }
 
     #[test]
