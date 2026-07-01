@@ -169,6 +169,11 @@ async fn main() -> Result<()> {
             );
             ksolver::scheduler::shadow::run_shadow(cfg).await?;
         }
+        Some("bench") => {
+            use ksolver::scheduler::bench;
+            let results = bench::run_matrix(&bench::default_matrix());
+            bench::print_table(&results);
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
