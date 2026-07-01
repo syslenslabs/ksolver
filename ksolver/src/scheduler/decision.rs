@@ -26,6 +26,7 @@ pub fn build_decision_trace(
     solve_millis: u64,
     solve_core_millis: u64,
     snapshot_age_millis: u64,
+    drop_reasons: &HashMap<String, String>,
 ) -> DecisionTrace {
     // When the solver returned no usable result (Err: timeout/no incumbent/infeasible/
     // backend error), a submitted pod being unresolved does NOT mean it is unschedulable
@@ -91,13 +92,15 @@ pub fn build_decision_trace(
 
     let mut decisions = Vec::with_capacity(pending.len());
     for p in pending {
-        let placement = placement_for
-            .get(&pod_key(&p.namespace, &p.name))
-            .cloned()
-            .unwrap_or(PodPlacement::Unplaced {
-                reason: "not submitted to solver (filtered as unschedulable during input build)"
-                    .to_string(),
+        let scope = pod_key(&p.namespace, &p.name);
+        let placement = placement_for.get(&scope).cloned().unwrap_or_else(|| {
+            // Never submitted to the solver — use the specific input-build drop reason if we
+            // recorded one, else a generic fallback.
+            let reason = drop_reasons.get(&scope).cloned().unwrap_or_else(|| {
+                "not submitted to solver (filtered as unschedulable during input build)".to_string()
             });
+            PodPlacement::Unplaced { reason }
+        });
         decisions.push(PodDecision {
             uid: p.uid.clone(),
             namespace: p.namespace.clone(),
@@ -176,7 +179,18 @@ mod tests {
             ..Default::default()
         };
         let pending = vec![ppod("team", "m0"), ppod("team", "m1")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1);
+        let t = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+        );
         assert!(t
             .decisions
             .iter()
@@ -201,7 +215,18 @@ mod tests {
         // no assignment_counts entry -> not admitted
         let solution = OptimizationSolution::default();
         let pending = vec![ppod("team", "m0"), ppod("team", "m1")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1);
+        let t = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+        );
         assert!(t.decisions.iter().all(|d| matches!(
             &d.placement,
             PodPlacement::Unplaced { reason } if reason.contains("gang not admitted")
@@ -237,7 +262,18 @@ mod tests {
             ..Default::default()
         };
         let pending = vec![ppod("team", "m0"), ppod("team", "m1"), ppod("team", "m2")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1);
+        let t = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+        );
         // sorted members m0,m1 -> n1 (count 2); m2 -> n2 (count 1)
         let by_name: HashMap<_, _> = t
             .decisions
@@ -254,7 +290,18 @@ mod tests {
         let input = OptimizationInput::default();
         let solution = OptimizationSolution::default();
         let pending = vec![ppod("team", "ghost")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1);
+        let t = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+        );
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Unplaced { reason } if reason.contains("not submitted")
@@ -286,7 +333,18 @@ mod tests {
         };
         let mut p = ppod("team", "m0");
         p.unmodeled_constraints = vec!["pod anti-affinity".to_string()];
-        let t = build_decision_trace(1, &[p], &input, &solution, "OPTIMAL", true, 5, 5, 1);
+        let t = build_decision_trace(
+            1,
+            &[p],
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+        );
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Placed { .. }
@@ -326,6 +384,7 @@ mod tests {
             5,
             5,
             1,
+            &HashMap::new(),
         );
         assert!(t.decisions.iter().all(|d| matches!(
             &d.placement,
@@ -348,10 +407,31 @@ mod tests {
             5,
             5,
             1,
+            &HashMap::new(),
         );
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Unplaced { reason } if reason.contains("not submitted")
+        ));
+    }
+
+    #[test]
+    fn drop_reason_is_surfaced_for_never_submitted_pod() {
+        let input = OptimizationInput::default();
+        let solution = OptimizationSolution::default();
+        let pending = vec![ppod("team", "m0")];
+        let mut drops = HashMap::new();
+        drops.insert(
+            "team/m0".to_string(),
+            "no feasible node (insufficient residual capacity or excluded by anti-affinity)"
+                .to_string(),
+        );
+        let t = build_decision_trace(
+            1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1, &drops,
+        );
+        assert!(matches!(
+            &t.decisions[0].placement,
+            PodPlacement::Unplaced { reason } if reason.contains("no feasible node")
         ));
     }
 }

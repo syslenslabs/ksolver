@@ -156,14 +156,35 @@ fn signature(w: &NormalizedWorkload) -> (i64, i64, i64, i64, BTreeMap<String, i6
     )
 }
 
-/// Build an optimization input that places ONLY the pending pods, grouping pods that
-/// share a gang key into a single all-or-nothing `group_size` workload. Running
-/// (already-placed) pods are fixed context, subtracted from node capacity (residual).
+/// Why a pending pod (or gang) was dropped during input build and never submitted to the
+/// solver. `pod_scopes` are the affected pending pods as `namespace/name` (decision.rs keying).
+#[derive(Debug, Clone)]
+pub struct DropInfo {
+    pub pod_scopes: Vec<String>,
+    pub reason: String,
+}
+
+/// Build an optimization input that places ONLY the pending pods (see
+/// `build_pending_input_diagnosed`); returns just the input for callers that don't need the
+/// drop diagnostics (preserves the original signature — zero ripple).
 pub fn build_pending_input(
     cluster: &NormalizedCluster,
     pending: &[PendingGpuPod],
     quotas: &BTreeMap<String, i64>,
 ) -> OptimizationInput {
+    build_pending_input_diagnosed(cluster, pending, quotas).0
+}
+
+/// Build an optimization input that places ONLY the pending pods, grouping pods that
+/// share a gang key into a single all-or-nothing `group_size` workload. Running
+/// (already-placed) pods are fixed context, subtracted from node capacity (residual).
+/// Also returns a `DropInfo` per gang/pod that was excluded during input build, with a
+/// specific reason (for the shadow decision trace). Placement/feasibility is unchanged.
+pub fn build_pending_input_diagnosed(
+    cluster: &NormalizedCluster,
+    pending: &[PendingGpuPod],
+    quotas: &BTreeMap<String, i64>,
+) -> (OptimizationInput, Vec<DropInfo>) {
     // 1. Accumulate running usage per node (running = current_node non-empty). In the same
     //    pass, sum each namespace's running GPU usage so quotas count existing consumption
     //    (computed here, not in a second loop, to avoid drift from the residual math).
@@ -280,6 +301,12 @@ pub fn build_pending_input(
 
     // 5. Build one workload per feasible, homogeneous gang.
     let mut workloads = Vec::new();
+    let mut dropped: Vec<DropInfo> = Vec::new();
+    let scopes = |ms: &[&PendingGpuPod]| -> Vec<String> {
+        ms.iter()
+            .map(|m| format!("{}/{}", m.namespace, m.name))
+            .collect()
+    };
     let mut anti_affinity_pairs: Vec<(String, String)> = Vec::new();
     // (id, namespace, selectors, member_labels) for each emitted workload, for cross-pairs.
     type EmittedMeta = (
@@ -304,17 +331,29 @@ pub fn build_pending_input(
             }
         }
         if !all_found {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang member missing from cluster snapshot".to_string(),
+            });
             continue;
         }
         // Enforce homogeneity: identical requests, extended requests, feasible sets.
         let rep = member_workloads[0];
         let rep_sig = signature(rep);
         if member_workloads.iter().any(|w| signature(w) != rep_sig) {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang members have heterogeneous requests or feasible sets".to_string(),
+            });
             continue;
         }
         // Members must agree on co-location; disagreement excludes the gang.
         let colocate = members[0].colocate;
         if members.iter().any(|m| m.colocate != colocate) {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang members disagree on co-location".to_string(),
+            });
             continue;
         }
         // Members must agree on anti-affinity selectors (order-insensitive); else exclude.
@@ -323,6 +362,10 @@ pub fn build_pending_input(
             .iter()
             .any(|m| canonical_selectors(&m.anti_affinity_host_selectors) != rep_aa)
         {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang members disagree on anti-affinity selectors".to_string(),
+            });
             continue;
         }
         // Members must also agree on non-hostname (topology) anti-affinity selectors.
@@ -331,6 +374,10 @@ pub fn build_pending_input(
         if members.iter().any(|m| {
             canonical_topology_selectors(&m.anti_affinity_topology_selectors) != rep_aa_topo
         }) {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang members disagree on topology anti-affinity selectors".to_string(),
+            });
             continue;
         }
         let aa_selectors = &members[0].anti_affinity_host_selectors;
@@ -347,6 +394,10 @@ pub fn build_pending_input(
             });
         // Co-location (one node) and self-spread (<=1 per node) are contradictory.
         if colocate && self_anti {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "co-location conflicts with self-spread anti-affinity".to_string(),
+            });
             continue;
         }
         let n = members.len() as i64;
@@ -430,6 +481,12 @@ pub fn build_pending_input(
             .cloned()
             .collect();
         if feasible_nodes.is_empty() {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason:
+                    "no feasible node (insufficient residual capacity or excluded by anti-affinity)"
+                        .to_string(),
+            });
             continue;
         }
         workloads.push(OptimizationWorkload {
@@ -505,12 +562,15 @@ pub fn build_pending_input(
         });
     }
 
-    OptimizationInput {
-        nodes,
-        workloads,
-        anti_affinity_pairs,
-        quota_groups,
-    }
+    (
+        OptimizationInput {
+            nodes,
+            workloads,
+            anti_affinity_pairs,
+            quota_groups,
+        },
+        dropped,
+    )
 }
 
 #[cfg(test)]
@@ -1421,5 +1481,55 @@ mod tests {
         p.anti_affinity_host_selectors = one_req("app", "In", &["trainer", "infer"]);
         let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
         assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    // ---- Phase 13: drop diagnostics ----
+
+    #[test]
+    fn diagnosed_reports_heterogeneous_gang() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 4000, 2, 1, &["n1"]), // different cpu -> heterogeneous
+            ],
+            ..Default::default()
+        };
+        let (input, drops) = super::build_pending_input_diagnosed(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+            &BTreeMap::new(),
+        );
+        assert_eq!(input.workloads.len(), 0);
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0].reason.contains("heterogeneous"));
+        let mut scopes = drops[0].pod_scopes.clone();
+        scopes.sort();
+        assert_eq!(scopes, vec!["team/m0".to_string(), "team/m1".to_string()]);
+    }
+
+    #[test]
+    fn diagnosed_reports_no_feasible_node_on_full_cluster() {
+        // The only node's GPUs are fully consumed by a running pod ⇒ pending 1-GPU pod drops.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("prod", "running", "n1", 1000, 2, 8, &["n1"]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let (input, drops) = super::build_pending_input_diagnosed(
+            &cluster,
+            &[ppod("team", "pending", None)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(input.workloads.len(), 0);
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0].reason.contains("no feasible node"));
+        assert_eq!(drops[0].pod_scopes, vec!["team/pending".to_string()]);
     }
 }

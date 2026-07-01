@@ -189,11 +189,19 @@ async fn run_one_solve(
     // Pending-only solve: place ONLY the observed ksolver pods (gang-grouped by label);
     // every already-placed pod is fixed context (subtracted from node capacity). Small
     // and fast versus the whole-cluster solve, and correct per-pod against residual.
-    let input = crate::scheduler::pending_input::build_pending_input(
+    let (input, drops) = crate::scheduler::pending_input::build_pending_input_diagnosed(
         &normalized,
         pending,
         &cfg.namespace_gpu_quotas,
     );
+    // Flatten drop diagnostics into a pod-scope -> reason map for the decision trace.
+    let mut drop_reasons: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for d in &drops {
+        for scope in &d.pod_scopes {
+            drop_reasons.insert(scope.clone(), d.reason.clone());
+        }
+    }
 
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
@@ -228,6 +236,7 @@ async fn run_one_solve(
         solve_millis,
         solve_core_millis,
         snapshot_age_millis,
+        &drop_reasons,
     ))
 }
 
