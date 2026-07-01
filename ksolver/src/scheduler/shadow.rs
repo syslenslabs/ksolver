@@ -282,9 +282,12 @@ mod tests {
 
     #[test]
     fn dashboard_asset_is_wired() {
-        // The embedded dashboard must poll the traces API and render the decisions table.
+        // The embedded dashboard must poll the traces API and render the decisions table, plus
+        // the read-only dry-run binding-plan view.
         assert!(SHADOW_HTML.contains("/api/scheduler/traces"));
         assert!(SHADOW_HTML.contains("id=\"decisions\""));
+        assert!(SHADOW_HTML.contains("/api/scheduler/binding-plan"));
+        assert!(SHADOW_HTML.contains("id=\"bindings\""));
     }
 
     #[tokio::test]

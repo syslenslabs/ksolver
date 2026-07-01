@@ -48,6 +48,13 @@
     </tr></thead>
     <tbody id="decisions"></tbody>
   </table>
+  <h2>Dry-run binding plan <span class="sub" id="bindingnote"></span></h2>
+  <table>
+    <thead><tr>
+      <th>Namespace</th><th>Pod</th><th>Node</th>
+    </tr></thead>
+    <tbody id="bindings"></tbody>
+  </table>
   <div class="history" id="history"></div>
 </main>
 <script>
@@ -64,6 +71,8 @@
   var elHistory = document.getElementById("history");
   var elBanner = document.getElementById("banner");
   var elUpdated = document.getElementById("updated");
+  var elBindings = document.getElementById("bindings");
+  var elBindingNote = document.getElementById("bindingnote");
   var inFlight = false;
 
   function kv(k, v) {
@@ -125,6 +134,24 @@
     });
   }
 
+  function renderBindingPlan(data) {
+    clear(elBindings);
+    var bindings = (data && data.bindings) || [];
+    elBindingNote.textContent = data && data.dry_run
+      ? "rendered, never applied — " + bindings.length + " pod(s) would bind"
+      : "";
+    bindings.forEach(function (b) {
+      var tr = document.createElement("tr");
+      function cell(text) {
+        var td = document.createElement("td"); td.textContent = text; return td;
+      }
+      tr.appendChild(cell(b.namespace || ""));
+      tr.appendChild(cell(b.pod_name || ""));
+      tr.appendChild(cell(b.node_name || ""));
+      elBindings.appendChild(tr);
+    });
+  }
+
   function poll() {
     if (inFlight) return;
     inFlight = true;
@@ -134,6 +161,12 @@
         elBanner.style.display = "none";
         render(data);
         elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
+        // Dry-run binding plan (read-only; never applied). Best-effort — failure here must not
+        // disrupt the main trace view.
+        return fetch("/api/scheduler/binding-plan", { cache: "no-store" })
+          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(renderBindingPlan)
+          .catch(function () { /* leave last-good binding plan on transient error */ });
       })
       .catch(function (e) {
         elBanner.style.display = "block";
