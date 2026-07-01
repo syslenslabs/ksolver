@@ -9,9 +9,15 @@ Both contribute to one soft score; cpsat handles negative scores (anti-affinity)
 (anti-)affinity terms — collected onto `NormalizedWorkload.preferred_pod_affinity` via a parser
 shared with pod_filter — steer a pending pod's candidate-node scores when the term matches EVERY
 gang member and the candidate shares the running pod's topology domain (soft mirror of required
-symmetry 5h). Sole remaining follow-up: **co-placement** preferred pod affinity (two *pending* pods
-preferring each other). Plans: `docs/superpowers/plans/2026-07-01-preferred-pod-affinity.md`,
-`docs/superpowers/plans/2026-07-01-preferred-pod-affinity-symmetry.md`.
+symmetry 5h). **Co-placement now shipped too** (2026-07-01): two *pending* workloads that prefer
+each other are jointly rewarded to share a topology domain via a Phase-2 boolean `both` per
+pair×domain with upper bounds `both ≤ Σx_a`, `both ≤ Σx_b` and reward `-weight·both` (maximization
+sets `both`=1 iff both place in the domain) — beyond the sequential kube-scheduler, and still
+admission/cost-preserving (vars live only in the pinned Phase-2 pass). Affinity/reward only; soft
+pending-pending anti-affinity is out of scope (hard form covered by cross-workload anti-affinity
+5g). **The preferred/soft affinity feature area is now COMPLETE.** Plans:
+`docs/superpowers/plans/2026-07-01-preferred-pod-affinity.md`,
+`…-preferred-pod-affinity-symmetry.md`, `…-coplacement-preferred-pod-affinity.md`.
 **Author:** autonomous design pass (2026-07-01), pending user review.
 **Related:** `docs/superpowers/specs/2026-06-30-gpu-scheduler-design.md` (§13 status), the anti-affinity
 phases (5e–5h, 12, matchExpressions), node-affinity fixes.
