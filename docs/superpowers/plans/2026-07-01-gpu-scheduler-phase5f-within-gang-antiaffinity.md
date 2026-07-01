@@ -16,7 +16,7 @@
   - Solver: `if !scenario.relax_required_anti_affinity` then for each workload with `group_size > 1` whose `id` (or a member `"ns/name"`) is in `anti_affinity_pairs`, add `x[w,n] <= 1` for every feasible node. This spreads the gang ≤1/node. Keying by `(gang_id, gang_id)` is sufficient (solver uses `pairs.map(|(id,_)| id)`).
   - `build_pending_input` currently sets `anti_affinity_pairs: Vec::new()`. Populate it.
   - `NormalizedWorkload.labels` (5e) gives the gang members' own labels; `PendingGpuPod.anti_affinity_host_selectors` (5e) gives modeled hostname selectors.
-- **Self-anti-affine** = some `aa_selector` is a subset of the gang representative's `labels` (the term matches the gang's own pods). Only then is intra-gang spread the intent.
+- **Self-anti-affine** = some modeled `aa_selector` matches **every** member's labels (`aa_selectors.iter().any(|s| member_workloads.iter().all(|w| selector_matches(s, &w.labels)))`). Rep-only matching is unsound because gang homogeneity does NOT include labels (members can differ) — using all-members avoids over-restricting mixed-label gangs and avoids missing conflicts (codex must-fix).
 - **Contradiction guard:** a gang that is both `colocate` and self-anti-affine is impossible (all-on-one-node vs ≤1/node with N>1). Exclude it (emit nothing) — the pod already carries the anti-affinity caveat.
 - Singletons (`group_size == 1`) are unaffected (solver skips `group_size <= 1`; one replica can't self-spread).
 - **Retained caveat:** cross-workload same-batch anti-affinity (pod in gang A vs pod in gang B) and symmetry are still NOT modeled → the 5d/5e "pod anti-affinity" caveat stays.
@@ -35,14 +35,15 @@
 
 **Interfaces:** `build_pending_input` unchanged signature; now returns `OptimizationInput.anti_affinity_pairs` populated with `(gang_id, gang_id)` for each emitted gang that is self-anti-affine and not colocated.
 
-- [ ] **Step 1:** Add a local helper (or inline): a gang is self-anti-affine iff `aa_selectors.iter().any(|s| selector_matches(s, &rep.labels))` (reuse `selector_matches`, `rep = member_workloads[0]`).
-- [ ] **Step 2: Contradiction guard.** Where the gang's `colocate` and `aa_selectors` are known (after the existing colocate/anti-affinity agreement checks), compute `self_anti = self-anti-affine`. If `colocate && self_anti && members.len() > 1` → `continue` (exclude the contradictory gang).
-- [ ] **Step 3: Collect pairs.** Maintain `let mut anti_affinity_pairs: Vec<(String, String)> = Vec::new();` before the gang loop. When pushing an emitted gang workload, if `self_anti && !colocate && members.len() > 1`, push `(id.clone(), id.clone())`. Set `anti_affinity_pairs` on the returned `OptimizationInput` (replace the current `Vec::new()`).
+- [ ] **Step 1: Member-safe self-anti-affine predicate.** Compute `let self_anti = members.len() > 1 && aa_selectors.iter().any(|s| member_workloads.iter().all(|w| selector_matches(s, &w.labels)));` (matches the term against EVERY member's labels; `members.len() > 1` since a singleton can't self-spread).
+- [ ] **Step 2: Contradiction guard.** After the existing colocate/anti-affinity agreement checks and after computing `self_anti`: if `colocate && self_anti` → `continue` (exclude the contradictory gang — colocate = one node, self-spread = ≤1/node).
+- [ ] **Step 3: Collect pairs.** Maintain `let mut anti_affinity_pairs: Vec<(String, String)> = Vec::new();` before the gang loop. When pushing an emitted gang workload, if `self_anti && !colocate`, push `(id.clone(), id.clone())`. Set `anti_affinity_pairs` on the returned `OptimizationInput` (replace the current `Vec::new()`).
 - [ ] **Step 4: Tests** (extend `pending_input.rs`; use `running_labeled`/`ppod_aa` helpers from 5e, plus set workload `labels` on the pending members so the selector matches their own labels):
-  - self-anti-affine gang (members labelled `app=trainer`, selector `app=trainer`, 3 members, feasible on n1..n3, not colocated) → `input.anti_affinity_pairs` contains `("gang:team/job","gang:team/job")`.
-  - gang whose selector does NOT match its own labels (e.g. selector `app=other`) → no pair added.
+  - self-anti-affine gang (ALL members labelled `app=trainer`, selector `app=trainer`, 3 members, feasible n1..n3, not colocated) → `input.anti_affinity_pairs` contains `("gang:team/job","gang:team/job")`.
+  - **mixed-label gang** (selector `app=trainer`, but only some members carry `app=trainer`) → NO pair (predicate requires ALL members match).
+  - gang whose selector does NOT match any member labels (e.g. selector `app=other`) → no pair.
   - colocate + self-anti-affine gang → excluded (`workloads` empty).
-  - singleton with a self-matching selector → no pair (group_size 1).
+  - singleton with a self-matching selector → no pair (`members.len() == 1`).
   Note: to make a pending member's `NormalizedWorkload` carry labels, extend the `workload(..)` helper usage (set `.labels`) for the gang members, mirroring `running_labeled`.
 - [ ] **Step 5: Run → pass.** `cargo test -p ksolver scheduler::pending_input`.
 - [ ] **Step 6: Commit.**
@@ -108,12 +109,13 @@ git commit -m "test(solver): self-anti-affine gang spreads one replica per node"
 
 ---
 
-## Self-Review Notes
+## Self-Review Notes (incl. codex fixes)
 
 - Uses the solver's existing per-workload `x ≤ 1` anti-affinity (no solver change); shadow now populates `anti_affinity_pairs` for self-anti-affine, non-colocated gangs.
-- Contradiction (colocate + self-anti-affine, N>1) excluded rather than silently mis-solved.
-- Self-anti-affine detected via selector matching the gang's own labels (`NormalizedWorkload.labels` from 5e).
-- Singletons unaffected (solver skips group_size ≤ 1).
-- Caveat retained: cross-workload same-batch and symmetry remain unmodeled.
-- Still binds nothing; no-mutation guard unaffected.
+- **Self-anti-affine requires a selector matching EVERY member's labels** (codex #2), not just the representative — gang homogeneity excludes labels, so mixed-label gangs must not wrongly trigger/miss spread. Mixed-label test added.
+- `members.len() > 1` guard on both exclusion and pair collection (codex).
+- Contradiction (colocate + self-anti-affine) excluded rather than silently mis-solved.
+- Offline planner unaffected — it builds its own pairs in `optimizer_input.rs` (codex #5).
+- Scope is narrow and honestly worded: **self-referential within-gang spread is enforced; cross-workload same-batch (gang A vs gang B / singletons) and symmetry remain unmodeled and caveated** (codex #6).
+- Singletons unaffected. Still binds nothing; no-mutation guard unaffected.
 ```
