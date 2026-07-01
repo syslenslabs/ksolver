@@ -383,6 +383,39 @@ mod enabled {
             }
         }
 
+        // Quota groups: cap the total resource consumed by admitted workloads in each
+        // group (e.g. a per-namespace GPU quota). The coefficient is the workload's
+        // stored TOTAL resource request times its admission bool `placed[w]` — exact
+        // integer, no per-replica division. Only workloads that have a `placed` var
+        // (i.e. partial_admission) contribute, so strict/planner solves that never set
+        // partial_admission are unaffected and can never be made infeasible by a group.
+        if !input.quota_groups.is_empty() {
+            let by_id: HashMap<&str, &crate::model::OptimizationWorkload> =
+                input.workloads.iter().map(|w| (w.id.as_str(), w)).collect();
+            for group in &input.quota_groups {
+                if group.limit < 0 || group.resource.is_empty() {
+                    continue;
+                }
+                let mut expr = LinearExpr::default();
+                for wid in &group.workload_ids {
+                    let (Some(placed), Some(w)) =
+                        (placed_vars.get(wid), by_id.get(wid.as_str()))
+                    else {
+                        continue;
+                    };
+                    let total = w
+                        .extended_resource_requests
+                        .get(&group.resource)
+                        .copied()
+                        .unwrap_or(0);
+                    if total > 0 {
+                        expr += (total, *placed);
+                    }
+                }
+                model.add_le(expr, group.limit);
+            }
+        }
+
         let mut objective = LinearExpr::default();
         for node in &input.nodes {
             let coeff = (node.price.monthly * scenario.cost_weight as f64).round() as i64;
@@ -951,6 +984,135 @@ mod tests {
             .map(|c| c.values().map(|v| i64::from(*v)).sum())
             .unwrap_or(0);
         assert_eq!(total, 5, "5-replica gang must be fully admitted on 5 GPUs");
+    }
+
+    fn gpu_singleton(name: &str, total_gpu: i64, feasible: &[&str]) -> OptimizationWorkload {
+        use crate::model::ResourceList;
+        use std::collections::BTreeMap;
+        let mut ext = BTreeMap::new();
+        ext.insert("nvidia.com/gpu".to_string(), total_gpu);
+        OptimizationWorkload {
+            id: format!("t/{name}"),
+            namespace: "t".to_string(),
+            name: name.to_string(),
+            group_size: 1,
+            requests: ResourceList {
+                milli_cpu: 1000,
+                memory_bytes: 1 << 30,
+                ephemeral_storage: 0,
+                pods: 0,
+            },
+            extended_resource_requests: ext,
+            feasible_nodes: feasible.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn admitted_count(solution: &crate::model::OptimizationSolution) -> usize {
+        solution
+            .assignment_counts
+            .values()
+            .filter(|counts| counts.values().any(|c| *c > 0))
+            .count()
+    }
+
+    #[test]
+    fn quota_caps_admitted_singletons() {
+        use crate::model::{QuotaGroup, ScenarioConfig};
+        // Two 1-GPU singletons both fit on a 4-GPU node; a GPU quota of 1 over both
+        // must admit exactly one. Raising the quota to 2 admits both.
+        let make = |limit: i64| OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![
+                gpu_singleton("a", 1, &["n1"]),
+                gpu_singleton("b", 1, &["n1"]),
+            ],
+            quota_groups: vec![QuotaGroup {
+                workload_ids: vec!["t/a".to_string(), "t/b".to_string()],
+                resource: "nvidia.com/gpu".to_string(),
+                limit,
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (sol1, info1) = super::enabled::solve(&make(1), &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol1),
+            1,
+            "quota 1 must admit exactly one; status={}",
+            info1.status
+        );
+        let (sol2, info2) = super::enabled::solve(&make(2), &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol2),
+            2,
+            "quota 2 must admit both; status={}",
+            info2.status
+        );
+    }
+
+    #[test]
+    fn quota_counts_whole_gang() {
+        use crate::model::{QuotaGroup, ScenarioConfig};
+        // A 2-replica gang consumes 2 GPUs as a unit; a quota of 1 rejects it entirely
+        // even though the node has capacity — proves gang-aware quota accounting.
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 8)],
+            workloads: vec![gang_workload(2, 2, &["n1"])],
+            quota_groups: vec![QuotaGroup {
+                workload_ids: vec!["gang:t/job".to_string()],
+                resource: "nvidia.com/gpu".to_string(),
+                limit: 1,
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert!(
+            !solution.assignment_counts.contains_key("gang:t/job"),
+            "2-GPU gang must be rejected under a 1-GPU quota; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn quota_ignored_without_partial_admission() {
+        use crate::model::{QuotaGroup, ScenarioConfig};
+        // Without partial_admission there are no `placed` vars, so a quota group is a
+        // no-op: strict placement still admits both singletons (backward compatible).
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![
+                gpu_singleton("a", 1, &["n1"]),
+                gpu_singleton("b", 1, &["n1"]),
+            ],
+            quota_groups: vec![QuotaGroup {
+                workload_ids: vec!["t/a".to_string(), "t/b".to_string()],
+                resource: "nvidia.com/gpu".to_string(),
+                limit: 1,
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: false,
+            ..Default::default()
+        };
+        let (solution, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&solution),
+            2,
+            "quota must be ignored without partial_admission; status={}",
+            info.status
+        );
     }
 
     fn colocate_gang_input(colocate: bool) -> OptimizationInput {
