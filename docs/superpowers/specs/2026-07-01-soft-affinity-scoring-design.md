@@ -65,13 +65,26 @@ existing `x` vars ⇒ no new variable classes; just objective terms.
   choosing `soft_scale` so it never perturbs cost/admission across arbitrary price magnitudes is
   fragile (same class of numeric issue as the admission weight). Needs an overflow-guarded computed
   scale, like `effective_admission_weight`.
-- **B. Two-phase lexicographic (robust, recommended).** Phase 1: solve for max admission + min cost
-  (today's objective). Phase 2: fix the admitted set + node-open decisions (or the achieved cost as a
-  constraint `Σcost ≤ cost*`) and re-solve maximizing soft score. Clean separation ⇒ provably never
-  disturbs admission/cost. Costs a second solve (bounded, cheap for the pending model). This also
-  lays groundwork for lexicographic objective handling generally.
+- **B. Two-phase lexicographic (robust, recommended).** Phase 1: solve today's objective (max
+  admission + min cost). Phase 2: **maximize soft score** subject to preserving Phase 1's result —
+  with three correctness rules (codex):
+  1. **Do NOT fix the node-open `y` vars.** `y` is precisely what distinguishes equal-cost alternative
+     nodes; fixing it would kill the intended tie-break. Only **fix the admitted set** (the `placed`
+     bools / per-workload admitted count) so admission is preserved, and leave `x`/`y` free.
+  2. **Constrain the FULL Phase-1 objective value, not just `Σcost`.** Phase 1's objective today
+     includes node price, active-node weight, CPU/mem/scalar slack, churn, and (if enabled)
+     rightsizing terms. Phase 2 must add `phase1_objective_expr ≤ phase1_objective_value*` (the full
+     non-soft objective), otherwise maximizing soft could perturb another existing tie-breaker/term.
+     Then maximize `Σ s(w,n)·x[w,n]` alone.
+  3. **Only apply soft scoring when Phase 1 is proven OPTIMAL.** Shadow uses a bounded solve and may
+     accept a merely *feasible* incumbent; two-phase over a non-proven-optimal Phase 1 would pin the
+     incumbent's objective value (not the true cost-first optimum), so soft scoring must be **skipped**
+     (fall back to the Phase-1 placement) unless `solver_status == Optimal`. Record in the trace that
+     soft tie-breaking was skipped due to the time budget.
 
-Recommendation: **B (two-phase)**, gated to the shadow path only.
+  Clean separation ⇒ provably never disturbs admission/cost. Costs a second (bounded) solve.
+
+Recommendation: **B (two-phase)**, gated to the shadow path only, applied only on proven-optimal Phase 1.
 
 ## Scope / gating
 
@@ -87,7 +100,10 @@ Recommendation: **B (two-phase)**, gated to the shadow path only.
 
 - **Numeric tiering (Option A)** — fragile; mitigated by choosing Option B (lexicographic).
 - **Second-solve latency (Option B)** — bounded; measure via the bench harness; acceptable for the
-  small pending model.
+  small pending model. Soft scoring is skipped when Phase 1 isn't proven optimal (codex), so a slow
+  Phase 1 never triggers a wasted Phase 2.
+- **Phase-2 must preserve the full Phase-1 objective, not just cost, and must not fix `y`** (codex) —
+  otherwise it could break equal-cost node tie-breaks or perturb other objective terms.
 - **Preferred pod affinity co-placement** — deferred (v1 running-pods-only); document as a caveat when
   a pod has preferred pod-affinity we only partially evaluate.
 - **Conformance interaction** — soft affinity affects Score, not Filter; the Phase 2 harness tests
@@ -95,9 +111,10 @@ Recommendation: **B (two-phase)**, gated to the shadow path only.
 
 ## Testing strategy
 - Unit: `s(w,n)` computation for preferred node affinity / pod (anti-)affinity vs running pods.
-- Solver (two-phase): among equal-cost nodes, the higher-soft-score node is chosen; and soft affinity
-  NEVER changes which pods are admitted nor total cost (assert admission + cost invariant across
-  soft-on/soft-off). Shadow-only; binds nothing.
+- Solver (two-phase): among equal-cost nodes, the higher-soft-score node is chosen; soft affinity
+  NEVER changes which pods are admitted nor the full Phase-1 objective value (assert admission + full
+  objective invariant across soft-on/soft-off); and soft scoring is skipped (Phase-1 placement kept)
+  when Phase 1 status is not Optimal. Shadow-only; binds nothing.
 
 ## Out of scope
 Changing the offline planner objective; co-placement preferred pod affinity; Score-phase conformance;
