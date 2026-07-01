@@ -122,6 +122,7 @@ fn build_input_with_grouping(
             ),
             feasible_nodes,
             candidate_levels: scale_candidate_levels(&base.candidate_levels, members.len() as i32),
+            colocate: false,
         });
     }
 
@@ -176,6 +177,7 @@ fn build_input_with_grouping(
             extended_resource_requests: workload.extended_resource_requests.clone(),
             feasible_nodes,
             candidate_levels: workload.candidate_levels.clone(),
+            colocate: false,
         });
     }
 

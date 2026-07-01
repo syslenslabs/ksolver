@@ -1223,6 +1223,11 @@ pub struct OptimizationWorkload {
     pub feasible_nodes: Vec<String>,
     #[serde(default)]
     pub candidate_levels: Vec<CandidateLevel>,
+    /// Require all replicas of this gang on a single node (co-location). Assumes
+    /// physical-node inputs (OptimizationNode.count == 1); set only by the shadow
+    /// scheduler, never by the offline planner.
+    #[serde(default)]
+    pub colocate: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
