@@ -568,6 +568,7 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
         required_affinity: to_required_affinity(affinity),
         required_anti: to_required_anti_affinity(affinity),
         modeled_host_anti_selectors: modeled_host_anti_selectors(affinity),
+        anti_affinity_topology_selectors: modeled_topology_anti_selectors(affinity),
         required_node_affinity: to_required_node_affinity(affinity),
         topology_spread_constraints: spec
             .as_ref()
@@ -1107,9 +1108,9 @@ fn to_required_affinity(affinity: Option<&corev1::Affinity>) -> Vec<AffinityTerm
 /// non-empty matchLabels, no matchExpressions, no namespace scoping), read from the raw
 /// affinity so lossy conversions cannot broaden the selector. Mirrors the pending-pod
 /// rule in scheduler::pod_filter.
-fn modeled_host_anti_selectors(
+fn modeled_anti_selectors_all(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<BTreeMap<String, String>> {
+) -> Vec<(String, BTreeMap<String, String>)> {
     let Some(terms) = affinity
         .and_then(|a| a.pod_anti_affinity.as_ref())
         .and_then(|pa| {
@@ -1121,9 +1122,6 @@ fn modeled_host_anti_selectors(
     };
     let mut out = Vec::new();
     for term in terms {
-        if term.topology_key != "kubernetes.io/hostname" {
-            continue;
-        }
         if term
             .namespaces
             .as_ref()
@@ -1145,11 +1143,32 @@ fn modeled_host_anti_selectors(
             continue;
         }
         match ls.match_labels.as_ref() {
-            Some(ml) if !ml.is_empty() => out.push(ml.clone()),
+            Some(ml) if !ml.is_empty() => out.push((term.topology_key.clone(), ml.clone())),
             _ => {}
         }
     }
     out
+}
+
+/// matchLabels of fully-modeled *hostname* anti-affinity terms (Phase 5e–5h path).
+fn modeled_host_anti_selectors(
+    affinity: Option<&corev1::Affinity>,
+) -> Vec<BTreeMap<String, String>> {
+    modeled_anti_selectors_all(affinity)
+        .into_iter()
+        .filter(|(k, _)| k == "kubernetes.io/hostname")
+        .map(|(_, ml)| ml)
+        .collect()
+}
+
+/// `(topologyKey, matchLabels)` of fully-modeled *non-hostname* anti-affinity terms (Phase 12).
+fn modeled_topology_anti_selectors(
+    affinity: Option<&corev1::Affinity>,
+) -> Vec<(String, BTreeMap<String, String>)> {
+    modeled_anti_selectors_all(affinity)
+        .into_iter()
+        .filter(|(k, _)| k != "kubernetes.io/hostname")
+        .collect()
 }
 
 fn to_required_anti_affinity(affinity: Option<&corev1::Affinity>) -> Vec<AffinityTerm> {

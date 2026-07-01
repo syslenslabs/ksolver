@@ -140,6 +140,7 @@ mod tests {
             colocate: false,
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: vec![],
+            anti_affinity_topology_selectors: vec![],
         }
     }
 

@@ -63,6 +63,25 @@ fn canonical_selectors(sels: &[BTreeMap<String, String>]) -> Vec<Vec<(String, St
     out
 }
 
+/// Canonical form of a `(topologyKey, matchLabels)` selector set for order-insensitive
+/// gang-member agreement comparison (Phase 12).
+#[allow(clippy::type_complexity)]
+fn canonical_topology_selectors(
+    sels: &[(String, BTreeMap<String, String>)],
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out: Vec<(String, Vec<(String, String)>)> = sels
+        .iter()
+        .map(|(k, m)| {
+            (
+                k.clone(),
+                m.iter().map(|(a, b)| (a.clone(), b.clone())).collect(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Residual (free) capacity of a node after running pods are accounted for.
 struct Residual {
     cpu: i64,
@@ -199,8 +218,8 @@ pub fn build_pending_input(
         });
     }
 
-    // 3. Per-pod NormalizedWorkload lookup by "{ns}/{name}", and running pods per node
-    //    (for best-effort anti-affinity node exclusion).
+    // 3. Per-pod NormalizedWorkload lookup by "{ns}/{name}", running pods per node, and a
+    //    node -> labels map (for topology-domain anti-affinity exclusion, Phase 12).
     let mut norm: BTreeMap<String, &NormalizedWorkload> = BTreeMap::new();
     let mut running_by_node: BTreeMap<String, Vec<&NormalizedWorkload>> = BTreeMap::new();
     for w in &cluster.workloads {
@@ -212,6 +231,17 @@ pub fn build_pending_input(
                 .push(w);
         }
     }
+    let node_labels: BTreeMap<&str, &BTreeMap<String, String>> = cluster
+        .nodes
+        .iter()
+        .map(|n| (n.name.as_str(), &n.labels))
+        .collect();
+    // Topology domain value of a node for a topology key: Some(value) iff the node carries
+    // that label. A node without the label is its own singleton domain (never equal to a
+    // present value), so it is never excluded by domain equality.
+    let domain = |node: &str, key: &str| -> Option<String> {
+        node_labels.get(node).and_then(|l| l.get(key).cloned())
+    };
 
     // 4. Group pending pods into gangs (only unbound pods; a stale pod already bound was
     //    subtracted above and must not be a decision variable).
@@ -267,7 +297,16 @@ pub fn build_pending_input(
         {
             continue;
         }
+        // Members must also agree on non-hostname (topology) anti-affinity selectors.
+        let rep_aa_topo =
+            canonical_topology_selectors(&members[0].anti_affinity_topology_selectors);
+        if members.iter().any(|m| {
+            canonical_topology_selectors(&m.anti_affinity_topology_selectors) != rep_aa_topo
+        }) {
+            continue;
+        }
         let aa_selectors = &members[0].anti_affinity_host_selectors;
+        let aa_topo_selectors = &members[0].anti_affinity_topology_selectors;
         // Self-anti-affine: a modeled selector matches EVERY member's own labels, so the
         // gang's replicas must spread (<=1 per node). Requires >1 member. Matching all
         // members (not just the representative) is required because gang homogeneity does
@@ -322,6 +361,41 @@ pub fn build_pending_input(
                         .iter()
                         .any(|rs| member_labels.iter().all(|ml| selector_matches(rs, ml)));
                     forward || symmetric
+                });
+                !violates
+            })
+            // Best-effort NON-hostname topology anti-affinity (Phase 12): exclude a candidate
+            // node whose topology domain (node.labels[key]) matches that of a node hosting a
+            // matching same-namespace running pod — forward (pending selector vs running labels)
+            // and symmetric (running selector vs ALL pending members). A node lacking the key
+            // is a singleton domain (domain == None) and is never excluded by equality.
+            .filter(|cn| {
+                if aa_topo_selectors.is_empty()
+                    && !running_by_node.values().flatten().any(|w| {
+                        w.namespace == rep.namespace
+                            && !w.anti_affinity_topology_selectors.is_empty()
+                    })
+                {
+                    return true;
+                }
+                let violates = running_by_node.iter().any(|(rn, pods)| {
+                    pods.iter().any(|w| {
+                        if w.namespace != rep.namespace {
+                            return false;
+                        }
+                        let forward = aa_topo_selectors.iter().any(|(key, s)| {
+                            selector_matches(s, &w.labels)
+                                && domain(cn, key).is_some()
+                                && domain(cn, key) == domain(rn, key)
+                        });
+                        let symmetric =
+                            w.anti_affinity_topology_selectors.iter().any(|(key, rs)| {
+                                member_labels.iter().all(|ml| selector_matches(rs, ml))
+                                    && domain(cn, key).is_some()
+                                    && domain(cn, key) == domain(rn, key)
+                            });
+                        forward || symmetric
+                    })
                 });
                 !violates
             })
@@ -488,6 +562,7 @@ mod tests {
             colocate,
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: vec![],
+            anti_affinity_topology_selectors: vec![],
         }
     }
 
@@ -822,6 +897,7 @@ mod tests {
                         .collect()
                 })
                 .collect(),
+            anti_affinity_topology_selectors: vec![],
         }
     }
 
@@ -1148,5 +1224,124 @@ mod tests {
         let quotas = BTreeMap::from([("other".to_string(), 5_i64)]);
         let input = super::build_pending_input(&cluster, &[ppod("team", "a", None)], &quotas);
         assert!(input.quota_groups.is_empty());
+    }
+
+    // ---- Phase 12: non-hostname topology anti-affinity ----
+
+    const ZONE: &str = "topology.kubernetes.io/zone";
+
+    fn zoned_node(name: &str, gpu: i64, zone: Option<&str>) -> NormalizedNode {
+        let mut n = node(name, 16000, 64, 110, gpu);
+        if let Some(z) = zone {
+            n.labels = [(ZONE.to_string(), z.to_string())].into();
+        }
+        n
+    }
+
+    fn ppod_topo(ns: &str, name: &str, key: &str, labels: &[(&str, &str)]) -> PendingGpuPod {
+        let mut p = ppod(ns, name, None);
+        p.anti_affinity_topology_selectors = vec![(
+            key.to_string(),
+            labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )];
+        p
+    }
+
+    #[test]
+    fn zone_anti_affinity_excludes_whole_zone() {
+        // n1,n2 in zone za; n3 in zb. A running app=trainer pod sits on n1 (za). A pending
+        // pod with a zone anti-affinity on app=trainer must avoid ALL of za (n1 AND n2),
+        // landing only in zb (n3).
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                zoned_node("n1", 8, Some("za")),
+                zoned_node("n2", 8, Some("za")),
+                zoned_node("n3", 8, Some("zb")),
+            ],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2", "n3"]),
+            ],
+            ..Default::default()
+        };
+        let input = super::build_pending_input(
+            &cluster,
+            &[ppod_topo("team", "pending", ZONE, &[("app", "trainer")])],
+            &BTreeMap::new(),
+        );
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n3".to_string()]);
+    }
+
+    #[test]
+    fn zone_anti_affinity_ignores_node_without_zone_label() {
+        // Running pod on n1 (no zone label = singleton domain). A pending zone-anti-affine
+        // pod is NOT excluded from n2 (different/absent domain) — only exact domain matches.
+        let cluster = NormalizedCluster {
+            nodes: vec![zoned_node("n1", 8, None), zoned_node("n2", 8, Some("zb"))],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = super::build_pending_input(
+            &cluster,
+            &[ppod_topo("team", "pending", ZONE, &[("app", "trainer")])],
+            &BTreeMap::new(),
+        );
+        // n1 has no zone -> domain(n1)=None -> not excluded by equality; n2 is a different
+        // domain (zb) with no matching peer -> both remain feasible.
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+    }
+
+    #[test]
+    fn zone_anti_affinity_symmetry_excludes_zone() {
+        // A running pod carries a ZONE anti-affinity on app=trainer and sits in za (n1).
+        // A pending app=trainer pod with NO own selector must still avoid all of za (n2 too).
+        let mut peer = running_labeled("team", "peer", "n1", &[]);
+        peer.anti_affinity_topology_selectors = vec![(
+            ZONE.to_string(),
+            [("app".to_string(), "trainer".to_string())].into(),
+        )];
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                zoned_node("n1", 8, Some("za")),
+                zoned_node("n2", 8, Some("za")),
+                zoned_node("n3", 8, Some("zb")),
+            ],
+            workloads: vec![
+                peer,
+                labeled_pending("team", "p", &["n1", "n2", "n3"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let input =
+            super::build_pending_input(&cluster, &[ppod("team", "p", None)], &BTreeMap::new());
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n3".to_string()]);
+    }
+
+    #[test]
+    fn zone_anti_affinity_ignores_other_namespace() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                zoned_node("n1", 8, Some("za")),
+                zoned_node("n2", 8, Some("zb")),
+            ],
+            workloads: vec![
+                running_labeled("other", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = super::build_pending_input(
+            &cluster,
+            &[ppod_topo("team", "pending", ZONE, &[("app", "trainer")])],
+            &BTreeMap::new(),
+        );
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
     }
 }

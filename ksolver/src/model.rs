@@ -93,6 +93,11 @@ pub struct Pod {
     /// anti-affinity symmetry enforcement in the shadow scheduler.
     #[serde(default)]
     pub modeled_host_anti_selectors: Vec<BTreeMap<String, String>>,
+    /// `(topologyKey, matchLabels)` of *fully-modeled* NON-hostname pod-anti-affinity terms
+    /// (e.g. zone/rack). Same strict rules as above. Enforced best-effort by topology-domain
+    /// exclusion in the shadow scheduler (Phase 12).
+    #[serde(default)]
+    pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
     #[serde(default)]
     pub required_node_affinity: Vec<NodeAffinityTerm>,
     #[serde(default)]
@@ -553,6 +558,10 @@ pub struct NormalizedWorkload {
     /// (for symmetry enforcement in the shadow scheduler).
     #[serde(default)]
     pub anti_affinity_host_selectors: Vec<BTreeMap<String, String>>,
+    /// `(topologyKey, matchLabels)` of this workload's fully-modeled NON-hostname
+    /// pod-anti-affinity terms (zone/rack), for topology-domain exclusion (Phase 12).
+    #[serde(default)]
+    pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]

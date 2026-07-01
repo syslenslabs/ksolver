@@ -19,6 +19,9 @@ pub struct PendingGpuPod {
     /// best-effort node exclusion against running pods. Empty when none/unmodeled.
     /// (The "pod anti-affinity" caveat is still raised — enforcement is partial.)
     pub anti_affinity_host_selectors: Vec<std::collections::BTreeMap<String, String>>,
+    /// `(topologyKey, matchLabels)` of *modeled* NON-hostname pod-anti-affinity terms
+    /// (zone/rack) for best-effort topology-domain exclusion (Phase 12).
+    pub anti_affinity_topology_selectors: Vec<(String, std::collections::BTreeMap<String, String>)>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -121,7 +124,16 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
             .map(|v| v == "true")
             .unwrap_or(false);
     let unmodeled_constraints = unmodeled_constraints(spec);
-    let anti_affinity_host_selectors = modeled_anti_affinity_host_selectors(spec);
+    let all = modeled_anti_affinity_selectors(spec);
+    let anti_affinity_host_selectors = all
+        .iter()
+        .filter(|(k, _)| k == "kubernetes.io/hostname")
+        .map(|(_, ml)| ml.clone())
+        .collect();
+    let anti_affinity_topology_selectors = all
+        .into_iter()
+        .filter(|(k, _)| k != "kubernetes.io/hostname")
+        .collect();
     Some(PendingGpuPod {
         uid,
         namespace,
@@ -131,16 +143,17 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         colocate,
         unmodeled_constraints,
         anti_affinity_host_selectors,
+        anti_affinity_topology_selectors,
     })
 }
 
-/// matchLabels of required pod-anti-affinity terms we can fully model for best-effort
-/// node exclusion: topologyKey == hostname, non-empty matchLabels, NO matchExpressions,
-/// and no cross-namespace scoping (namespaces / namespaceSelector). Anything else is
-/// left unmodeled (and still caveated).
-fn modeled_anti_affinity_host_selectors(
+/// `(topologyKey, matchLabels)` of required pod-anti-affinity terms we can fully model for
+/// best-effort exclusion: non-empty matchLabels, NO matchExpressions, and no cross-namespace
+/// scoping (namespaces / namespaceSelector). Callers split hostname vs non-hostname. Anything
+/// else is left unmodeled (and still caveated).
+fn modeled_anti_affinity_selectors(
     spec: &corev1::PodSpec,
-) -> Vec<std::collections::BTreeMap<String, String>> {
+) -> Vec<(String, std::collections::BTreeMap<String, String>)> {
     let mut out = Vec::new();
     let Some(terms) = spec
         .affinity
@@ -154,9 +167,6 @@ fn modeled_anti_affinity_host_selectors(
         return out;
     };
     for term in terms {
-        if term.topology_key != "kubernetes.io/hostname" {
-            continue;
-        }
         // Reject cross-namespace scoping (we only model same-namespace).
         if term
             .namespaces
@@ -180,7 +190,7 @@ fn modeled_anti_affinity_host_selectors(
             continue;
         }
         match ls.match_labels.as_ref() {
-            Some(ml) if !ml.is_empty() => out.push(ml.clone()),
+            Some(ml) if !ml.is_empty() => out.push((term.topology_key.clone(), ml.clone())),
             _ => continue,
         }
     }
@@ -584,6 +594,7 @@ mod tests {
         );
         let got = classify(&p, &cfg()).unwrap();
         assert_eq!(got.anti_affinity_host_selectors.len(), 1);
+        assert!(got.anti_affinity_topology_selectors.is_empty());
         assert_eq!(
             got.anti_affinity_host_selectors[0].get("app").unwrap(),
             "trainer"
@@ -594,7 +605,9 @@ mod tests {
     }
 
     #[test]
-    fn zone_topology_is_not_modeled() {
+    fn zone_topology_captured_as_topology_selector() {
+        // Phase 12: a zone anti-affinity term is captured into anti_affinity_topology_selectors
+        // (not the hostname list), carrying its topologyKey, and is still caveated (best-effort).
         let mut p = gpu_pending();
         set_anti_affinity(
             &mut p,
@@ -607,6 +620,18 @@ mod tests {
         );
         let got = classify(&p, &cfg()).unwrap();
         assert!(got.anti_affinity_host_selectors.is_empty());
+        assert_eq!(got.anti_affinity_topology_selectors.len(), 1);
+        assert_eq!(
+            got.anti_affinity_topology_selectors[0].0,
+            "topology.kubernetes.io/zone"
+        );
+        assert_eq!(
+            got.anti_affinity_topology_selectors[0]
+                .1
+                .get("app")
+                .unwrap(),
+            "trainer"
+        );
         assert!(got
             .unmodeled_constraints
             .contains(&"pod anti-affinity".to_string()));
@@ -624,10 +649,9 @@ mod tests {
                 None,
             )],
         );
-        assert!(classify(&p, &cfg())
-            .unwrap()
-            .anti_affinity_host_selectors
-            .is_empty());
+        let got = classify(&p, &cfg()).unwrap();
+        assert!(got.anti_affinity_host_selectors.is_empty());
+        assert!(got.anti_affinity_topology_selectors.is_empty());
     }
 
     #[test]
@@ -642,10 +666,9 @@ mod tests {
                 Some(vec!["other".into()]),
             )],
         );
-        assert!(classify(&p, &cfg())
-            .unwrap()
-            .anti_affinity_host_selectors
-            .is_empty());
+        let got = classify(&p, &cfg()).unwrap();
+        assert!(got.anti_affinity_host_selectors.is_empty());
+        assert!(got.anti_affinity_topology_selectors.is_empty());
     }
 
     #[test]
