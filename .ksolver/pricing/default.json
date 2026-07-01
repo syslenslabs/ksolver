@@ -1,12 +1,7 @@
 {
   "currency": "USD",
-  "default_monthly": 100.0,
+  "default_monthly": 0.0,
   "node_pools": {},
-  "instance_types": {
-    "c5.4xlarge":  { "monthly": 489.60 },
-    "g4dn.xlarge": { "monthly": 379.80 },
-    "m5.xlarge":   { "monthly": 138.70 },
-    "r5.2xlarge":  { "monthly": 363.10 }
-  },
+  "instance_types": {},
   "nodes": {}
 }

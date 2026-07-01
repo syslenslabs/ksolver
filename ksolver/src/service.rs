@@ -184,19 +184,31 @@ impl Analyzer {
                 KubeCollector::new(cluster_name.clone(), req.kubeconfig.clone()).await?;
             collector.collect().await?
         };
-        let has_usage = snapshot
+        let pods_with_usage = snapshot
             .pods
             .iter()
-            .any(|p| p.usage.cpu_usage_milli > 0 || p.usage.memory_bytes > 0);
-        if !has_usage && req.snapshot_file.is_empty() {
+            .filter(|p| p.usage.cpu_usage_milli > 0 || p.usage.memory_bytes > 0)
+            .count();
+        info!(
+            total_pods = snapshot.pods.len(),
+            pods_with_usage,
+            "usage data check"
+        );
+        if pods_with_usage == 0 && req.snapshot_file.is_empty() {
             info!("no usage data in snapshot; attempting metrics refresh");
-            if let Ok(collector) =
-                KubeCollector::new(cluster_name.clone(), req.kubeconfig.clone()).await
-            {
-                if collector.refresh_usage(&mut snapshot).await {
-                    if let Err(err) = cache.write_snapshot(&snapshot).await {
-                        warn!(error = %err, "failed to update cached snapshot with usage data");
+            match KubeCollector::new(cluster_name.clone(), req.kubeconfig.clone()).await {
+                Ok(collector) => {
+                    if collector.refresh_usage(&mut snapshot).await {
+                        info!("metrics refresh succeeded; updating cached snapshot");
+                        if let Err(err) = cache.write_snapshot(&snapshot).await {
+                            warn!(error = %err, "failed to update cached snapshot with usage data");
+                        }
+                    } else {
+                        warn!("metrics refresh returned no usage data — is metrics-server running and healthy?");
                     }
+                }
+                Err(err) => {
+                    warn!(error = %err, "failed to create KubeCollector for metrics refresh");
                 }
             }
         }
