@@ -376,6 +376,7 @@ pub fn build_pending_input(
         nodes,
         workloads,
         anti_affinity_pairs,
+        ..Default::default()
     }
 }
 

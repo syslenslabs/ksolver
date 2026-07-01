@@ -608,6 +608,7 @@ mod tests {
                 ..Default::default()
             }],
             anti_affinity_pairs: Vec::new(),
+            ..Default::default()
         };
         let plan = OptimizationPlan {
             recommended_moves: vec![crate::model::PodMove {

@@ -738,6 +738,7 @@ mod tests {
             nodes: nodes(100),
             workloads: wls(8_000, 1),
             anti_affinity_pairs: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(model_worker_count(&input), 1);
     }
@@ -748,6 +749,7 @@ mod tests {
             nodes: nodes(100),
             workloads: wls(50, 100),
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         assert_eq!(model_worker_count(&input), 8);
     }
@@ -758,6 +760,7 @@ mod tests {
             nodes: nodes(100),
             workloads: wls(500, 100),
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         assert_eq!(model_worker_count(&input), 4);
     }
@@ -768,6 +771,7 @@ mod tests {
             nodes: nodes(5000),
             workloads: wls(2, 5000),
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         assert_eq!(model_worker_count(&input), 2);
     }
@@ -778,6 +782,7 @@ mod tests {
             nodes: nodes(4),
             workloads: wls(2, 4),
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         assert!(recommended_worker_count(&input) >= 1);
     }
@@ -823,6 +828,7 @@ mod tests {
             nodes: vec![node],
             workloads: vec![mk("a"), mk("b")],
             anti_affinity_pairs: vec![],
+            ..Default::default()
         }
     }
 
@@ -907,6 +913,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4)],
             workloads: vec![gang_workload(5, 5, &["n1"])],
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         let scenario = ScenarioConfig {
             solver: "cp-sat-rust".to_string(),
@@ -929,6 +936,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 5)],
             workloads: vec![gang_workload(5, 5, &["n1"])],
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         let scenario = ScenarioConfig {
             solver: "cp-sat-rust".to_string(),
@@ -952,6 +960,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 2), gpu_node("n2", 2)],
             workloads: vec![w],
             anti_affinity_pairs: vec![],
+            ..Default::default()
         }
     }
 
@@ -1001,6 +1010,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4), gpu_node("n3", 4)],
             workloads: vec![w],
             anti_affinity_pairs: vec![("gang:t/job".to_string(), "gang:t/job".to_string())],
+            ..Default::default()
         };
         let scenario = ScenarioConfig {
             solver: "cp-sat-rust".to_string(),
@@ -1024,6 +1034,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
             workloads: vec![w],
             anti_affinity_pairs: vec![("gang:t/job".to_string(), "gang:t/job".to_string())],
+            ..Default::default()
         };
         let scenario = ScenarioConfig {
             solver: "cp-sat-rust".to_string(),
@@ -1076,6 +1087,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4)],
             workloads: vec![mk("a", &["n1"]), mk("b", &["n1"])],
             anti_affinity_pairs: vec![("t/a".into(), "t/b".into())],
+            ..Default::default()
         };
         let (s1, _) = super::enabled::solve(&input1, &scenario).expect("solve");
         let admitted1 = s1
@@ -1088,6 +1100,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
             workloads: vec![mk("a", &["n1", "n2"]), mk("b", &["n1", "n2"])],
             anti_affinity_pairs: vec![("t/a".into(), "t/b".into())],
+            ..Default::default()
         };
         let (s2, _) = super::enabled::solve(&input2, &scenario).expect("solve");
         let admitted2 = s2
@@ -1116,6 +1129,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4)],
             workloads: vec![a, b],
             anti_affinity_pairs: vec![("gang:t/a".into(), "gang:t/b".into())],
+            ..Default::default()
         };
         let (sol, _i) = super::enabled::solve(&input, &scenario).expect("solve");
         let admitted = sol
@@ -1135,6 +1149,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4)],
             workloads: vec![a2],
             anti_affinity_pairs: vec![],
+            ..Default::default()
         };
         let (s3, _i) = super::enabled::solve(&solo, &scenario).expect("solve");
         assert_eq!(
@@ -1155,6 +1170,7 @@ mod tests {
             nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
             workloads: vec![a3, b3],
             anti_affinity_pairs: vec![("gang:t/a".into(), "gang:t/b".into())],
+            ..Default::default()
         };
         let (s4, _i) = super::enabled::solve(&two, &scenario).expect("solve");
         let admitted4 = s4

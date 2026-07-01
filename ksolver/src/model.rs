@@ -1196,6 +1196,23 @@ pub struct OptimizationInput {
     pub workloads: Vec<OptimizationWorkload>,
     #[serde(default)]
     pub anti_affinity_pairs: Vec<(String, String)>,
+    /// Hard resource caps over groups of workloads (e.g. per-namespace GPU quota).
+    /// Empty by default; only the shadow scheduler sets these. Enforced by the
+    /// solver as `Σ total_resource_w · placed[w] ≤ limit` (requires partial_admission).
+    #[serde(default)]
+    pub quota_groups: Vec<QuotaGroup>,
+}
+
+/// A hard cap on the total amount of `resource` consumed by admitted workloads in
+/// `workload_ids`. Used for per-namespace (tenant) GPU quotas in the shadow scheduler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QuotaGroup {
+    #[serde(default)]
+    pub workload_ids: Vec<String>,
+    #[serde(default)]
+    pub resource: String,
+    #[serde(default)]
+    pub limit: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

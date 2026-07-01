@@ -42,6 +42,7 @@ fn build_input_with_grouping(
         nodes: node_groups,
         workloads: Vec::with_capacity(cluster.workloads.len()),
         anti_affinity_pairs: Vec::new(),
+        ..Default::default()
     };
 
     let mut grouped: BTreeMap<String, Vec<NormalizedWorkload>> = BTreeMap::new();
@@ -876,6 +877,7 @@ mod tests {
                 ..Default::default()
             }],
             anti_affinity_pairs: Vec::new(),
+            ..Default::default()
         };
 
         let summary = summarize_current_assignment(&input);

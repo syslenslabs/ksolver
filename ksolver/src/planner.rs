@@ -611,6 +611,7 @@ mod tests {
                 ..Default::default()
             }],
             anti_affinity_pairs: Vec::new(),
+            ..Default::default()
         };
 
         let solution = OptimizationSolution {
