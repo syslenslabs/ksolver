@@ -23,6 +23,26 @@ struct ShadowHttpState {
     watch_healthy: Arc<AtomicBool>,
 }
 
+/// Read-only DRY-RUN view: the pod→node bindings the latest decision would imply, rendered as the
+/// exact subresource payloads a real binder WOULD send. Nothing is ever applied (shadow mode).
+async fn binding_plan_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
+    let latest = s.traces.recent().into_iter().next();
+    let (seq, solve_millis) = latest
+        .as_ref()
+        .map(|t| (t.sequence, t.solve_millis))
+        .unwrap_or((0, 0));
+    let plan = latest
+        .map(|t| crate::scheduler::binding::render_binding_plan(&t))
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "dry_run": true,
+        "note": "rendered from the latest shadow trace; never applied — may be stale",
+        "trace_sequence": seq,
+        "solve_millis": solve_millis,
+        "bindings": plan,
+    }))
+}
+
 async fn traces_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "traces": s.traces.recent() }))
 }
@@ -76,6 +96,7 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     };
     let app = Router::new()
         .route("/api/scheduler/traces", get(traces_handler))
+        .route("/api/scheduler/binding-plan", get(binding_plan_handler))
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -149,14 +170,16 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
                     .count() as u64;
                 metrics::inc_shadow_unplaced(unplaced);
                 metrics::inc_shadow_caveated(caveated);
+                let would_bind = crate::scheduler::binding::render_binding_plan(&trace).len();
                 info!(
                     sequence = trace.sequence,
                     observed = trace.observed_pods,
                     unplaced,
                     caveated,
+                    would_bind,
                     status = %trace.solver_status,
                     solve_millis = trace.solve_millis,
-                    "shadow decision recorded (bound nothing)"
+                    "shadow decision recorded (bound nothing; dry-run plan available)"
                 );
                 traces.push(trace);
             }
@@ -262,5 +285,42 @@ mod tests {
         // The embedded dashboard must poll the traces API and render the decisions table.
         assert!(SHADOW_HTML.contains("/api/scheduler/traces"));
         assert!(SHADOW_HTML.contains("id=\"decisions\""));
+    }
+
+    #[tokio::test]
+    async fn binding_plan_endpoint_is_dry_run_and_lists_bindings() {
+        use super::{binding_plan_handler, ShadowHttpState};
+        use crate::scheduler::trace::{DecisionTrace, PodDecision, PodPlacement, TraceStore};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let traces = Arc::new(TraceStore::new(8));
+        traces.push(DecisionTrace {
+            sequence: 7,
+            observed_pods: 1,
+            decisions: vec![PodDecision {
+                uid: "u".into(),
+                namespace: "team".into(),
+                name: "a".into(),
+                gpu_request: 1,
+                placement: PodPlacement::Placed { node: "n1".into() },
+                caveats: vec![],
+            }],
+            solver_status: "OPTIMAL".into(),
+            solve_millis: 5,
+            solve_core_millis: 3,
+            snapshot_age_millis: 0,
+            note: String::new(),
+        });
+        let state = ShadowHttpState {
+            traces,
+            watch_healthy: Arc::new(AtomicBool::new(true)),
+        };
+        let axum::Json(v) = binding_plan_handler(axum::extract::State(state)).await;
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["trace_sequence"], 7);
+        let bindings = v["bindings"].as_array().expect("bindings array");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0]["node_name"], "n1");
+        assert_eq!(bindings[0]["binding_body"]["target"]["name"], "n1");
     }
 }
