@@ -188,8 +188,12 @@ async fn run_one_solve(
         // Place what fits; leave the rest unplaced instead of failing the whole solve
         // when pending pods compete for scarce capacity.
         partial_admission: true,
+        // Bounded latency: accept the best incumbent within this budget rather than
+        // spending up to 600s proving cost-optimality (the placement is found in ms).
+        solve_time_limit_secs: cfg.solve_time_limit_secs,
         ..Default::default()
     };
+    let solve_start = Instant::now();
     let (solution, status) = match cpsat_rust::solve(&input, &scenario) {
         Ok((sol, info)) => (sol, info.status),
         Err(e) => {
@@ -197,6 +201,7 @@ async fn run_one_solve(
             (Default::default(), "error".to_string())
         }
     };
+    let solve_core_millis = solve_start.elapsed().as_millis() as u64;
 
     let solve_millis = started.elapsed().as_millis() as u64;
     metrics::observe_shadow_solve_seconds(started.elapsed().as_secs_f64());
@@ -208,6 +213,7 @@ async fn run_one_solve(
         &solution,
         &status,
         solve_millis,
+        solve_core_millis,
         snapshot_age_millis,
     ))
 }

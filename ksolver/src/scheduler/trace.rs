@@ -30,6 +30,10 @@ pub struct DecisionTrace {
     pub decisions: Vec<PodDecision>,
     pub solver_status: String,
     pub solve_millis: u64,
+    /// Time spent strictly inside the CP-SAT solve call (excludes collect/normalize/build);
+    /// use this to verify the configured solve time limit.
+    #[serde(default)]
+    pub solve_core_millis: u64,
     pub snapshot_age_millis: u64,
     pub note: String,
 }
@@ -87,6 +91,7 @@ mod tests {
             }],
             solver_status: "OPTIMAL".into(),
             solve_millis: 12,
+            solve_core_millis: 8,
             snapshot_age_millis: 3,
             note: String::new(),
         }

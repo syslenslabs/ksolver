@@ -23,6 +23,7 @@ pub fn build_decision_trace(
     solution: &OptimizationSolution,
     solver_status: &str,
     solve_millis: u64,
+    solve_core_millis: u64,
     snapshot_age_millis: u64,
 ) -> DecisionTrace {
     // pod "{ns}/{name}" -> resolved placement.
@@ -102,6 +103,7 @@ pub fn build_decision_trace(
         decisions,
         solver_status: solver_status.to_string(),
         solve_millis,
+        solve_core_millis,
         snapshot_age_millis,
         note: String::new(),
     }
@@ -162,7 +164,7 @@ mod tests {
             ..Default::default()
         };
         let pending = vec![ppod("team", "m0"), ppod("team", "m1")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 1);
+        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 5, 1);
         assert!(t
             .decisions
             .iter()
@@ -187,7 +189,7 @@ mod tests {
         // no assignment_counts entry -> not admitted
         let solution = OptimizationSolution::default();
         let pending = vec![ppod("team", "m0"), ppod("team", "m1")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 1);
+        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 5, 1);
         assert!(t.decisions.iter().all(|d| matches!(
             &d.placement,
             PodPlacement::Unplaced { reason } if reason.contains("gang not admitted")
@@ -223,7 +225,7 @@ mod tests {
             ..Default::default()
         };
         let pending = vec![ppod("team", "m0"), ppod("team", "m1"), ppod("team", "m2")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 1);
+        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 5, 1);
         // sorted members m0,m1 -> n1 (count 2); m2 -> n2 (count 1)
         let by_name: HashMap<_, _> = t
             .decisions
@@ -240,7 +242,7 @@ mod tests {
         let input = OptimizationInput::default();
         let solution = OptimizationSolution::default();
         let pending = vec![ppod("team", "ghost")];
-        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 1);
+        let t = build_decision_trace(1, &pending, &input, &solution, "OPTIMAL", 5, 5, 1);
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Unplaced { reason } if reason.contains("not submitted")
@@ -272,7 +274,7 @@ mod tests {
         };
         let mut p = ppod("team", "m0");
         p.unmodeled_constraints = vec!["pod anti-affinity".to_string()];
-        let t = build_decision_trace(1, &[p], &input, &solution, "OPTIMAL", 5, 1);
+        let t = build_decision_trace(1, &[p], &input, &solution, "OPTIMAL", 5, 5, 1);
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Placed { .. }
