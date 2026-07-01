@@ -169,10 +169,15 @@ pub fn run_scenario(s: &BenchScenario) -> BenchResult {
     let build_ms = t0.elapsed().as_millis();
 
     let workers = cpsat_rust::recommended_worker_count(&input);
+    let cap = std::env::var("KSOLVER_BENCH_SOLVE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(60);
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
         partial_admission: true,
-        solve_time_limit_secs: 60,
+        solve_time_limit_secs: cap,
         ..Default::default()
     };
 
