@@ -92,6 +92,7 @@ pub fn build_decision_trace(
             name: p.name.clone(),
             gpu_request: p.gpu_request,
             placement,
+            caveats: p.unmodeled_constraints.clone(),
         });
     }
 
@@ -243,5 +244,41 @@ mod tests {
             &t.decisions[0].placement,
             PodPlacement::Unplaced { reason } if reason.contains("not submitted")
         ));
+    }
+
+    #[test]
+    fn caveats_propagate_to_placed_decision() {
+        let gang = OptimizationWorkload {
+            id: "gang:team/job".into(),
+            namespace: "team".into(),
+            name: "m0".into(),
+            group_size: 1,
+            members: vec![member("team", "m0")],
+            feasible_nodes: vec!["n1".into()],
+            ..Default::default()
+        };
+        let input = OptimizationInput {
+            workloads: vec![gang],
+            ..Default::default()
+        };
+        let mut counts = HashMap::new();
+        counts.insert("n1".to_string(), 1);
+        let mut assignment_counts = HashMap::new();
+        assignment_counts.insert("gang:team/job".to_string(), counts);
+        let solution = OptimizationSolution {
+            assignment_counts,
+            ..Default::default()
+        };
+        let mut p = ppod("team", "m0");
+        p.unmodeled_constraints = vec!["pod anti-affinity".to_string()];
+        let t = build_decision_trace(1, &[p], &input, &solution, "OPTIMAL", 5, 1);
+        assert!(matches!(
+            &t.decisions[0].placement,
+            PodPlacement::Placed { .. }
+        ));
+        assert_eq!(
+            t.decisions[0].caveats,
+            vec!["pod anti-affinity".to_string()]
+        );
     }
 }

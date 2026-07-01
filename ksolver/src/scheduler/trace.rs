@@ -17,6 +17,10 @@ pub struct PodDecision {
     pub name: String,
     pub gpu_request: i64,
     pub placement: PodPlacement,
+    /// Scheduling constraints shadow does not model (e.g. pod anti-affinity); a
+    /// placed recommendation may violate these. Empty when none.
+    #[serde(default)]
+    pub caveats: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +83,7 @@ mod tests {
                 placement: PodPlacement::Placed {
                     node: "node-1".into(),
                 },
+                caveats: vec![],
             }],
             solver_status: "OPTIMAL".into(),
             solve_millis: 12,
@@ -113,5 +118,13 @@ mod tests {
         let s = TraceStore::new(4);
         assert_eq!(s.next_sequence(), 1);
         assert_eq!(s.next_sequence(), 2);
+    }
+
+    #[test]
+    fn pod_decision_deserializes_without_caveats() {
+        // Backward compatibility: older traces omit the `caveats` field.
+        let json = r#"{"uid":"u1","namespace":"team-a","name":"job-0","gpu_request":1,"placement":{"kind":"placed","node":"n1"}}"#;
+        let d: PodDecision = serde_json::from_str(json).expect("deserialize");
+        assert!(d.caveats.is_empty());
     }
 }
