@@ -331,3 +331,29 @@ solves; global kill-switch; per-decision explainability; leader election; fail-o
 - Language boundary for the controller: stay in Rust (kube-rs) vs a thin Go controller — Rust is
   the default given the existing codebase; revisit only if kube-rs gaps appear.
 - Decision-trace schema and how the simulator subscribes (extend the existing SSE channel).
+
+## 13. Implementation status (as of 2026-07-01)
+
+Shadow-mode scheduler (`ksolver shadow`, binds nothing) is implemented and verified. Delivered:
+
+- **Solver foundation:** partial admission (all-or-nothing latch), pending-only residual solve,
+  bounded solve (`KSOLVER_SHADOW_SOLVE_SECS`), multi-worker sizing fixed for the 100-node
+  pending path (Phase 7b — scarce-900j went 336→800 optimal at the 10 s cap).
+- **Gangs:** grouping by label, single-node co-location, all-or-nothing admission.
+- **Per-namespace GPU quota** (Phase 11): `Σ total_gpu·placed ≤ limit`; `KSOLVER_SHADOW_QUOTAS`.
+- **Pod anti-affinity** (Phases 5e–5h, 12, + matchExpressions): hostname (exact-node) and
+  non-hostname topology (zone/rack domain) exclusion, pending-vs-running both directions,
+  within-gang self-spread, cross-workload same-batch; full label selectors
+  (matchLabels + matchExpressions In/NotIn/Exists/DoesNotExist). Unmodeled terms disclosed
+  via a "pod anti-affinity" caveat (cross-namespace scoping, unsupported operators).
+- **Node affinity:** kube-conformant OR-of-terms (matchExpressions) + matchFields (metadata.name).
+- **Fractional GPU:** MIG mixed-strategy slices observed/placed (Phase F1); time-sliced-node
+  disclosure caveat (Phase F2). DRA (F3) deferred — see the fractional-GPU spec.
+- **Feasibility conformance** (Phase 2): `ksolver conform` compares our feasibility to
+  kube-scheduler Filter via kube-scheduler-simulator (live run needs a simulator deployed).
+- **Observability:** live dashboard + traces; specific per-pod unschedulability reasons
+  (Phase 13); caveats for time-slicing and unmodeled constraints.
+
+Still deferred / needs a decision or infrastructure: real binding + the single-writer
+reservation ledger (§4/§10 — mutation, needs authorization); DRA (F3); MIG-aware per-resource
+quota (units decision); soft/preferred affinity scoring; fair-share; cross-namespace anti-affinity.
