@@ -7,6 +7,21 @@ fn pod_key(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
 
+/// Whether a node is a time-sliced (oversubscribed, no-isolation) GPU node, from its labels.
+/// If the NVIDIA `nvidia.com/gpu.sharing-strategy` label is present it is authoritative (only
+/// `time-slicing` counts — `mps`/`none` do not, and MPS also uses replicas); otherwise fall
+/// back to `nvidia.com/gpu.replicas > 1` (legacy time-slicing without the strategy label).
+pub(crate) fn is_time_sliced_node(labels: &std::collections::BTreeMap<String, String>) -> bool {
+    match labels.get("nvidia.com/gpu.sharing-strategy") {
+        Some(s) => s == "time-slicing",
+        None => labels
+            .get("nvidia.com/gpu.replicas")
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(|n| n > 1)
+            .unwrap_or(false),
+    }
+}
+
 /// Map the solver's per-gang output back to per-pod placement decisions.
 ///
 /// A gang (`OptimizationWorkload`, possibly `group_size > 1`) is admitted iff its
@@ -27,6 +42,7 @@ pub fn build_decision_trace(
     solve_core_millis: u64,
     snapshot_age_millis: u64,
     drop_reasons: &HashMap<String, String>,
+    time_sliced_nodes: &std::collections::HashSet<String>,
 ) -> DecisionTrace {
     // When the solver returned no usable result (Err: timeout/no incumbent/infeasible/
     // backend error), a submitted pod being unresolved does NOT mean it is unschedulable
@@ -101,13 +117,20 @@ pub fn build_decision_trace(
             });
             PodPlacement::Unplaced { reason }
         });
+        // Disclose time-sliced (shared, no-isolation) GPU placements.
+        let mut caveats = p.unmodeled_constraints.clone();
+        if let PodPlacement::Placed { node } = &placement {
+            if time_sliced_nodes.contains(node) {
+                caveats.push("time-sliced GPU: shared, no isolation".to_string());
+            }
+        }
         decisions.push(PodDecision {
             uid: p.uid.clone(),
             namespace: p.namespace.clone(),
             name: p.name.clone(),
             gpu_request: p.gpu_request,
             placement,
-            caveats: p.unmodeled_constraints.clone(),
+            caveats,
         });
     }
 
@@ -131,7 +154,7 @@ mod tests {
     };
     use crate::scheduler::pod_filter::PendingGpuPod;
     use crate::scheduler::trace::PodPlacement;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn ppod(ns: &str, name: &str) -> PendingGpuPod {
         PendingGpuPod {
@@ -190,6 +213,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(t
             .decisions
@@ -226,6 +250,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(t.decisions.iter().all(|d| matches!(
             &d.placement,
@@ -273,6 +298,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         // sorted members m0,m1 -> n1 (count 2); m2 -> n2 (count 1)
         let by_name: HashMap<_, _> = t
@@ -301,6 +327,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(matches!(
             &t.decisions[0].placement,
@@ -344,6 +371,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(matches!(
             &t.decisions[0].placement,
@@ -385,6 +413,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(t.decisions.iter().all(|d| matches!(
             &d.placement,
@@ -408,6 +437,7 @@ mod tests {
             5,
             1,
             &HashMap::new(),
+            &HashSet::new(),
         );
         assert!(matches!(
             &t.decisions[0].placement,
@@ -427,11 +457,122 @@ mod tests {
                 .to_string(),
         );
         let t = build_decision_trace(
-            1, &pending, &input, &solution, "OPTIMAL", true, 5, 5, 1, &drops,
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &drops,
+            &HashSet::new(),
         );
         assert!(matches!(
             &t.decisions[0].placement,
             PodPlacement::Unplaced { reason } if reason.contains("no feasible node")
         ));
+    }
+
+    #[test]
+    fn is_time_sliced_node_detection() {
+        use std::collections::BTreeMap;
+        let l = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert!(super::is_time_sliced_node(&l(&[(
+            "nvidia.com/gpu.sharing-strategy",
+            "time-slicing"
+        )])));
+        // MPS (even with replicas) is NOT time-slicing.
+        assert!(!super::is_time_sliced_node(&l(&[
+            ("nvidia.com/gpu.sharing-strategy", "mps"),
+            ("nvidia.com/gpu.replicas", "4"),
+        ])));
+        assert!(!super::is_time_sliced_node(&l(&[(
+            "nvidia.com/gpu.sharing-strategy",
+            "none"
+        )])));
+        // No strategy label -> replicas fallback.
+        assert!(super::is_time_sliced_node(&l(&[(
+            "nvidia.com/gpu.replicas",
+            "4"
+        )])));
+        assert!(!super::is_time_sliced_node(&l(&[(
+            "nvidia.com/gpu.replicas",
+            "1"
+        )])));
+        assert!(!super::is_time_sliced_node(&l(&[(
+            "nvidia.com/gpu.replicas",
+            "x"
+        )])));
+        assert!(!super::is_time_sliced_node(&BTreeMap::new()));
+    }
+
+    #[test]
+    fn placed_pod_on_time_sliced_node_gets_caveat() {
+        let gang = OptimizationWorkload {
+            id: "gang:team/job".into(),
+            namespace: "team".into(),
+            name: "m0".into(),
+            group_size: 1,
+            members: vec![member("team", "m0")],
+            feasible_nodes: vec!["n1".into()],
+            ..Default::default()
+        };
+        let input = OptimizationInput {
+            workloads: vec![gang],
+            ..Default::default()
+        };
+        let mut counts = HashMap::new();
+        counts.insert("n1".to_string(), 1);
+        let mut assignment_counts = HashMap::new();
+        assignment_counts.insert("gang:team/job".to_string(), counts);
+        let solution = OptimizationSolution {
+            assignment_counts,
+            ..Default::default()
+        };
+        let pending = vec![ppod("team", "m0")];
+        let time_sliced: HashSet<String> = ["n1".to_string()].into_iter().collect();
+        let t = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+            &time_sliced,
+        );
+        assert!(t.decisions[0]
+            .caveats
+            .iter()
+            .any(|c| c.contains("time-sliced GPU")));
+
+        // Same pod on a NON-time-sliced node: no caveat.
+        let t2 = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert!(!t2.decisions[0]
+            .caveats
+            .iter()
+            .any(|c| c.contains("time-sliced GPU")));
     }
 }

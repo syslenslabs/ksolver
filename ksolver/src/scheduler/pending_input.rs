@@ -1609,6 +1609,7 @@ mod tests {
             5,
             1,
             &drop_reasons,
+            &std::collections::HashSet::new(),
         );
         let placed = trace
             .decisions

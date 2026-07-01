@@ -226,6 +226,14 @@ async fn run_one_solve(
     let solve_millis = started.elapsed().as_millis() as u64;
     metrics::observe_shadow_solve_seconds(started.elapsed().as_secs_f64());
 
+    // Time-sliced (oversubscribed, no-isolation) GPU nodes, for placement disclosure.
+    let time_sliced_nodes: std::collections::HashSet<String> = normalized
+        .nodes
+        .iter()
+        .filter(|n| crate::scheduler::decision::is_time_sliced_node(&n.labels))
+        .map(|n| n.name.clone())
+        .collect();
+
     Ok(build_decision_trace(
         sequence,
         pending,
@@ -237,6 +245,7 @@ async fn run_one_solve(
         solve_core_millis,
         snapshot_age_millis,
         &drop_reasons,
+        &time_sliced_nodes,
     ))
 }
 
