@@ -354,6 +354,22 @@ pub struct PreferredNodeTerm {
     pub exprs: Vec<NodeAffinityTerm>,
 }
 
+/// A `preferredDuringScheduling` pod (anti-)affinity term: a `weight` (1–100), a `topology_key`,
+/// a label `selector` (reqs + namespace scope, reusing `AntiAffinitySelector`), and an `anti` flag.
+/// A candidate node accumulates `+weight` (affinity) or `-weight` (anti-affinity) toward its soft
+/// score for each matching running pod sharing the node's topology domain. Best-effort, forward-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreferredPodTerm {
+    #[serde(default)]
+    pub weight: i64,
+    #[serde(default)]
+    pub topology_key: String,
+    #[serde(default)]
+    pub selector: AntiAffinitySelector,
+    #[serde(default)]
+    pub anti: bool,
+}
+
 /// One `nodeSelectorTerm`: `match_expressions` are evaluated against node LABELS, `match_fields`
 /// against node FIELDS (k8s allows only `metadata.name`, operators In/NotIn, exactly one value).
 /// A term matches iff all its expressions AND all its fields match.

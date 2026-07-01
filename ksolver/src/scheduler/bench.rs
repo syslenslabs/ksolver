@@ -148,6 +148,7 @@ pub fn generate(s: &BenchScenario) -> (NormalizedCluster, Vec<PendingGpuPod>) {
                 anti_affinity_host_selectors: selectors.clone(),
                 anti_affinity_topology_selectors: vec![],
                 preferred_node_affinity: vec![],
+                preferred_pod_affinity: vec![],
             });
         }
     }

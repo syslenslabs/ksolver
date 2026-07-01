@@ -24,6 +24,8 @@ pub struct PendingGpuPod {
     pub anti_affinity_topology_selectors: Vec<(String, crate::model::AntiAffinitySelector)>,
     /// Preferred (soft) node-affinity terms (weight + matchExpressions) for the soft tie-break pass.
     pub preferred_node_affinity: Vec<crate::model::PreferredNodeTerm>,
+    /// Preferred (soft) pod affinity + anti-affinity terms for the soft tie-break pass.
+    pub preferred_pod_affinity: Vec<crate::model::PreferredPodTerm>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -133,6 +135,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         .filter(|(k, _)| k != "kubernetes.io/hostname")
         .collect();
     let preferred_node_affinity = modeled_preferred_node_affinity(spec);
+    let preferred_pod_affinity = modeled_preferred_pod_affinity(spec);
     Some(PendingGpuPod {
         uid,
         namespace,
@@ -144,6 +147,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         anti_affinity_host_selectors,
         anti_affinity_topology_selectors,
         preferred_node_affinity,
+        preferred_pod_affinity,
     })
 }
 
@@ -190,6 +194,65 @@ fn modeled_preferred_node_affinity(spec: &corev1::PodSpec) -> Vec<crate::model::
             exprs,
         });
     }
+    out
+}
+
+/// Preferred (soft) pod affinity + anti-affinity terms from `podAffinity`/`podAntiAffinity`
+/// `preferredDuringScheduling…`. Each `WeightedPodAffinityTerm` lowers to a `PreferredPodTerm`
+/// (weight>0, modelable labelSelector, modelable namespaceSelector); unmodelable selectors are
+/// skipped (best-effort soft — no caveat). `anti=true` for anti-affinity. Selector lowering shared
+/// with the collector; namespace scope reuses `AntiAffinitySelector` (empty `namespaces` ⇒ own ns).
+fn modeled_preferred_pod_affinity(spec: &corev1::PodSpec) -> Vec<crate::model::PreferredPodTerm> {
+    let mut out = Vec::new();
+    let Some(aff) = spec.affinity.as_ref() else {
+        return out;
+    };
+    let mut consume = |terms: Option<Vec<corev1::WeightedPodAffinityTerm>>, anti: bool| {
+        let Some(terms) = terms else { return };
+        for wt in terms {
+            if wt.weight <= 0 {
+                continue;
+            }
+            let t = &wt.pod_affinity_term;
+            // namespaceSelector: None if absent; Some(reqs) if modelable (empty {} = all);
+            // unmodelable ⇒ skip the term (best-effort soft, no caveat).
+            let namespace_selector = match t.namespace_selector.as_ref() {
+                None => None,
+                Some(ns_ls) => match crate::collector::namespace_selector_to_reqs(ns_ls) {
+                    Some(reqs) => Some(reqs),
+                    None => continue,
+                },
+            };
+            let Some(ls) = t.label_selector.as_ref() else {
+                continue;
+            };
+            let Some(reqs) = crate::collector::label_selector_to_reqs(ls) else {
+                continue;
+            };
+            out.push(crate::model::PreferredPodTerm {
+                weight: i64::from(wt.weight),
+                topology_key: t.topology_key.clone(),
+                selector: crate::model::AntiAffinitySelector {
+                    reqs,
+                    namespaces: t.namespaces.clone().unwrap_or_default(),
+                    namespace_selector,
+                },
+                anti,
+            });
+        }
+    };
+    consume(
+        aff.pod_affinity
+            .as_ref()
+            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.clone()),
+        false,
+    );
+    consume(
+        aff.pod_anti_affinity
+            .as_ref()
+            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.clone()),
+        true,
+    );
     out
 }
 
@@ -697,6 +760,52 @@ mod tests {
         assert_eq!(t.exprs.len(), 1);
         assert_eq!(t.exprs[0].key, "zone");
         assert_eq!(t.exprs[0].values, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn preferred_pod_affinity_extracted_both_directions() {
+        let term = |val: &str, tk: &str| corev1::WeightedPodAffinityTerm {
+            weight: 30,
+            pod_affinity_term: corev1::PodAffinityTerm {
+                label_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some([("app".to_string(), val.to_string())].into()),
+                        ..Default::default()
+                    },
+                ),
+                topology_key: tk.to_string(),
+                ..Default::default()
+            },
+        };
+        let spec = corev1::PodSpec {
+            affinity: Some(corev1::Affinity {
+                pod_affinity: Some(corev1::PodAffinity {
+                    preferred_during_scheduling_ignored_during_execution: Some(vec![term(
+                        "cache",
+                        "kubernetes.io/hostname",
+                    )]),
+                    ..Default::default()
+                }),
+                pod_anti_affinity: Some(corev1::PodAntiAffinity {
+                    preferred_during_scheduling_ignored_during_execution: Some(vec![term(
+                        "noisy",
+                        "topology.kubernetes.io/zone",
+                    )]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let got = modeled_preferred_pod_affinity(&spec);
+        assert_eq!(got.len(), 2);
+        let aff = got.iter().find(|t| !t.anti).unwrap();
+        assert_eq!(aff.weight, 30);
+        assert_eq!(aff.topology_key, "kubernetes.io/hostname");
+        assert_eq!(aff.selector.reqs.len(), 1);
+        let anti = got.iter().find(|t| t.anti).unwrap();
+        assert_eq!(anti.topology_key, "topology.kubernetes.io/zone");
+        assert!(anti.anti);
     }
 
     #[test]

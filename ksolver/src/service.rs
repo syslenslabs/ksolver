@@ -191,8 +191,7 @@ impl Analyzer {
             .count();
         info!(
             total_pods = snapshot.pods.len(),
-            pods_with_usage,
-            "usage data check"
+            pods_with_usage, "usage data check"
         );
         if pods_with_usage == 0 && req.snapshot_file.is_empty() {
             info!("no usage data in snapshot; attempting metrics refresh");
@@ -319,8 +318,8 @@ impl Analyzer {
                 );
                 normalized
             } else {
-                let normalized =
-                    Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(&snapshot);
+                let normalized = Normalizer::new(pricing_catalog.clone(), normalizer_options)
+                    .normalize(&snapshot);
                 if let Err(err) = cache
                     .write_normalized(&normalization_key, &normalized)
                     .await
@@ -897,12 +896,16 @@ fn compute_constraint_costs(
     for cs in CONSTRAINT_SCENARIOS {
         (cs.mutate)(&mut max_scenario);
     }
-    let theoretical_max_savings =
-        solve_scenario_quick(snapshot, pricing_catalog, &max_scenario)
-            .map(|p| p.savings_monthly)
-            .unwrap_or_else(|| baseline_savings.clone());
+    let theoretical_max_savings = solve_scenario_quick(snapshot, pricing_catalog, &max_scenario)
+        .map(|p| p.savings_monthly)
+        .unwrap_or_else(|| baseline_savings.clone());
 
-    rows.sort_by(|a, b| b.delta.monthly.partial_cmp(&a.delta.monthly).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.delta
+            .monthly
+            .partial_cmp(&a.delta.monthly)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     info!(
         rows = rows.len(),
@@ -941,7 +944,8 @@ fn solve_scenario_quick(
         memory_usage_safety_factor: scenario.memory_usage_safety_factor,
         max_memory_overflow_probability_percent: scenario.max_memory_overflow_probability_percent,
     };
-    let normalized = Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(snapshot);
+    let normalized =
+        Normalizer::new(pricing_catalog.clone(), normalizer_options).normalize(snapshot);
     let input = build_input(&normalized, scenario.ignore_unschedulable_workloads);
 
     match cpsat_rust::solve(&input, scenario) {

@@ -168,6 +168,7 @@ mod tests {
             anti_affinity_host_selectors: vec![],
             anti_affinity_topology_selectors: vec![],
             preferred_node_affinity: vec![],
+            preferred_pod_affinity: vec![],
         }
     }
 
