@@ -577,11 +577,48 @@ pub fn build_pending_input_diagnosed(
                     })
                     .map(|t| t.weight)
                     .sum();
-                if score > 0 {
-                    soft_scores.insert(node_name.clone(), score);
+                if score != 0 {
+                    *soft_scores.entry(node_name.clone()).or_default() += score;
                 }
             }
         }
+        // Preferred pod (anti-)affinity: forward-only, domain-aware, label-based for ALL topology
+        // keys (incl. kubernetes.io/hostname). A candidate node accumulates +weight (affinity) /
+        // -weight (anti-affinity) for EACH matching running pod sharing the candidate's topology
+        // domain (node.labels[topologyKey]); kube's interpodaffinity scoring sums per matching pod.
+        // A node lacking the topology label earns no score; a running pod on a node lacking it
+        // contributes none. Requires gang-member agreement on the term list (else no scores).
+        // Best-effort — NOT full kube-scheduler score parity (symmetry via running pods' preferred
+        // terms is deferred).
+        let pref_pod = &members[0].preferred_pod_affinity;
+        let pref_pod_agree = members.iter().all(|m| m.preferred_pod_affinity == *pref_pod);
+        if pref_pod_agree {
+            for cn in &feasible_nodes {
+                for term in pref_pod {
+                    let Some(cand_domain) = domain(cn, &term.topology_key) else {
+                        continue; // candidate node has no such topology domain -> no score
+                    };
+                    let delta = if term.anti { -term.weight } else { term.weight };
+                    for (rn, pods) in &running_by_node {
+                        if domain(rn, &term.topology_key).as_deref() != Some(cand_domain.as_str()) {
+                            continue;
+                        }
+                        for w in pods {
+                            if selector_scopes_ns(
+                                &term.selector,
+                                &rep.namespace,
+                                &w.namespace,
+                                ns_labels,
+                            ) && selector_matches(&term.selector.reqs, &w.labels)
+                            {
+                                *soft_scores.entry(cn.clone()).or_default() += delta;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        soft_scores.retain(|_, v| *v != 0);
         workloads.push(OptimizationWorkload {
             id: id.clone(),
             namespace: rep.namespace.clone(),
@@ -1901,6 +1938,116 @@ mod tests {
         let w = &input.workloads[0];
         assert_eq!(w.soft_scores.get("n1"), Some(&10));
         assert!(!w.soft_scores.contains_key("n2")); // zone=b doesn't match ⇒ no score
+    }
+
+    #[test]
+    fn preferred_pod_affinity_scores_domain_with_matching_running_pod() {
+        // running "cache" pod on n1 (zone za); pending prefers same-zone as app=cache (weight 40).
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("topology.kubernetes.io/zone".into(), "za".into())].into();
+        let mut n2 = node("n2", 16000, 64, 110, 8);
+        n2.labels = [("topology.kubernetes.io/zone".into(), "zb".into())].into();
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![
+                running_labeled("team", "cache", "n1", &[("app", "cache")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 40,
+            topology_key: "topology.kubernetes.io/zone".into(),
+            selector: sel(&[("app", "cache")]),
+            anti: false,
+        }];
+        let input = build_pending_input(&cluster, &[p]);
+        let w = &input.workloads[0];
+        assert_eq!(w.soft_scores.get("n1"), Some(&40)); // za shares the cache pod's domain
+        assert_eq!(w.soft_scores.get("n2"), None); // zb has no matching pod
+    }
+
+    #[test]
+    fn preferred_pod_anti_affinity_penalizes_node_with_matching_running_pod() {
+        // hostname-key domain is label-based: give each node its own kubernetes.io/hostname label.
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("kubernetes.io/hostname".into(), "n1".into())].into();
+        let mut n2 = node("n2", 16000, 64, 110, 8);
+        n2.labels = [("kubernetes.io/hostname".into(), "n2".into())].into();
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![
+                running_labeled("team", "noisy", "n1", &[("app", "noisy")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 25,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "noisy")]),
+            anti: true,
+        }];
+        let input = build_pending_input(&cluster, &[p]);
+        let w = &input.workloads[0];
+        assert_eq!(w.soft_scores.get("n1"), Some(&-25)); // discourage the node with noisy
+        assert_eq!(w.soft_scores.get("n2"), None);
+    }
+
+    #[test]
+    fn preferred_pod_affinity_accumulates_per_matching_pod() {
+        // TWO matching cache pods in zone za -> candidate n1 earns 2*weight (kube accumulates).
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("topology.kubernetes.io/zone".into(), "za".into())].into();
+        let mut n3 = node("n3", 16000, 64, 110, 8);
+        n3.labels = [("topology.kubernetes.io/zone".into(), "za".into())].into();
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n3],
+            workloads: vec![
+                running_labeled("team", "cache0", "n1", &[("app", "cache")]),
+                running_labeled("team", "cache1", "n3", &[("app", "cache")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 20,
+            topology_key: "topology.kubernetes.io/zone".into(),
+            selector: sel(&[("app", "cache")]),
+            anti: false,
+        }];
+        let input = build_pending_input(&cluster, &[p]);
+        // n1's zone za holds both cache pods -> 20 + 20.
+        assert_eq!(input.workloads[0].soft_scores.get("n1"), Some(&40));
+    }
+
+    #[test]
+    fn preferred_pod_affinity_dropped_when_gang_disagrees() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "cache", "n1", &[("app", "cache")]),
+                workload("team", "m0", "", 1000, 2, 1, &["n1", "n2"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let term = |w: i64| crate::model::PreferredPodTerm {
+            weight: w,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "cache")]),
+            anti: false,
+        };
+        let mut m0 = ppod("team", "m0", Some("job"));
+        m0.preferred_pod_affinity = vec![term(40)];
+        let mut m1 = ppod("team", "m1", Some("job"));
+        m1.preferred_pod_affinity = vec![term(10)]; // disagree on weight
+        let input = build_pending_input(&cluster, &[m0, m1]);
+        assert_eq!(input.workloads.len(), 1);
+        assert!(input.workloads[0].soft_scores.is_empty());
     }
 
     // ---- F-CNS-2: namespaceSelector ----
