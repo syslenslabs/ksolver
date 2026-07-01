@@ -90,7 +90,7 @@ Environment variables:
 - `KSOLVER_SHADOW_BATCH_SECONDS` (default `10`) — batch window between solves.
 - `KSOLVER_SHADOW_NAMESPACES` — comma-separated namespace allowlist (empty = all).
 - `KSOLVER_SHADOW_GPU_RESOURCES` (default `nvidia.com/gpu`) — exact resource names counted as GPUs.
-- `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`) — serves `/api/scheduler/traces`, `/metrics`, `/healthz`, `/readyz`.
+- `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`) — serves a live dashboard at `/` plus `/api/scheduler/traces`, `/metrics`, `/healthz`, `/readyz`. Open `http://127.0.0.1:8090/` to watch shadow decisions (placements, gangs, caveats) update live.
 - `KSOLVER_SHADOW_SOLVE_SECS` (default `10`) — CP-SAT solve time budget. Shadow accepts the best incumbent within this budget rather than proving optimality; each trace shows `solve_core_millis` (solver-only time) and `solver_status` (Feasible vs Optimal). Effective cadence is roughly `batch window + snapshot collection + solve`.
 
 Shadow mode issues only read/watch/list. Minimal RBAC (read-only):

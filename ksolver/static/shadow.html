@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KSolver — GPU Shadow Scheduler</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.45 -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #0f1115; color: #e6e8eb; }
+  header { padding: 14px 20px; border-bottom: 1px solid #232833; display: flex;
+           align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .sub { color: #9aa4b2; font-size: 12px; }
+  #banner { display: none; padding: 8px 20px; background: #3a2a12; color: #ffcf8f;
+            border-bottom: 1px solid #5a4420; font-size: 13px; }
+  main { padding: 16px 20px; }
+  .summary { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; }
+  .kv { display: flex; flex-direction: column; }
+  .kv .k { color: #9aa4b2; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .kv .v { font-size: 15px; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c2027; font-size: 13px; }
+  th { color: #9aa4b2; font-weight: 500; position: sticky; top: 0; background: #0f1115; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .placed { background: #12331d; color: #7ee2a0; }
+  .unplaced { background: #3a2a12; color: #ffcf8f; }
+  .caveat { color: #d98cff; font-size: 12px; }
+  .history { margin-top: 18px; color: #9aa4b2; font-size: 12px; }
+  .history span { margin-right: 12px; font-variant-numeric: tabular-nums; }
+  code { color: #9fd0ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GPU Shadow Scheduler</h1>
+  <span class="sub">read-only — this scheduler observes and computes placements; it binds nothing</span>
+  <span class="sub" id="updated"></span>
+</header>
+<div id="banner"></div>
+<main>
+  <div class="summary" id="summary"></div>
+  <table>
+    <thead><tr>
+      <th>Namespace</th><th>Pod</th><th class="num">GPUs</th>
+      <th>Placement</th><th>Node</th><th>Caveats</th>
+    </tr></thead>
+    <tbody id="decisions"></tbody>
+  </table>
+  <div class="history" id="history"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  // Refresh interval from ?refresh=SECONDS, clamped to [1, 60]; default 3.
+  var params = new URLSearchParams(location.search);
+  var refresh = parseFloat(params.get("refresh"));
+  if (!isFinite(refresh)) refresh = 3;
+  refresh = Math.min(60, Math.max(1, refresh));
+
+  var elDecisions = document.getElementById("decisions");
+  var elSummary = document.getElementById("summary");
+  var elHistory = document.getElementById("history");
+  var elBanner = document.getElementById("banner");
+  var elUpdated = document.getElementById("updated");
+  var inFlight = false;
+
+  function kv(k, v) {
+    var wrap = document.createElement("div"); wrap.className = "kv";
+    var kk = document.createElement("span"); kk.className = "k"; kk.textContent = k;
+    var vv = document.createElement("span"); vv.className = "v"; vv.textContent = v;
+    wrap.appendChild(kk); wrap.appendChild(vv); return wrap;
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function firstToken(s) { return (s || "").split(";")[0].trim(); }
+
+  function render(data) {
+    var traces = (data && data.traces) || [];
+    if (!traces.length) {
+      clear(elSummary); clear(elDecisions);
+      elSummary.appendChild(kv("status", "no traces yet"));
+      return;
+    }
+    var t = traces[0];
+    clear(elSummary);
+    elSummary.appendChild(kv("sequence", t.sequence));
+    elSummary.appendChild(kv("observed pods", t.observed_pods));
+    elSummary.appendChild(kv("solver", firstToken(t.solver_status)));
+    elSummary.appendChild(kv("solve core (ms)", t.solve_core_millis));
+    elSummary.appendChild(kv("snapshot age (ms)", t.snapshot_age_millis));
+
+    clear(elDecisions);
+    (t.decisions || []).forEach(function (d) {
+      var tr = document.createElement("tr");
+      function cell(text, cls) {
+        var td = document.createElement("td"); if (cls) td.className = cls;
+        td.textContent = text; return td;
+      }
+      tr.appendChild(cell(d.namespace));
+      tr.appendChild(cell(d.name));
+      tr.appendChild(cell(d.gpu_request, "num"));
+      var p = d.placement || {};
+      var placeTd = document.createElement("td");
+      var pill = document.createElement("span");
+      pill.className = "pill " + (p.kind === "placed" ? "placed" : "unplaced");
+      pill.textContent = p.kind === "placed" ? "placed" : "unplaced";
+      placeTd.appendChild(pill);
+      tr.appendChild(placeTd);
+      tr.appendChild(cell(p.kind === "placed" ? (p.node || "") : (p.reason || "")));
+      var cav = (d.caveats || []).join(", ");
+      tr.appendChild(cell(cav, "caveat"));
+      elDecisions.appendChild(tr);
+    });
+
+    clear(elHistory);
+    traces.slice(0, 10).forEach(function (tr) {
+      var placed = (tr.decisions || []).filter(function (d) {
+        return d.placement && d.placement.kind === "placed";
+      }).length;
+      var total = (tr.decisions || []).length;
+      var s = document.createElement("span");
+      s.textContent = "#" + tr.sequence + ": " + placed + "/" + total + " placed";
+      elHistory.appendChild(s);
+    });
+  }
+
+  function poll() {
+    if (inFlight) return;
+    inFlight = true;
+    fetch("/api/scheduler/traces", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (data) {
+        elBanner.style.display = "none";
+        render(data);
+        elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
+      })
+      .catch(function (e) {
+        elBanner.style.display = "block";
+        elBanner.textContent = "cannot reach /api/scheduler/traces: " + e.message + " (retrying)";
+      })
+      .finally(function () { inFlight = false; });
+  }
+
+  poll();
+  setInterval(poll, refresh * 1000);
+})();
+</script>
+</body>
+</html>

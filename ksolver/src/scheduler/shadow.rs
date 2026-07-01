@@ -43,6 +43,13 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Self-contained live dashboard (polls /api/scheduler/traces). Read-only view.
+const SHADOW_HTML: &str = include_str!("../../static/shadow.html");
+
+async fn dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(SHADOW_HTML)
+}
+
 async fn readyz(State(s): State<ShadowHttpState>) -> (axum::http::StatusCode, &'static str) {
     if s.watch_healthy.load(Ordering::SeqCst) {
         (axum::http::StatusCode::OK, "ready")
@@ -72,6 +79,7 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/", get(dashboard))
         .with_state(http_state);
     let http_addr = cfg.http_addr.clone();
     tokio::spawn(async move {
@@ -217,4 +225,16 @@ async fn run_one_solve(
         solve_core_millis,
         snapshot_age_millis,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SHADOW_HTML;
+
+    #[test]
+    fn dashboard_asset_is_wired() {
+        // The embedded dashboard must poll the traces API and render the decisions table.
+        assert!(SHADOW_HTML.contains("/api/scheduler/traces"));
+        assert!(SHADOW_HTML.contains("id=\"decisions\""));
+    }
 }
