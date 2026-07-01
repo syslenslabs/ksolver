@@ -171,13 +171,28 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     // Sequential solve loop: sleep AFTER each solve so a slow solve never overlaps itself.
     loop {
         tokio::time::sleep(cfg.batch_window).await;
+        // Refresh the cluster snapshot EVERY iteration (even when idle) so the binding-plan
+        // readiness re-check always reflects the current cluster, not the last solve's snapshot.
+        let started = Instant::now();
+        let normalized = match collect_normalized(&cfg).await {
+            Ok(n) => n,
+            Err(e) => {
+                metrics::inc_shadow_solve_errors();
+                error!(error = %e, "shadow snapshot collection failed");
+                continue;
+            }
+        };
+        let snapshot_age_millis = started.elapsed().as_millis() as u64;
+        if let Ok(mut g) = latest_cluster.lock() {
+            *g = Some(normalized.clone());
+        }
         let pending = { observed.lock().expect("watch state poisoned").snapshot() };
         if pending.is_empty() {
             continue;
         }
         metrics::inc_shadow_pod_observations(pending.len() as u64);
         let seq = traces.next_sequence();
-        match run_one_solve(&cfg, seq, &pending, &latest_cluster).await {
+        match run_one_solve(&cfg, seq, &pending, &normalized, started, snapshot_age_millis).await {
             Ok(trace) => {
                 let unplaced = trace
                     .decisions
@@ -214,34 +229,34 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     }
 }
 
+/// Read-only collect + normalize of the current cluster (shared by the solve path and the
+/// per-iteration readiness-snapshot refresh). Never mutates cluster state.
+async fn collect_normalized(cfg: &ShadowConfig) -> Result<crate::model::NormalizedCluster> {
+    let coll =
+        collector::KubeCollector::new(cfg.cluster_name.clone(), cfg.kubeconfig.clone()).await?;
+    let snapshot = coll.collect().await?;
+    let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
+    Ok(
+        normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
+            .normalize(&snapshot),
+    )
+}
+
 async fn run_one_solve(
     cfg: &ShadowConfig,
     sequence: u64,
     pending: &[crate::scheduler::pod_filter::PendingGpuPod],
-    latest_cluster: &Arc<Mutex<Option<crate::model::NormalizedCluster>>>,
+    normalized: &crate::model::NormalizedCluster,
+    started: Instant,
+    snapshot_age_millis: u64,
 ) -> Result<DecisionTrace> {
     metrics::inc_shadow_solves();
-    let started = Instant::now();
 
-    // 1. Snapshot the cluster (read-only) via the existing collector.
-    let coll =
-        collector::KubeCollector::new(cfg.cluster_name.clone(), cfg.kubeconfig.clone()).await?;
-    let snapshot = coll.collect().await?;
-    let snapshot_age_millis = started.elapsed().as_millis() as u64;
-
-    // 2. Normalize + build strict (ungrouped) input + solve, mirroring service::Analyzer.
-    let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
-    let normalized = normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
-        .normalize(&snapshot);
-    // Publish the freshest snapshot for the binding-plan readiness re-check (read-only).
-    if let Ok(mut g) = latest_cluster.lock() {
-        *g = Some(normalized.clone());
-    }
     // Pending-only solve: place ONLY the observed ksolver pods (gang-grouped by label);
     // every already-placed pod is fixed context (subtracted from node capacity). Small
     // and fast versus the whole-cluster solve, and correct per-pod against residual.
     let (input, drops) = crate::scheduler::pending_input::build_pending_input_diagnosed(
-        &normalized,
+        normalized,
         pending,
         &cfg.namespace_gpu_quotas,
         &|n| cfg.is_gpu_resource(n),
