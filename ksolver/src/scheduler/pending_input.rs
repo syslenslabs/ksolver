@@ -40,6 +40,26 @@ fn scale_extended(requests: &BTreeMap<String, i64>, factor: i64) -> BTreeMap<Str
         .collect()
 }
 
+/// A matchLabels selector matches a workload's labels iff every selector entry is
+/// present with the same value (superset match).
+fn selector_matches(
+    selector: &BTreeMap<String, String>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    selector.iter().all(|(k, v)| labels.get(k) == Some(v))
+}
+
+/// Deterministic canonical form of a selector set for order-insensitive comparison
+/// (each map -> sorted key/value pairs; outer vector sorted).
+fn canonical_selectors(sels: &[BTreeMap<String, String>]) -> Vec<Vec<(String, String)>> {
+    let mut out: Vec<Vec<(String, String)>> = sels
+        .iter()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Residual (free) capacity of a node after running pods are accounted for.
 struct Residual {
     cpu: i64,
@@ -169,10 +189,18 @@ pub fn build_pending_input(
         });
     }
 
-    // 3. Per-pod NormalizedWorkload lookup by "{ns}/{name}".
+    // 3. Per-pod NormalizedWorkload lookup by "{ns}/{name}", and running pods per node
+    //    (for best-effort anti-affinity node exclusion).
     let mut norm: BTreeMap<String, &NormalizedWorkload> = BTreeMap::new();
+    let mut running_by_node: BTreeMap<String, Vec<&NormalizedWorkload>> = BTreeMap::new();
     for w in &cluster.workloads {
         norm.insert(workload_id(&w.namespace, &w.name), w);
+        if !w.current_node.is_empty() {
+            running_by_node
+                .entry(w.current_node.clone())
+                .or_default()
+                .push(w);
+        }
     }
 
     // 4. Group pending pods into gangs (only unbound pods; a stale pod already bound was
@@ -212,6 +240,15 @@ pub fn build_pending_input(
         if members.iter().any(|m| m.colocate != colocate) {
             continue;
         }
+        // Members must agree on anti-affinity selectors (order-insensitive); else exclude.
+        let rep_aa = canonical_selectors(&members[0].anti_affinity_host_selectors);
+        if members
+            .iter()
+            .any(|m| canonical_selectors(&m.anti_affinity_host_selectors) != rep_aa)
+        {
+            continue;
+        }
+        let aa_selectors = &members[0].anti_affinity_host_selectors;
         let n = members.len() as i64;
         // Co-located gangs must fit the WHOLE gang on one node -> filter by total;
         // spread gangs need one replica per feasible node -> filter per replica.
@@ -231,6 +268,21 @@ pub fn build_pending_input(
                     .get(*node)
                     .map(|r| r.fits(&fit_req, &fit_ext))
                     .unwrap_or(false)
+            })
+            // Best-effort anti-affinity: drop nodes hosting a matching same-namespace
+            // running pod (hostname topology). Same-batch/symmetry remain caveated.
+            .filter(|node| {
+                if aa_selectors.is_empty() {
+                    return true;
+                }
+                let running = match running_by_node.get(*node) {
+                    Some(r) => r,
+                    None => return true,
+                };
+                !running.iter().any(|w| {
+                    w.namespace == rep.namespace
+                        && aa_selectors.iter().any(|s| selector_matches(s, &w.labels))
+                })
             })
             .cloned()
             .collect();
@@ -552,5 +604,98 @@ mod tests {
         assert_eq!(input.workloads.len(), 1);
         assert!(!input.workloads[0].colocate);
         assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+    }
+
+    fn running_labeled(
+        ns: &str,
+        name: &str,
+        node: &str,
+        labels: &[(&str, &str)],
+    ) -> NormalizedWorkload {
+        let mut w = workload(ns, name, node, 1000, 2, 1, &[node]);
+        w.labels = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        w
+    }
+
+    fn ppod_aa(ns: &str, name: &str, selectors: &[&[(&str, &str)]]) -> PendingGpuPod {
+        let mut p = ppod(ns, name, None);
+        p.anti_affinity_host_selectors = selectors
+            .iter()
+            .map(|s| {
+                s.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn anti_affinity_excludes_node_with_matching_running_pod() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[ppod_aa("team", "pending", &[&[("app", "trainer")]])],
+        );
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    #[test]
+    fn anti_affinity_ignores_other_namespace_running_pod() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("other", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[ppod_aa("team", "pending", &[&[("app", "trainer")]])],
+        );
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+    }
+
+    #[test]
+    fn no_selectors_means_no_exclusion() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "trainer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
+    }
+
+    #[test]
+    fn gang_members_disagreeing_on_anti_affinity_excluded() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let mut m0 = ppod("team", "m0", Some("job"));
+        m0.anti_affinity_host_selectors = vec![[("app".to_string(), "x".to_string())].into()];
+        let m1 = ppod("team", "m1", Some("job")); // no selectors -> disagreement
+        let input = build_pending_input(&cluster, &[m0, m1]);
+        assert_eq!(input.workloads.len(), 0);
     }
 }
