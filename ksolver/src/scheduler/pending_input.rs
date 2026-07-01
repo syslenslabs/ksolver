@@ -50,13 +50,15 @@ struct Residual {
 }
 
 impl Residual {
-    /// Whether one replica's requests fit in this residual capacity. Mirrors the
-    /// solver's per-node constraints and closes the skip-constraint-when-capacity<=0 gap.
+    /// Whether the given requests fit in this residual capacity. Honors `requests.pods`
+    /// (so a whole-gang total with pods=N requires N free slots); per-replica callers
+    /// pass pods=0 and still require >=1. Mirrors the solver's per-node constraints and
+    /// closes the skip-constraint-when-capacity<=0 gap.
     fn fits(&self, requests: &ResourceList, ext_requests: &BTreeMap<String, i64>) -> bool {
         if self.cpu < requests.milli_cpu
             || self.mem < requests.memory_bytes
             || self.disk < requests.ephemeral_storage
-            || self.pods < 1
+            || self.pods < requests.pods.max(1)
         {
             return false;
         }
@@ -205,14 +207,29 @@ pub fn build_pending_input(
         if member_workloads.iter().any(|w| signature(w) != rep_sig) {
             continue;
         }
-        // Residual-feasible nodes for one replica.
+        // Members must agree on co-location; disagreement excludes the gang.
+        let colocate = members[0].colocate;
+        if members.iter().any(|m| m.colocate != colocate) {
+            continue;
+        }
+        let n = members.len() as i64;
+        // Co-located gangs must fit the WHOLE gang on one node -> filter by total;
+        // spread gangs need one replica per feasible node -> filter per replica.
+        let (fit_req, fit_ext) = if colocate {
+            (
+                scale_requests(&rep.requests, n),
+                scale_extended(&rep.extended_resource_requests, n),
+            )
+        } else {
+            (rep.requests.clone(), rep.extended_resource_requests.clone())
+        };
         let feasible_nodes: Vec<String> = rep
             .feasible_node_names
             .iter()
-            .filter(|n| {
+            .filter(|node| {
                 residual
-                    .get(*n)
-                    .map(|r| r.fits(&rep.requests, &rep.extended_resource_requests))
+                    .get(*node)
+                    .map(|r| r.fits(&fit_req, &fit_ext))
                     .unwrap_or(false)
             })
             .cloned()
@@ -220,7 +237,6 @@ pub fn build_pending_input(
         if feasible_nodes.is_empty() {
             continue;
         }
-        let n = members.len() as i64;
         workloads.push(OptimizationWorkload {
             id: id.clone(),
             namespace: rep.namespace.clone(),
@@ -238,6 +254,7 @@ pub fn build_pending_input(
             recommended_requests: scale_requests(&rep.recommended_requests, n),
             extended_resource_requests: scale_extended(&rep.extended_resource_requests, n),
             feasible_nodes,
+            colocate,
             ..Default::default()
         });
     }
@@ -303,13 +320,17 @@ mod tests {
     }
 
     fn ppod(ns: &str, name: &str, gang: Option<&str>) -> PendingGpuPod {
+        ppod_co(ns, name, gang, false)
+    }
+
+    fn ppod_co(ns: &str, name: &str, gang: Option<&str>, colocate: bool) -> PendingGpuPod {
         PendingGpuPod {
             uid: format!("uid-{name}"),
             namespace: ns.into(),
             name: name.into(),
             gpu_request: 1,
             gang_key: gang.map(|g| format!("{ns}/{g}")),
-            colocate: false,
+            colocate,
         }
     }
 
@@ -423,5 +444,111 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn colocated_gang_excluded_when_no_single_node_fits() {
+        // 2-pod co-located gang (1 GPU each) needs a node with 2 free GPUs; n1 has 1.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 1)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_co("team", "m0", Some("job"), true),
+                ppod_co("team", "m1", Some("job"), true),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn colocated_gang_included_when_single_node_fits() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 2)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_co("team", "m0", Some("job"), true),
+                ppod_co("team", "m1", Some("job"), true),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 1);
+        assert!(input.workloads[0].colocate);
+        assert_eq!(input.workloads[0].group_size, 2);
+    }
+
+    #[test]
+    fn colocated_gang_excluded_when_pod_slots_insufficient() {
+        // node has plenty of GPU but only 1 pod slot; a 2-pod co-located gang needs 2.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 1, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_co("team", "m0", Some("job"), true),
+                ppod_co("team", "m1", Some("job"), true),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn gang_excluded_when_members_disagree_on_colocate() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_co("team", "m0", Some("job"), true),
+                ppod_co("team", "m1", Some("job"), false),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn non_colocated_gang_included_on_spread_nodes() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 1), node("n2", 16000, 64, 110, 1)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1", "n2"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 1);
+        assert!(!input.workloads[0].colocate);
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
     }
 }
