@@ -1,7 +1,13 @@
 # Soft / Preferred Affinity Scoring — Design Spec
 
-**Status:** Draft for review (design pass; no implementation). Advances the deferred "soft/preferred
-affinity" roadmap item.
+**Status:** IMPLEMENTED (2026-07-01). Preferred **node** affinity shipped first (two-phase
+lexicographic tie-break); preferred **pod** affinity/anti-affinity now shipped too — forward-only,
+domain-aware (label-based `node.labels[topologyKey]` for all keys), accumulating `+weight`/`-weight`
+per matching running pod into the same per-node `soft_scores`, consumed by the existing Phase-2 pass.
+Both contribute to one soft score; cpsat handles negative scores (anti-affinity) natively via
+`soft += (-score, x)`. Remaining follow-up: **symmetry** (a running pod's preferred terms steering
+incoming pods) and **co-placement** preferred pod affinity (two pending pods preferring each other).
+Plan: `docs/superpowers/plans/2026-07-01-preferred-pod-affinity.md`.
 **Author:** autonomous design pass (2026-07-01), pending user review.
 **Related:** `docs/superpowers/specs/2026-06-30-gpu-scheduler-design.md` (§13 status), the anti-affinity
 phases (5e–5h, 12, matchExpressions), node-affinity fixes.

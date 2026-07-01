@@ -1159,6 +1159,39 @@ mod tests {
     }
 
     #[test]
+    fn soft_affinity_negative_score_steers_away_without_changing_admission() {
+        use crate::model::ScenarioConfig;
+        use std::collections::BTreeMap;
+        // Two cost-equal nodes; a singleton feasible on both, DISCOURAGED from n1 (score -10).
+        // Models preferred pod anti-affinity: the pod should avoid n1, admission unchanged.
+        let mut w = gpu_singleton("a", 1, &["n1", "n2"]);
+        w.soft_scores = BTreeMap::from([("n1".to_string(), -10)]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![w],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            enable_soft_affinity: true,
+            ..Default::default()
+        };
+        let (sol, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol),
+            1,
+            "negative soft score must not change admission; status={}",
+            info.status
+        );
+        let counts = sol.assignment_counts.get("t/a").expect("workload admitted");
+        assert!(
+            counts.contains_key("n2") && !counts.contains_key("n1"),
+            "negative soft score should steer placement to n2, got {counts:?}"
+        );
+    }
+
+    #[test]
     fn soft_affinity_never_over_admits_under_capacity() {
         use crate::model::ScenarioConfig;
         use std::collections::BTreeMap;
