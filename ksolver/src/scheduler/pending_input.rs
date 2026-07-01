@@ -729,12 +729,16 @@ pub fn build_pending_input_diagnosed(
         });
     }
 
+    // Populated in Task 3 (co-placement preferred-affinity detection).
+    let soft_coplacement_pairs: Vec<crate::model::SoftCoplacement> = Vec::new();
+
     (
         OptimizationInput {
             nodes,
             workloads,
             anti_affinity_pairs,
             quota_groups,
+            soft_coplacement_pairs,
         },
         dropped,
     )

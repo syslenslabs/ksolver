@@ -1308,6 +1308,37 @@ pub struct OptimizationInput {
     /// solver as `Σ total_resource_w · placed[w] ≤ limit` (requires partial_admission).
     #[serde(default)]
     pub quota_groups: Vec<QuotaGroup>,
+    /// Soft co-placement rewards between two *pending* workloads that prefer each other
+    /// (`preferredDuringScheduling` pod affinity). Empty by default; only the shadow scheduler
+    /// sets these. Applied ONLY in the Phase-2 soft pass — never changes admission or cost.
+    #[serde(default)]
+    pub soft_coplacement_pairs: Vec<SoftCoplacement>,
+}
+
+/// One topology domain shared by a co-placement pair: the domain's nodes that are feasible for `a`
+/// and (separately) for `b`. `both` can be rewarded only when `a` places in some `a_nodes` AND `b`
+/// in some `b_nodes` (same domain).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoplacementDomain {
+    #[serde(default)]
+    pub a_nodes: Vec<String>,
+    #[serde(default)]
+    pub b_nodes: Vec<String>,
+}
+
+/// A soft co-placement reward: workloads `a` and `b` (by `OptimizationWorkload.id`) prefer to share
+/// a topology domain. Phase 2 rewards `weight` for each domain both land in. Affinity (reward) only;
+/// never changes admission/cost (added after the cost + admitted set are pinned).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SoftCoplacement {
+    #[serde(default)]
+    pub a: String,
+    #[serde(default)]
+    pub b: String,
+    #[serde(default)]
+    pub weight: i64,
+    #[serde(default)]
+    pub domains: Vec<CoplacementDomain>,
 }
 
 /// A hard cap on the total amount of `resource` consumed by admitted workloads in
