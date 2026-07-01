@@ -21,6 +21,8 @@ use tracing::{error, info, warn};
 struct ShadowHttpState {
     traces: Arc<TraceStore>,
     watch_healthy: Arc<AtomicBool>,
+    /// Latest normalized cluster snapshot, for re-validating rendered bindings (staleness guard).
+    latest_cluster: Arc<Mutex<Option<crate::model::NormalizedCluster>>>,
 }
 
 /// Read-only DRY-RUN view: the pod→node bindings the latest decision would imply, rendered as the
@@ -34,12 +36,30 @@ async fn binding_plan_handler(State(s): State<ShadowHttpState>) -> Json<serde_js
     let plan = latest
         .map(|t| crate::scheduler::binding::render_binding_plan(&t))
         .unwrap_or_default();
+    // Annotate each rendered binding with its stale/conflict readiness against the latest snapshot.
+    let cluster = s.latest_cluster.lock().ok().and_then(|g| g.clone());
+    let entries: Vec<serde_json::Value> = plan
+        .into_iter()
+        .map(|e| {
+            let readiness = cluster
+                .as_ref()
+                .map(|c| crate::scheduler::binding::assess_binding_readiness(&e, c));
+            let mut v = serde_json::to_value(&e).unwrap_or_default();
+            if let (Some(obj), Some(r)) = (v.as_object_mut(), readiness) {
+                obj.insert(
+                    "readiness".to_string(),
+                    serde_json::to_value(r).unwrap_or_default(),
+                );
+            }
+            v
+        })
+        .collect();
     Json(serde_json::json!({
         "dry_run": true,
-        "note": "rendered from the latest shadow trace; never applied — may be stale",
+        "note": "rendered from the latest shadow trace; never applied — readiness re-checked vs latest snapshot",
         "trace_sequence": seq,
         "solve_millis": solve_millis,
-        "bindings": plan,
+        "bindings": entries,
     }))
 }
 
@@ -88,11 +108,14 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     let traces = Arc::new(TraceStore::new(64));
     let observed: Arc<Mutex<WatchState>> = Arc::new(Mutex::new(WatchState::new()));
     let watch_healthy = Arc::new(AtomicBool::new(false));
+    let latest_cluster: Arc<Mutex<Option<crate::model::NormalizedCluster>>> =
+        Arc::new(Mutex::new(None));
 
     // HTTP server (traces / metrics / health).
     let http_state = ShadowHttpState {
         traces: traces.clone(),
         watch_healthy: watch_healthy.clone(),
+        latest_cluster: latest_cluster.clone(),
     };
     let app = Router::new()
         .route("/api/scheduler/traces", get(traces_handler))
@@ -154,7 +177,7 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
         }
         metrics::inc_shadow_pod_observations(pending.len() as u64);
         let seq = traces.next_sequence();
-        match run_one_solve(&cfg, seq, &pending).await {
+        match run_one_solve(&cfg, seq, &pending, &latest_cluster).await {
             Ok(trace) => {
                 let unplaced = trace
                     .decisions
@@ -195,6 +218,7 @@ async fn run_one_solve(
     cfg: &ShadowConfig,
     sequence: u64,
     pending: &[crate::scheduler::pod_filter::PendingGpuPod],
+    latest_cluster: &Arc<Mutex<Option<crate::model::NormalizedCluster>>>,
 ) -> Result<DecisionTrace> {
     metrics::inc_shadow_solves();
     let started = Instant::now();
@@ -209,6 +233,10 @@ async fn run_one_solve(
     let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
     let normalized = normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
         .normalize(&snapshot);
+    // Publish the freshest snapshot for the binding-plan readiness re-check (read-only).
+    if let Ok(mut g) = latest_cluster.lock() {
+        *g = Some(normalized.clone());
+    }
     // Pending-only solve: place ONLY the observed ksolver pods (gang-grouped by label);
     // every already-placed pod is fixed context (subtracted from node capacity). Small
     // and fast versus the whole-cluster solve, and correct per-pod against residual.
@@ -295,7 +323,7 @@ mod tests {
         use super::{binding_plan_handler, ShadowHttpState};
         use crate::scheduler::trace::{DecisionTrace, PodDecision, PodPlacement, TraceStore};
         use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
         let traces = Arc::new(TraceStore::new(8));
         traces.push(DecisionTrace {
             sequence: 7,
@@ -314,9 +342,25 @@ mod tests {
             snapshot_age_millis: 0,
             note: String::new(),
         });
+        // Latest snapshot: node n1 present, pod team/a still pending (uid u) -> readiness ready.
+        let cluster = crate::model::NormalizedCluster {
+            nodes: vec![crate::model::NormalizedNode {
+                name: "n1".into(),
+                ..Default::default()
+            }],
+            workloads: vec![crate::model::NormalizedWorkload {
+                namespace: "team".into(),
+                name: "a".into(),
+                uid: "u".into(),
+                current_node: String::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         let state = ShadowHttpState {
             traces,
             watch_healthy: Arc::new(AtomicBool::new(true)),
+            latest_cluster: Arc::new(Mutex::new(Some(cluster))),
         };
         let axum::Json(v) = binding_plan_handler(axum::extract::State(state)).await;
         assert_eq!(v["dry_run"], true);
@@ -325,5 +369,6 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0]["node_name"], "n1");
         assert_eq!(bindings[0]["binding_body"]["target"]["name"], "n1");
+        assert_eq!(bindings[0]["readiness"]["state"], "ready");
     }
 }
