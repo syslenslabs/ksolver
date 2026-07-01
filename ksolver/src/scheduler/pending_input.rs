@@ -213,6 +213,14 @@ pub fn build_pending_input(
     // 5. Build one workload per feasible, homogeneous gang.
     let mut workloads = Vec::new();
     let mut anti_affinity_pairs: Vec<(String, String)> = Vec::new();
+    // (id, namespace, selectors, member_labels) for each emitted workload, for cross-pairs.
+    type EmittedMeta = (
+        String,
+        String,
+        Vec<BTreeMap<String, String>>,
+        Vec<BTreeMap<String, String>>,
+    );
+    let mut emitted_meta: Vec<EmittedMeta> = Vec::new();
     for (id, mut members) in gangs {
         members.sort_by(|a, b| a.name.cmp(&b.name));
         // Look up every member's normalized workload; skip whole gang if any missing.
@@ -327,6 +335,32 @@ pub fn build_pending_input(
         // Self-anti-affine, non-colocated gang -> solver spreads it <=1 replica per node.
         if self_anti && !colocate {
             anti_affinity_pairs.push((id.clone(), id.clone()));
+        }
+        emitted_meta.push((
+            id,
+            rep.namespace.clone(),
+            aa_selectors.clone(),
+            member_workloads.iter().map(|w| w.labels.clone()).collect(),
+        ));
+    }
+
+    // Cross-workload same-batch anti-affinity: at most one of two distinct workloads per
+    // node when one's selector matches ALL the other's member labels (same namespace).
+    for i in 0..emitted_meta.len() {
+        for j in (i + 1)..emitted_meta.len() {
+            let (a, b) = (&emitted_meta[i], &emitted_meta[j]);
+            if a.1 != b.1 {
+                continue;
+            }
+            let a_forbids_b =
+                a.2.iter()
+                    .any(|s| b.3.iter().all(|l| selector_matches(s, l)));
+            let b_forbids_a =
+                b.2.iter()
+                    .any(|s| a.3.iter().all(|l| selector_matches(s, l)));
+            if a_forbids_b || b_forbids_a {
+                anti_affinity_pairs.push((a.0.clone(), b.0.clone()));
+            }
         }
     }
 
@@ -812,6 +846,72 @@ mod tests {
             ],
         );
         assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn cross_workload_pair_when_selector_matches_other() {
+        // singleton A anti-affine {app:b}; singleton B labelled {app:b}; same ns.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1"], &[]),
+                labeled_pending("team", "b", &["n1"], &[("app", "b")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_aa("team", "a", &[&[("app", "b")]]),
+                ppod("team", "b", None),
+            ],
+        );
+        assert!(input
+            .anti_affinity_pairs
+            .contains(&("pod:team/a".to_string(), "pod:team/b".to_string())));
+    }
+
+    #[test]
+    fn cross_workload_no_pair_on_partial_member_match() {
+        // A anti-affine {app:b}; B is a gang where only one member carries {app:b}.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1", "n2"], &[]),
+                labeled_pending("team", "b0", &["n1", "n2"], &[("app", "b")]),
+                labeled_pending("team", "b1", &["n1", "n2"], &[]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_aa("team", "a", &[&[("app", "b")]]),
+                ppod("team", "b0", Some("bjob")),
+                ppod("team", "b1", Some("bjob")),
+            ],
+        );
+        assert!(input.anti_affinity_pairs.is_empty());
+    }
+
+    #[test]
+    fn cross_workload_no_pair_across_namespaces() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1"], &[]),
+                labeled_pending("other", "b", &["n1"], &[("app", "b")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_aa("team", "a", &[&[("app", "b")]]),
+                ppod("other", "b", None),
+            ],
+        );
+        assert!(input.anti_affinity_pairs.is_empty());
     }
 
     #[test]
