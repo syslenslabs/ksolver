@@ -1,5 +1,8 @@
-//! Online GPU scheduler components. Phase 1 = shadow mode only:
-//! observe and compute placement decisions; never bind pods.
+//! Online GPU scheduler components. Shadow mode observes and computes placement decisions and, by
+//! default, binds nothing. Phase 3 (real binding) is OPT-IN (`ShadowConfig.enable_real_binding`,
+//! default off) and isolated entirely in `binder.rs` — the single sanctioned, gated mutation site.
+//! `shadow.rs` orchestrates but must never call a cluster-mutating API directly; `binding.rs` is a
+//! pure renderer. Both invariants are enforced by `no_mutation_guard` below.
 
 pub mod bench;
 pub mod binder;
@@ -14,14 +17,20 @@ pub mod watch_state;
 
 #[cfg(test)]
 mod no_mutation_guard {
-    // This source must never call cluster-mutating APIs in Phase 1 (shadow mode).
+    // `shadow.rs` orchestrates but must never DIRECTLY call a cluster-mutating API — all mutation
+    // is isolated in `binder.rs` and gated behind `enable_real_binding` (default off). We grep for
+    // concrete mutator signatures (not the word "Binding", which now legitimately appears via the
+    // lowercase `binder`/`apply_bindings` orchestration).
     const SHADOW: &str = include_str!("shadow.rs");
     const BINDING: &str = include_str!("binding.rs");
 
     #[test]
-    fn shadow_has_no_binding_or_mutation_calls() {
+    fn shadow_has_no_direct_mutation_calls() {
         for needle in [
-            "Binding",
+            "create_subresource",
+            "PostParams",
+            "DeleteParams",
+            "PatchParams",
             ".evict(",
             ".create(",
             ".replace(",
@@ -30,7 +39,7 @@ mod no_mutation_guard {
         ] {
             assert!(
                 !SHADOW.contains(needle),
-                "shadow.rs must not contain `{needle}` in Phase 1"
+                "shadow.rs must not directly call `{needle}` — mutation belongs in binder.rs"
             );
         }
     }

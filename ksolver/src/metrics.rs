@@ -89,6 +89,21 @@ lazy_static! {
         "Placed shadow decisions carrying an unmodeled-constraint caveat"
     )
     .expect("metric can be created");
+    pub static ref SHADOW_BOUND: IntCounter = IntCounter::new(
+        "ksolver_shadow_bound_total",
+        "Pods actually bound to a node by the real-binding executor (Phase 3)"
+    )
+    .expect("metric can be created");
+    pub static ref SHADOW_BIND_SKIPPED: IntCounter = IntCounter::new(
+        "ksolver_shadow_bind_skipped_total",
+        "Real-binding candidates skipped (not ready / stale / already bound / throttled)"
+    )
+    .expect("metric can be created");
+    pub static ref SHADOW_BIND_FAILED: IntCounter = IntCounter::new(
+        "ksolver_shadow_bind_failed_total",
+        "Real-binding attempts that failed against the API server"
+    )
+    .expect("metric can be created");
 }
 
 fn register_ignoring_dup(c: Box<dyn prometheus::core::Collector>) {
@@ -110,6 +125,21 @@ pub fn register_metrics() {
     register_ignoring_dup(Box::new(SHADOW_SOLVE_SECONDS.clone()));
     register_ignoring_dup(Box::new(SHADOW_UNPLACED.clone()));
     register_ignoring_dup(Box::new(SHADOW_CAVEATED.clone()));
+    register_ignoring_dup(Box::new(SHADOW_BOUND.clone()));
+    register_ignoring_dup(Box::new(SHADOW_BIND_SKIPPED.clone()));
+    register_ignoring_dup(Box::new(SHADOW_BIND_FAILED.clone()));
+}
+
+pub fn inc_shadow_bound(n: u64) {
+    SHADOW_BOUND.inc_by(n);
+}
+
+pub fn inc_shadow_bind_skipped(n: u64) {
+    SHADOW_BIND_SKIPPED.inc_by(n);
+}
+
+pub fn inc_shadow_bind_failed(n: u64) {
+    SHADOW_BIND_FAILED.inc_by(n);
 }
 
 pub fn inc_shadow_pod_observations(n: u64) {

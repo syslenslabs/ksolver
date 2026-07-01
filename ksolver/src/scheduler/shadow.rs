@@ -168,6 +168,19 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
         }
     });
 
+    // A kube client for the real-binding pass — built ONLY when real binding is enabled (otherwise
+    // there is no mutation-capable client at all). Default: None ⇒ read-only shadow.
+    let bind_client = if cfg.enable_real_binding {
+        warn!(
+            dry_run = cfg.real_binding_dry_run,
+            max_per_pass = cfg.max_binds_per_pass,
+            "REAL BINDING ENABLED — this scheduler will mutate the cluster (apply pod bindings)"
+        );
+        Some(collector::build_client(&cfg.kubeconfig).await?)
+    } else {
+        None
+    };
+
     // Sequential solve loop: sleep AFTER each solve so a slow solve never overlaps itself.
     loop {
         tokio::time::sleep(cfg.batch_window).await;
@@ -208,16 +221,49 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
                     .count() as u64;
                 metrics::inc_shadow_unplaced(unplaced);
                 metrics::inc_shadow_caveated(caveated);
-                let would_bind = crate::scheduler::binding::render_binding_plan(&trace).len();
+                // Render the dry-run plan with per-entry readiness (vs the fresh snapshot) once —
+                // used for the log count and, when armed, the real-binding pass.
+                let plan: Vec<_> = crate::scheduler::binding::render_binding_plan(&trace)
+                    .into_iter()
+                    .map(|e| {
+                        let r = crate::scheduler::binding::assess_binding_readiness(&e, &normalized);
+                        (e, r)
+                    })
+                    .collect();
+                let would_bind = plan.len();
+                if let Some(bc) = &bind_client {
+                    let outcomes = crate::scheduler::binder::apply_bindings(bc, &plan, &cfg).await;
+                    let bound = outcomes
+                        .iter()
+                        .filter(|o| matches!(o.result, crate::scheduler::binder::BindResult::Bound { .. }))
+                        .count() as u64;
+                    let failed = outcomes
+                        .iter()
+                        .filter(|o| matches!(o.result, crate::scheduler::binder::BindResult::Failed { .. }))
+                        .count() as u64;
+                    let skipped = outcomes.len() as u64 - bound - failed;
+                    metrics::inc_shadow_bound(bound);
+                    metrics::inc_shadow_bind_skipped(skipped);
+                    metrics::inc_shadow_bind_failed(failed);
+                    info!(
+                        sequence = trace.sequence,
+                        bound,
+                        skipped,
+                        failed,
+                        dry_run = cfg.real_binding_dry_run,
+                        "real binding pass complete"
+                    );
+                }
                 info!(
                     sequence = trace.sequence,
                     observed = trace.observed_pods,
                     unplaced,
                     caveated,
                     would_bind,
+                    real_binding = cfg.enable_real_binding,
                     status = %trace.solver_status,
                     solve_millis = trace.solve_millis,
-                    "shadow decision recorded (bound nothing; dry-run plan available)"
+                    "shadow decision recorded"
                 );
                 traces.push(trace);
             }
