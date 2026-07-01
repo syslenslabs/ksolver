@@ -203,57 +203,7 @@ fn modeled_preferred_node_affinity(spec: &corev1::PodSpec) -> Vec<crate::model::
 /// skipped (best-effort soft — no caveat). `anti=true` for anti-affinity. Selector lowering shared
 /// with the collector; namespace scope reuses `AntiAffinitySelector` (empty `namespaces` ⇒ own ns).
 fn modeled_preferred_pod_affinity(spec: &corev1::PodSpec) -> Vec<crate::model::PreferredPodTerm> {
-    let mut out = Vec::new();
-    let Some(aff) = spec.affinity.as_ref() else {
-        return out;
-    };
-    let mut consume = |terms: Option<Vec<corev1::WeightedPodAffinityTerm>>, anti: bool| {
-        let Some(terms) = terms else { return };
-        for wt in terms {
-            if wt.weight <= 0 {
-                continue;
-            }
-            let t = &wt.pod_affinity_term;
-            // namespaceSelector: None if absent; Some(reqs) if modelable (empty {} = all);
-            // unmodelable ⇒ skip the term (best-effort soft, no caveat).
-            let namespace_selector = match t.namespace_selector.as_ref() {
-                None => None,
-                Some(ns_ls) => match crate::collector::namespace_selector_to_reqs(ns_ls) {
-                    Some(reqs) => Some(reqs),
-                    None => continue,
-                },
-            };
-            let Some(ls) = t.label_selector.as_ref() else {
-                continue;
-            };
-            let Some(reqs) = crate::collector::label_selector_to_reqs(ls) else {
-                continue;
-            };
-            out.push(crate::model::PreferredPodTerm {
-                weight: i64::from(wt.weight),
-                topology_key: t.topology_key.clone(),
-                selector: crate::model::AntiAffinitySelector {
-                    reqs,
-                    namespaces: t.namespaces.clone().unwrap_or_default(),
-                    namespace_selector,
-                },
-                anti,
-            });
-        }
-    };
-    consume(
-        aff.pod_affinity
-            .as_ref()
-            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.clone()),
-        false,
-    );
-    consume(
-        aff.pod_anti_affinity
-            .as_ref()
-            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.clone()),
-        true,
-    );
-    out
+    crate::collector::modeled_preferred_pod_terms(spec.affinity.as_ref())
 }
 
 /// `(topologyKey, selector)` of required pod-anti-affinity terms we can fully model for best-effort

@@ -108,6 +108,10 @@ pub struct Pod {
     /// zone/rack). Same strict rules. Enforced best-effort by topology-domain exclusion (Phase 12).
     #[serde(default)]
     pub anti_affinity_topology_selectors: Vec<(String, AntiAffinitySelector)>,
+    /// This pod's preferred (soft) pod affinity + anti-affinity terms, for SYMMETRIC soft scoring
+    /// (a running pod's preferred terms steer an incoming matching pod). Collected from raw affinity.
+    #[serde(default)]
+    pub preferred_pod_affinity: Vec<PreferredPodTerm>,
     /// Required node affinity as OR-of-terms: the outer Vec is OR (nodeSelectorTerms), each
     /// `NodeAffinityGroup` is one term (its matchExpressions ANDed against labels, matchFields
     /// ANDed against node fields). No required affinity ⇒ unconstrained; required affinity whose
@@ -357,7 +361,8 @@ pub struct PreferredNodeTerm {
 /// A `preferredDuringScheduling` pod (anti-)affinity term: a `weight` (1–100), a `topology_key`,
 /// a label `selector` (reqs + namespace scope, reusing `AntiAffinitySelector`), and an `anti` flag.
 /// A candidate node accumulates `+weight` (affinity) or `-weight` (anti-affinity) toward its soft
-/// score for each matching running pod sharing the node's topology domain. Best-effort, forward-only.
+/// score for each matching running pod sharing the node's topology domain. Used both forward (a
+/// pending pod's own terms) and symmetrically (a running pod's terms steering the pending pod).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreferredPodTerm {
     #[serde(default)]
@@ -646,6 +651,10 @@ pub struct NormalizedWorkload {
     /// terms (zone/rack), for topology-domain exclusion (Phase 12).
     #[serde(default)]
     pub anti_affinity_topology_selectors: Vec<(String, AntiAffinitySelector)>,
+    /// This workload's preferred (soft) pod affinity + anti-affinity terms, for SYMMETRIC soft
+    /// scoring of pending pods (a running pod's preferred terms steer an incoming matching pod).
+    #[serde(default)]
+    pub preferred_pod_affinity: Vec<PreferredPodTerm>,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]

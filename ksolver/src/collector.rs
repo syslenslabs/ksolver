@@ -590,6 +590,7 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
         required_anti: to_required_anti_affinity(affinity),
         modeled_host_anti_selectors: modeled_host_anti_selectors(affinity),
         anti_affinity_topology_selectors: modeled_topology_anti_selectors(affinity),
+        preferred_pod_affinity: modeled_preferred_pod_terms(affinity),
         required_node_affinity: to_required_node_affinity(affinity),
         topology_spread_constraints: spec
             .as_ref()
@@ -1259,6 +1260,64 @@ fn modeled_anti_selectors_all(
     out
 }
 
+/// Preferred (soft) pod affinity + anti-affinity terms from `podAffinity`/`podAntiAffinity`
+/// `preferredDuringScheduling…`. weight>0, modelable label + namespace selectors; `anti=true` for
+/// anti-affinity; unmodelable selectors skipped. Shared by the collector (running pods, for
+/// symmetric soft scoring) and pod_filter (pending pods, forward soft scoring).
+pub(crate) fn modeled_preferred_pod_terms(
+    affinity: Option<&corev1::Affinity>,
+) -> Vec<crate::model::PreferredPodTerm> {
+    let Some(aff) = affinity else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut consume = |terms: Option<&Vec<corev1::WeightedPodAffinityTerm>>, anti: bool| {
+        let Some(terms) = terms else { return };
+        for wt in terms {
+            if wt.weight <= 0 {
+                continue;
+            }
+            let t = &wt.pod_affinity_term;
+            let namespace_selector = match t.namespace_selector.as_ref() {
+                None => None,
+                Some(ns_ls) => match namespace_selector_to_reqs(ns_ls) {
+                    Some(reqs) => Some(reqs),
+                    None => continue,
+                },
+            };
+            let Some(ls) = t.label_selector.as_ref() else {
+                continue;
+            };
+            let Some(reqs) = label_selector_to_reqs(ls) else {
+                continue;
+            };
+            out.push(crate::model::PreferredPodTerm {
+                weight: i64::from(wt.weight),
+                topology_key: t.topology_key.clone(),
+                selector: crate::model::AntiAffinitySelector {
+                    reqs,
+                    namespaces: t.namespaces.clone().unwrap_or_default(),
+                    namespace_selector,
+                },
+                anti,
+            });
+        }
+    };
+    consume(
+        aff.pod_affinity
+            .as_ref()
+            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.as_ref()),
+        false,
+    );
+    consume(
+        aff.pod_anti_affinity
+            .as_ref()
+            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.as_ref()),
+        true,
+    );
+    out
+}
+
 /// Fully-modeled *hostname* anti-affinity selectors (Phase 5e–5h path).
 fn modeled_host_anti_selectors(
     affinity: Option<&corev1::Affinity>,
@@ -1448,9 +1507,46 @@ fn split_quantity(value: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_extended_resources, parse_bytes, parse_vpa_safety_margin_arg};
+    use super::{
+        extract_extended_resources, modeled_preferred_pod_terms, parse_bytes,
+        parse_vpa_safety_margin_arg,
+    };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn collects_running_pod_preferred_pod_terms() {
+        use k8s_openapi::api::core::v1 as corev1;
+        let aff = corev1::Affinity {
+            pod_anti_affinity: Some(corev1::PodAntiAffinity {
+                preferred_during_scheduling_ignored_during_execution: Some(vec![
+                    corev1::WeightedPodAffinityTerm {
+                        weight: 50,
+                        pod_affinity_term: corev1::PodAffinityTerm {
+                            label_selector: Some(
+                                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                                    match_labels: Some(
+                                        [("app".to_string(), "trainer".to_string())].into(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            ),
+                            topology_key: "kubernetes.io/hostname".to_string(),
+                            ..Default::default()
+                        },
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let got = modeled_preferred_pod_terms(Some(&aff));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].weight, 50);
+        assert!(got[0].anti);
+        assert_eq!(got[0].topology_key, "kubernetes.io/hostname");
+        assert_eq!(got[0].selector.reqs.len(), 1);
+    }
 
     #[test]
     fn parses_decimal_kilobyte_suffix() {

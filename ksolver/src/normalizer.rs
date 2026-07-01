@@ -658,6 +658,7 @@ impl Normalizer {
                 labels: pod.labels.clone(),
                 anti_affinity_host_selectors: pod.modeled_host_anti_selectors.clone(),
                 anti_affinity_topology_selectors: pod.anti_affinity_topology_selectors.clone(),
+                preferred_pod_affinity: pod.preferred_pod_affinity.clone(),
                 owner_kind: pod.owner_kind.clone(),
                 owner_name: pod.owner_name.clone(),
                 current_node: pod.node_name.clone(),
