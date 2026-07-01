@@ -247,6 +247,7 @@ mod tests {
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
             gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
             solve_time_limit_secs: 10,
+            namespace_gpu_quotas: std::collections::BTreeMap::new(),
         }
     }
 

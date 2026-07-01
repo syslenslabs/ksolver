@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Shadow-mode scheduler configuration, sourced from environment variables.
@@ -18,6 +19,28 @@ pub struct ShadowConfig {
     /// CP-SAT solve time limit (seconds) for shadow solves — accept the best incumbent
     /// within this budget rather than proving optimality. Default 10.
     pub solve_time_limit_secs: i64,
+    /// Per-namespace GPU quotas (namespace -> max GPUs). Namespaces absent from the map
+    /// are unconstrained. Enforced as a hard cap on admitted pods in that namespace.
+    pub namespace_gpu_quotas: BTreeMap<String, i64>,
+}
+
+/// Parse `KSOLVER_SHADOW_QUOTAS="ns=cap,ns2=cap2"` (pure/testable). Entries with a
+/// non-negative integer cap and non-empty namespace are kept; malformed parts skipped.
+fn parse_quotas(v: Option<String>) -> BTreeMap<String, i64> {
+    let mut m = BTreeMap::new();
+    if let Some(s) = v {
+        for part in s.split(',') {
+            let p = part.trim();
+            if let Some((k, val)) = p.split_once('=') {
+                if let Ok(n) = val.trim().parse::<i64>() {
+                    if n >= 0 && !k.trim().is_empty() {
+                        m.insert(k.trim().to_string(), n);
+                    }
+                }
+            }
+        }
+    }
+    m
 }
 
 /// Parse `KSOLVER_SHADOW_SOLVE_SECS` (pure/testable): positive int or default 10.
@@ -68,6 +91,7 @@ impl ShadowConfig {
             solve_time_limit_secs: parse_solve_secs(
                 std::env::var("KSOLVER_SHADOW_SOLVE_SECS").ok(),
             ),
+            namespace_gpu_quotas: parse_quotas(std::env::var("KSOLVER_SHADOW_QUOTAS").ok()),
         }
     }
 
@@ -92,7 +116,24 @@ mod tests {
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
             gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
             solve_time_limit_secs: 10,
+            namespace_gpu_quotas: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn parse_quotas_parses_and_skips_malformed() {
+        assert!(parse_quotas(None).is_empty());
+        assert!(parse_quotas(Some(String::new())).is_empty());
+        let m = parse_quotas(Some("team-a=200, team-b=300".to_string()));
+        assert_eq!(m.get("team-a"), Some(&200));
+        assert_eq!(m.get("team-b"), Some(&300));
+        // malformed / negative / empty-key entries are skipped; a valid zero is kept.
+        let m2 = parse_quotas(Some("x,=5,ns=,bad=-1,ok=0,q=7".to_string()));
+        assert_eq!(m2.get("ok"), Some(&0));
+        assert_eq!(m2.get("q"), Some(&7));
+        assert!(!m2.contains_key("bad"));
+        assert!(!m2.contains_key("ns"));
+        assert_eq!(m2.len(), 2);
     }
 
     #[test]
