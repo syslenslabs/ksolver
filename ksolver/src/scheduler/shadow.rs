@@ -180,6 +180,9 @@ async fn run_one_solve(
 
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
+        // Place what fits; leave the rest unplaced instead of failing the whole solve
+        // when pending pods compete for scarce capacity.
+        partial_admission: true,
         ..Default::default()
     };
     let (solution, status) = match cpsat_rust::solve(&input, &scenario) {
