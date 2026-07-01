@@ -157,12 +157,24 @@ async fn main() -> Result<()> {
             serde_json::to_writer_pretty(std::io::stdout(), &report)?;
             println!();
         }
+        Some("shadow") => {
+            metrics::register_metrics();
+            let cfg = ksolver::scheduler::config::ShadowConfig::from_env();
+            info!(
+                scheduler_name = %cfg.scheduler_name,
+                batch_seconds = cfg.batch_window.as_secs(),
+                http_addr = %cfg.http_addr,
+                namespaces = ?cfg.namespace_allowlist,
+                "starting shadow-mode GPU scheduler (binds nothing)"
+            );
+            ksolver::scheduler::shadow::run_shadow(cfg).await?;
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver version"
             );
         }
     }

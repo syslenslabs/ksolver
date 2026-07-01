@@ -76,6 +76,47 @@ The dashboard exposes all solver parameters through the Advanced Settings panel.
 | Joint Rightsizing | off | Co-optimize request sizes and placement |
 | Usage-Adjusted Requests | off | Replace raw requests with Prometheus-based demand |
 
+## Shadow-mode GPU scheduler
+
+Observes pending pods with `schedulerName: ksolver` that request GPUs, computes
+where they *would* be placed, records decision traces, and **binds nothing**:
+
+    KUBECONFIG=~/.kube/config KSOLVER_SHADOW_BATCH_SECONDS=10 \
+      cargo run --features rust-cp-sat -- shadow
+
+Environment variables:
+
+- `KSOLVER_SHADOW_SCHEDULER_NAME` (default `ksolver`) — pods whose `spec.schedulerName` matches are in scope.
+- `KSOLVER_SHADOW_BATCH_SECONDS` (default `10`) — batch window between solves.
+- `KSOLVER_SHADOW_NAMESPACES` — comma-separated namespace allowlist (empty = all).
+- `KSOLVER_SHADOW_GPU_RESOURCES` (default `nvidia.com/gpu`) — exact resource names counted as GPUs.
+- `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`) — serves `/api/scheduler/traces`, `/metrics`, `/healthz`, `/readyz`.
+
+Shadow mode issues only read/watch/list. Minimal RBAC (read-only):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ksolver-shadow-readonly
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, persistentvolumeclaims, persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources: [daemonsets, deployments]
+    verbs: [get, list, watch]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: ["policy"]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch]
+```
+
+It grants no `create`/`update`/`patch`/`delete` and no `pods/binding` — shadow
+mode cannot mutate the cluster even if a bug tried to.
+
 ## License
 
 MIT
