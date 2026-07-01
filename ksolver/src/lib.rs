@@ -8,6 +8,7 @@ pub mod normalizer;
 pub mod optimizer_input;
 pub mod planner;
 pub mod pricing;
+pub mod scheduler;
 pub mod server;
 pub mod service;
 pub mod state_cache;
