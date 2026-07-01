@@ -543,6 +543,8 @@ pub struct NormalizedWorkload {
     pub namespace: String,
     pub name: String,
     #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]
     pub owner_name: String,

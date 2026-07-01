@@ -650,6 +650,7 @@ impl Normalizer {
             let mut workload = NormalizedWorkload {
                 namespace: pod.namespace.clone(),
                 name: pod.name.clone(),
+                labels: pod.labels.clone(),
                 owner_kind: pod.owner_kind.clone(),
                 owner_name: pod.owner_name.clone(),
                 current_node: pod.node_name.clone(),
