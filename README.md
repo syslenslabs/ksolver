@@ -92,6 +92,7 @@ Environment variables:
 - `KSOLVER_SHADOW_GPU_RESOURCES` (default `nvidia.com/gpu`) — exact resource names counted as GPUs.
 - `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`) — serves a live dashboard at `/` plus `/api/scheduler/traces`, `/metrics`, `/healthz`, `/readyz`. Open `http://127.0.0.1:8090/` to watch shadow decisions (placements, gangs, caveats) update live.
 - `KSOLVER_SHADOW_SOLVE_SECS` (default `10`) — CP-SAT solve time budget. Shadow accepts the best incumbent within this budget rather than proving optimality; each trace shows `solve_core_millis` (solver-only time) and `solver_status` (Feasible vs Optimal). Effective cadence is roughly `batch window + snapshot collection + solve`.
+- `KSOLVER_SHADOW_QUOTAS` (default none) — per-namespace GPU quotas as `ns=cap` pairs, e.g. `KSOLVER_SHADOW_QUOTAS="team-a=200,team-b=300"`. A namespace over its cap gets only as many pending pods admitted as fit under the remaining quota (`cap − GPUs already used by its running pods`, clamped ≥ 0); the rest are reported unplaced with a "capacity or quota" reason. Namespaces without a configured quota are unconstrained. Enforced only in the shadow (partial-admission) path.
 
 Shadow mode issues only read/watch/list. Minimal RBAC (read-only):
 
