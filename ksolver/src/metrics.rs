@@ -84,6 +84,11 @@ lazy_static! {
         "Pending GPU pods with no placement in a solve"
     )
     .expect("metric can be created");
+    pub static ref SHADOW_CAVEATED: IntCounter = IntCounter::new(
+        "ksolver_shadow_caveated_total",
+        "Placed shadow decisions carrying an unmodeled-constraint caveat"
+    )
+    .expect("metric can be created");
 }
 
 fn register_ignoring_dup(c: Box<dyn prometheus::core::Collector>) {
@@ -104,6 +109,7 @@ pub fn register_metrics() {
     register_ignoring_dup(Box::new(SHADOW_SOLVE_ERRORS.clone()));
     register_ignoring_dup(Box::new(SHADOW_SOLVE_SECONDS.clone()));
     register_ignoring_dup(Box::new(SHADOW_UNPLACED.clone()));
+    register_ignoring_dup(Box::new(SHADOW_CAVEATED.clone()));
 }
 
 pub fn inc_shadow_pod_observations(n: u64) {
@@ -128,6 +134,10 @@ pub fn observe_shadow_solve_seconds(secs: f64) {
 
 pub fn inc_shadow_unplaced(n: u64) {
     SHADOW_UNPLACED.inc_by(n);
+}
+
+pub fn inc_shadow_caveated(n: u64) {
+    SHADOW_CAVEATED.inc_by(n);
 }
 
 pub fn render_metrics() -> String {
@@ -242,6 +252,7 @@ mod shadow_metric_tests {
         inc_shadow_solve_errors();
         observe_shadow_solve_seconds(0.05);
         inc_shadow_unplaced(1);
+        inc_shadow_caveated(1);
         let out = render_metrics();
         assert!(out.contains("ksolver_shadow_pod_observations_total"));
         assert!(out.contains("ksolver_shadow_pending_pods"));
@@ -249,5 +260,6 @@ mod shadow_metric_tests {
         assert!(out.contains("ksolver_shadow_solve_errors_total"));
         assert!(out.contains("ksolver_shadow_solve_seconds"));
         assert!(out.contains("ksolver_shadow_unplaced_total"));
+        assert!(out.contains("ksolver_shadow_caveated_total"));
     }
 }

@@ -132,11 +132,20 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
                     .iter()
                     .filter(|d| matches!(d.placement, PodPlacement::Unplaced { .. }))
                     .count() as u64;
+                let caveated = trace
+                    .decisions
+                    .iter()
+                    .filter(|d| {
+                        matches!(d.placement, PodPlacement::Placed { .. }) && !d.caveats.is_empty()
+                    })
+                    .count() as u64;
                 metrics::inc_shadow_unplaced(unplaced);
+                metrics::inc_shadow_caveated(caveated);
                 info!(
                     sequence = trace.sequence,
                     observed = trace.observed_pods,
                     unplaced,
+                    caveated,
                     status = %trace.solver_status,
                     solve_millis = trace.solve_millis,
                     "shadow decision recorded (bound nothing)"
