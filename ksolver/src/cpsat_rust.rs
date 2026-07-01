@@ -21,6 +21,9 @@ mod enabled {
         input: &OptimizationInput,
         scenario: &ScenarioConfig,
     ) -> Result<(OptimizationSolution, SolverInfo)> {
+        if scenario.partial_admission && scenario.enable_joint_rightsizing {
+            bail!("partial_admission is incompatible with enable_joint_rightsizing");
+        }
         let mut model = CpModelBuilder::default();
         let mut y_vars = HashMap::new();
         let mut x_vars = HashMap::new();
@@ -40,7 +43,7 @@ mod enabled {
             if workload.feasible_nodes.is_empty() {
                 bail!("workload {} has no feasible nodes", workload.id);
             }
-            let upper = i64::from(workload.group_size);
+            let upper = i64::from(workload.group_size).max(0);
             for node_name in &workload.feasible_nodes {
                 let var = model.new_int_var_with_name(
                     [(0, upper)],
@@ -110,6 +113,7 @@ mod enabled {
             }
         }
 
+        let mut placed_vars: HashMap<String, BoolVar> = HashMap::new();
         for workload in &input.workloads {
             let group_size = i64::from(workload.group_size);
             let sum_expr: LinearExpr = workload
@@ -117,7 +121,15 @@ mod enabled {
                 .iter()
                 .map(|node_name| x_vars[&(workload.id.clone(), node_name.clone())])
                 .collect();
-            model.add_eq(sum_expr, group_size);
+            if scenario.partial_admission && group_size > 0 {
+                // All-or-nothing admission: sum of replicas == group_size * placed.
+                let placed =
+                    model.new_bool_var_with_name(format!("placed_{}", sanitize(&workload.id)));
+                model.add_eq(sum_expr, (group_size, placed));
+                placed_vars.insert(workload.id.clone(), placed);
+            } else {
+                model.add_eq(sum_expr, group_size);
+            }
 
             for node_name in &workload.feasible_nodes {
                 let x = x_vars[&(workload.id.clone(), node_name.clone())];
@@ -337,6 +349,79 @@ mod enabled {
                 }
             }
         }
+        let effective_admission_weight = if scenario.partial_admission && !placed_vars.is_empty() {
+            // Conservative upper bound (i128) of the max magnitude of ALL non-admission
+            // objective terms. Node terms use int vars y in [0, node.count], so every
+            // per-node term scales by node.count; slack <= capacity * count. Use the
+            // absolute value of each weight (weights are not validated nonnegative).
+            let mut rest_bound: i128 = 0;
+            for node in &input.nodes {
+                let count = i128::from(node.count.max(0));
+                let cost_coeff =
+                    ((node.price.monthly * scenario.cost_weight as f64).round() as i128).abs();
+                rest_bound = rest_bound.saturating_add(cost_coeff.saturating_mul(count));
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.active_node_weight as i128)
+                        .abs()
+                        .saturating_mul(count),
+                );
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.memory_slack_weight as i128)
+                        .abs()
+                        .saturating_mul((node.effective_capacity.memory_bytes as i128).max(0))
+                        .saturating_mul(count),
+                );
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.cpu_slack_weight as i128)
+                        .abs()
+                        .saturating_mul((node.effective_capacity.milli_cpu as i128).max(0))
+                        .saturating_mul(count),
+                );
+                for cap in node.extended_resources.values() {
+                    rest_bound = rest_bound.saturating_add(
+                        (scenario.memory_slack_weight as i128)
+                            .abs()
+                            .saturating_mul((*cap).max(0) as i128)
+                            .saturating_mul(count),
+                    );
+                }
+            }
+            // Churn reward: -churn_weight * x on edges with current_count>0; sum of x over
+            // nodes == group_size, so per workload the magnitude is <= churn_weight*group_size.
+            for workload in &input.workloads {
+                let gs = i128::from(workload.group_size.max(0));
+                rest_bound = rest_bound
+                    .saturating_add((scenario.churn_weight as i128).abs().saturating_mul(gs));
+            }
+            let w: i128 = if scenario.admission_weight > 0 {
+                let explicit = scenario.admission_weight as i128;
+                if explicit <= rest_bound {
+                    bail!("admission_weight {explicit} does not dominate objective bound {rest_bound}; use 0 for auto or a larger value");
+                }
+                explicit
+            } else {
+                // rightsizing terms cannot coexist (guarded above), so rest_bound covers
+                // the full objective. saturating_add guards the i128::MAX saturated case.
+                rest_bound.saturating_add(1)
+            };
+            let n = placed_vars.len() as i128;
+            let total = w
+                .checked_mul(n)
+                .and_then(|v| v.checked_add(rest_bound))
+                .unwrap_or(i128::MAX);
+            if w > i64::MAX as i128 || total > i64::MAX as i128 {
+                bail!("partial_admission weight would overflow i64 objective (workloads={n}); reduce scope or set a smaller admission_weight");
+            }
+            w as i64
+        } else {
+            0
+        };
+        for placed in placed_vars.values() {
+            // Reward admitting a workload; weight dominates the rest of the objective so
+            // the solver maximizes admitted count first, then minimizes cost.
+            objective -= (effective_admission_weight, *placed);
+        }
+
         model.minimize(objective);
 
         let validation = model.validate_cp_model();
@@ -408,13 +493,14 @@ mod enabled {
                 name: "cp-sat-rust".to_string(),
                 available: true,
                 status: format!(
-                    "status={status:?}; workers={worker_count}; hinted_assignments={hinted_assignments}; hinted_nodes={}; cost_weight={}; active_node_weight={}; memory_slack_weight={}; cpu_slack_weight={}; churn_weight={}; {stats}",
+                    "status={status:?}; workers={worker_count}; hinted_assignments={hinted_assignments}; hinted_nodes={}; cost_weight={}; active_node_weight={}; memory_slack_weight={}; cpu_slack_weight={}; churn_weight={}; partial_admission={}; admission_weight={effective_admission_weight}; {stats}",
                     hinted_nodes.len(),
                     scenario.cost_weight,
                     scenario.active_node_weight,
                     scenario.memory_slack_weight,
                     scenario.cpu_slack_weight,
-                    scenario.churn_weight
+                    scenario.churn_weight,
+                    scenario.partial_admission
                 ),
             },
         ))
@@ -528,5 +614,86 @@ mod tests {
         };
 
         assert_eq!(recommended_worker_count(&input), 1);
+    }
+
+    fn two_competing_gpu_pods() -> OptimizationInput {
+        use crate::model::ResourceList;
+        use std::collections::BTreeMap;
+        let mut node_ext = BTreeMap::new();
+        node_ext.insert("nvidia.com/gpu".to_string(), 1);
+        let node = OptimizationNode {
+            name: "n1".to_string(),
+            count: 1,
+            members: vec!["n1".to_string()],
+            effective_capacity: ResourceList {
+                milli_cpu: 8000,
+                memory_bytes: 32 << 30,
+                ephemeral_storage: 0,
+                pods: 110,
+            },
+            extended_resources: node_ext,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            let mut ext = BTreeMap::new();
+            ext.insert("nvidia.com/gpu".to_string(), 1);
+            OptimizationWorkload {
+                id: format!("t/{name}"),
+                namespace: "t".to_string(),
+                name: name.to_string(),
+                group_size: 1,
+                requests: ResourceList {
+                    milli_cpu: 1000,
+                    memory_bytes: 1 << 30,
+                    ephemeral_storage: 0,
+                    pods: 0,
+                },
+                extended_resource_requests: ext,
+                feasible_nodes: vec!["n1".to_string()],
+                ..Default::default()
+            }
+        };
+        OptimizationInput {
+            nodes: vec![node],
+            workloads: vec![mk("a"), mk("b")],
+            anti_affinity_pairs: vec![],
+        }
+    }
+
+    #[test]
+    fn partial_admission_places_what_fits() {
+        use crate::model::ScenarioConfig;
+        let input = two_competing_gpu_pods();
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("solve should succeed, not infeasible");
+        // assignment_counts is authoritative: exactly one of the two pods is admitted.
+        let admitted = solution
+            .assignment_counts
+            .values()
+            .filter(|counts| counts.values().any(|c| *c > 0))
+            .count();
+        assert_eq!(
+            admitted, 1,
+            "expected exactly one admitted; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn hard_equality_is_infeasible_when_flag_off() {
+        use crate::model::ScenarioConfig;
+        let input = two_competing_gpu_pods();
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: false,
+            ..Default::default()
+        };
+        // Both pods must place but only one fits -> hard equality makes the model infeasible.
+        assert!(super::enabled::solve(&input, &scenario).is_err());
     }
 }
