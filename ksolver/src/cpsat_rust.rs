@@ -136,6 +136,29 @@ mod enabled {
                 let y = y_vars[node_name];
                 model.add_le(x, (group_size, y));
             }
+
+            if workload.colocate && group_size > 0 {
+                // Single-node co-location: at most one node may hold this gang's
+                // replicas, so combined with the latch (sum x = group_size * placed)
+                // an admitted gang lands entirely on one node.
+                let mut used_sum = LinearExpr::default();
+                for node_name in &workload.feasible_nodes {
+                    let x = x_vars[&(workload.id.clone(), node_name.clone())];
+                    let used = model.new_bool_var_with_name(format!(
+                        "used_{}__{}",
+                        sanitize(&workload.id),
+                        sanitize(node_name)
+                    ));
+                    // x > 0  =>  used = 1
+                    model.add_le(x, (group_size, used));
+                    used_sum += used;
+                }
+                if let Some(placed) = placed_vars.get(&workload.id) {
+                    model.add_le(used_sum, *placed);
+                } else {
+                    model.add_le(used_sum, 1_i64);
+                }
+            }
         }
 
         if !scenario.relax_required_anti_affinity {
@@ -777,6 +800,54 @@ mod tests {
             .map(|c| c.values().map(|v| i64::from(*v)).sum())
             .unwrap_or(0);
         assert_eq!(total, 5, "5-replica gang must be fully admitted on 5 GPUs");
+    }
+
+    fn colocate_gang_input(colocate: bool) -> OptimizationInput {
+        let mut w = gang_workload(4, 4, &["n1", "n2"]);
+        w.colocate = colocate;
+        OptimizationInput {
+            nodes: vec![gpu_node("n1", 2), gpu_node("n2", 2)],
+            workloads: vec![w],
+            anti_affinity_pairs: vec![],
+        }
+    }
+
+    #[test]
+    fn colocated_gang_needs_single_node() {
+        use crate::model::ScenarioConfig;
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (sol, info) =
+            super::enabled::solve(&colocate_gang_input(true), &scenario).expect("solve");
+        assert!(
+            !sol.assignment_counts.contains_key("gang:t/job"),
+            "co-located 4-gang must not fit on 2-GPU nodes; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn non_colocated_gang_spreads() {
+        use crate::model::ScenarioConfig;
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (sol, _info) =
+            super::enabled::solve(&colocate_gang_input(false), &scenario).expect("solve");
+        let total: i64 = sol
+            .assignment_counts
+            .get("gang:t/job")
+            .map(|c| c.values().map(|v| i64::from(*v)).sum())
+            .unwrap_or(0);
+        assert_eq!(
+            total, 4,
+            "non-co-located 4-gang should spread 2+2 across the nodes"
+        );
     }
 
     #[test]
