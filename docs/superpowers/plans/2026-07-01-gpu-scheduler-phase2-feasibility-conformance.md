@@ -63,7 +63,7 @@ impl ConfusionMatrix {
 
 ### Task 3: Simulator client reuse
 - [ ] In `verifier.rs`, factor the reset→import→poll-export sequence into `pub(crate) async fn schedule_snapshot(simulator_url: &str, payload: SimulatorImportPayload) -> anyhow::Result<SimulatorExportPayload>` and have the existing verify path call it (no behavior change). Expose `SimulatorImportPayload`/`SimulatorExportPayload` as `pub(crate)` if not already.
-- [ ] In `conformance.rs`, add `scheduler_feasible(export, node_name) -> (bool, Option<String>)`: feasible iff the pod's `selected-node` annotation == node_name; else infeasible with the `filter-result` string (if present) as the reason. Unit-test this parser against a synthetic `SimulatorExportPayload` (feasible case: selected-node set; infeasible case: filter-result set) — no network. Run → commit.
+- [ ] In `conformance.rs`, add `scheduler_feasible(export, node_name) -> (bool, Option<String>)`: feasible iff the pod's `selected-node` annotation == node_name **OR** `spec.nodeName == node_name` (codex #2 — match verifier's bind fallback, else a bind reported only via `spec.nodeName` yields a bogus false-negative); else infeasible with the `filter-result` string (if present) as the reason. Unit-test this parser against synthetic `SimulatorExportPayload`s: (a) feasible via selected-node annotation; (b) feasible via spec.nodeName only; (c) infeasible with filter-result set — no network. Run → commit.
 
 ### Task 4: Orchestration + subcommand
 - [ ] In `conformance.rs`, `pub async fn run_conformance(kubeconfig, cluster_name, simulator_url, sample) -> ConformanceReport`: collect snapshot (reuse `collector`), normalize once (for `feasible_node_names` context + volumes map), select pods (default: all pending pods, capped by `sample` for cost), and for each (pod, node) pair: compute ours via `node_feasibility_reasons(pod, &conformance_node(node), …)` (raw-allocatable node per codex #1), scheduler via `schedule_snapshot` + `scheduler_feasible`, `classify`, and record into the matrix (bucketed expected-divergence vs strict). Collect mismatch details (pod, node, ours_reasons, scheduler_reason).
@@ -82,4 +82,5 @@ impl ConfusionMatrix {
 - `conformance_node` (effective_capacity=allocatable, reserved=0) + `Options::default()` + empty simulator node ⇒ both sides test the same raw allocatable (codex #1 fix); DaemonSet-reserve/overcommit/headroom excluded as non-Filter layers.
 - Known-unmodeled predicates bucketed as expected divergence; plain pods must match exactly.
 - Graceful skip when no simulator; never panics.
+- `scheduler_feasible` accepts a bind via selected-node annotation OR spec.nodeName (codex #2), matching verifier's fallback.
 - Pure logic unit-tested (classify, matrix, export parser, single-node builder); network path reused from verifier and exercised like its existing tests.
