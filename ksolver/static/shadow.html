@@ -51,7 +51,7 @@
   <h2>Dry-run binding plan <span class="sub" id="bindingnote"></span></h2>
   <table>
     <thead><tr>
-      <th>Namespace</th><th>Pod</th><th>Node</th>
+      <th>Namespace</th><th>Pod</th><th>Node</th><th>Readiness</th>
     </tr></thead>
     <tbody id="bindings"></tbody>
   </table>
@@ -148,6 +148,16 @@
       tr.appendChild(cell(b.namespace || ""));
       tr.appendChild(cell(b.pod_name || ""));
       tr.appendChild(cell(b.node_name || ""));
+      var rd = b.readiness || {};
+      var rdTd = document.createElement("td");
+      if (rd.state) {
+        var pill = document.createElement("span");
+        pill.className = "pill " + (rd.state === "ready" ? "placed" : "unplaced");
+        pill.textContent = rd.state;
+        rdTd.appendChild(pill);
+        if (rd.state === "stale" && rd.reason) rdTd.title = rd.reason;
+      }
+      tr.appendChild(rdTd);
       elBindings.appendChild(tr);
     });
   }
