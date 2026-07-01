@@ -194,11 +194,11 @@ async fn run_one_solve(
         ..Default::default()
     };
     let solve_start = Instant::now();
-    let (solution, status) = match cpsat_rust::solve(&input, &scenario) {
-        Ok((sol, info)) => (sol, info.status),
+    let (solution, status, solve_ok) = match cpsat_rust::solve(&input, &scenario) {
+        Ok((sol, info)) => (sol, info.status, true),
         Err(e) => {
-            warn!(error = %e, "solver error; recording infeasible");
-            (Default::default(), "error".to_string())
+            warn!(error = %e, "solver produced no usable solution");
+            (Default::default(), format!("no-solution: {e}"), false)
         }
     };
     let solve_core_millis = solve_start.elapsed().as_millis() as u64;
@@ -212,6 +212,7 @@ async fn run_one_solve(
         &input,
         &solution,
         &status,
+        solve_ok,
         solve_millis,
         solve_core_millis,
         snapshot_age_millis,
