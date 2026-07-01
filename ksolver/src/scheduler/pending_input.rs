@@ -588,8 +588,8 @@ pub fn build_pending_input_diagnosed(
         // domain (node.labels[topologyKey]); kube's interpodaffinity scoring sums per matching pod.
         // A node lacking the topology label earns no score; a running pod on a node lacking it
         // contributes none. Requires gang-member agreement on the term list (else no scores).
-        // Best-effort — NOT full kube-scheduler score parity (symmetry via running pods' preferred
-        // terms is deferred).
+        // Best-effort — NOT full kube-scheduler score parity (co-placement between two pending
+        // pods remains deferred; symmetry via running pods' preferred terms is handled below).
         let pref_pod = &members[0].preferred_pod_affinity;
         let pref_pod_agree = members.iter().all(|m| m.preferred_pod_affinity == *pref_pod);
         if pref_pod_agree {
@@ -613,6 +613,35 @@ pub fn build_pending_input_diagnosed(
                             {
                                 *soft_scores.entry(cn.clone()).or_default() += delta;
                             }
+                        }
+                    }
+                }
+            }
+        }
+        // Symmetric preferred pod (anti-)affinity: a RUNNING pod's own preferred term steers the
+        // pending pod (soft mirror of required-symmetry 5h). For each running pod w on node rn whose
+        // term's selector scopes to the pending namespace and matches EVERY pending member's labels,
+        // a candidate node cn sharing rn's topology domain accumulates +weight (affinity) / -weight
+        // (anti-affinity). Runs independently of the pending pod's own preferred terms/agreement.
+        for cn in &feasible_nodes {
+            for (rn, pods) in &running_by_node {
+                for w in pods {
+                    for term in &w.preferred_pod_affinity {
+                        let (Some(cd), Some(rd)) =
+                            (domain(cn, &term.topology_key), domain(rn, &term.topology_key))
+                        else {
+                            continue;
+                        };
+                        if cd != rd {
+                            continue;
+                        }
+                        if selector_scopes_ns(&term.selector, &w.namespace, &rep.namespace, ns_labels)
+                            && member_labels
+                                .iter()
+                                .all(|ml| selector_matches(&term.selector.reqs, ml))
+                        {
+                            let delta = if term.anti { -term.weight } else { term.weight };
+                            *soft_scores.entry(cn.clone()).or_default() += delta;
                         }
                     }
                 }
@@ -2048,6 +2077,62 @@ mod tests {
         let input = build_pending_input(&cluster, &[m0, m1]);
         assert_eq!(input.workloads.len(), 1);
         assert!(input.workloads[0].soft_scores.is_empty());
+    }
+
+    #[test]
+    fn symmetric_preferred_pod_anti_affinity_penalizes_running_pods_domain() {
+        // running "guard" on n1 (hostname n1) softly prefers NOT to share a host with app=trainer.
+        // pending is app=trainer with NO own preferred terms -> symmetry must still discourage n1.
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("kubernetes.io/hostname".into(), "n1".into())].into();
+        let mut n2 = node("n2", 16000, 64, 110, 8);
+        n2.labels = [("kubernetes.io/hostname".into(), "n2".into())].into();
+        let mut guard = running_labeled("team", "guard", "n1", &[("role", "guard")]);
+        guard.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 30,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "trainer")]),
+            anti: true,
+        }];
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![
+                guard,
+                labeled_pending("team", "pending", &["n1", "n2"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+        let w = &input.workloads[0];
+        assert_eq!(w.soft_scores.get("n1"), Some(&-30)); // running guard discourages its host
+        assert_eq!(w.soft_scores.get("n2"), None);
+    }
+
+    #[test]
+    fn symmetric_preferred_ignores_partial_gang_match() {
+        // running guard forbids app=trainer softly; gang has one member app=trainer, one without.
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("kubernetes.io/hostname".into(), "n1".into())].into();
+        let mut guard = running_labeled("team", "guard", "n1", &[("role", "guard")]);
+        guard.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 30,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "trainer")]),
+            anti: true,
+        }];
+        let mut m0 = workload("team", "m0", "", 1000, 2, 1, &["n1"]);
+        m0.labels = [("app".to_string(), "trainer".to_string())].into();
+        let m1 = workload("team", "m1", "", 1000, 2, 1, &["n1"]); // no labels
+        let cluster = NormalizedCluster {
+            nodes: vec![n1],
+            workloads: vec![guard, m0, m1],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[ppod("team", "m0", Some("job")), ppod("team", "m1", Some("job"))],
+        );
+        assert!(input.workloads[0].soft_scores.is_empty()); // not ALL members match -> no score
     }
 
     // ---- F-CNS-2: namespaceSelector ----
