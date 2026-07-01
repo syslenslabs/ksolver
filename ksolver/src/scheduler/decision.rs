@@ -126,6 +126,7 @@ mod tests {
             gang_key: Some(format!("{ns}/job")),
             colocate: false,
             unmodeled_constraints: vec![],
+            anti_affinity_host_selectors: vec![],
         }
     }
 

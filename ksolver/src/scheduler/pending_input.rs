@@ -332,6 +332,7 @@ mod tests {
             gang_key: gang.map(|g| format!("{ns}/{g}")),
             colocate,
             unmodeled_constraints: vec![],
+            anti_affinity_host_selectors: vec![],
         }
     }
 
