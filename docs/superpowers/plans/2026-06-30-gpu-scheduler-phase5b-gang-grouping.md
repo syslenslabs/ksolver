@@ -189,6 +189,8 @@ git commit -m "feat(scheduler): configurable gang label, classify extracts gang 
 
 - [ ] **Step 2: Run → fail.** `cargo test -p ksolver scheduler::pending_input` → FAIL (signature).
 
+- [ ] **Step 2b: Local scale helpers.** `optimizer_input::scale_requests`/`scale_extended_requests` are private — define local equivalents in `pending_input.rs` (mirror them: `scale_requests` multiplies cpu/mem/disk by N and sets `pods = N`; `scale_extended_requests` multiplies each value by N). Feature test executes via `cargo test -p ksolver --features rust-cp-sat cpsat_rust`.
+
 - [ ] **Step 3: Implement.** Keep the residual computation (Phase 4). Replace the workload-building section: build a per-pod `NormalizedWorkload` lookup keyed by `{ns}/{name}`; group `pending` by `gang_id`; for each gang, gather members sorted by name, look up each member's workload, compute the representative's residual-feasible nodes, and — only if every member is found AND the representative has ≥1 residual-feasible node — push one `OptimizationWorkload` with `group_size = members.len()`. (Exclude the whole gang otherwise.)
 
 - [ ] **Step 4: Run → pass.** `cargo test -p ksolver scheduler::pending_input` → PASS.
