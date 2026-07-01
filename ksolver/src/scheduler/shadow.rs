@@ -212,6 +212,9 @@ async fn run_one_solve(
         // Bounded latency: accept the best incumbent within this budget rather than
         // spending up to 600s proving cost-optimality (the placement is found in ms).
         solve_time_limit_secs: cfg.solve_time_limit_secs,
+        // Break cost-ties toward preferred-node-affinity matches (only when the solve proves
+        // optimal; never changes admission or cost).
+        enable_soft_affinity: true,
         ..Default::default()
     };
     let solve_start = Instant::now();

@@ -22,6 +22,8 @@ pub struct PendingGpuPod {
     /// `(topologyKey, selector)` of *modeled* NON-hostname pod-anti-affinity terms (zone/rack) for
     /// best-effort topology-domain exclusion (Phase 12).
     pub anti_affinity_topology_selectors: Vec<(String, crate::model::AntiAffinitySelector)>,
+    /// Preferred (soft) node-affinity terms (weight + matchExpressions) for the soft tie-break pass.
+    pub preferred_node_affinity: Vec<crate::model::PreferredNodeTerm>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -130,6 +132,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         .into_iter()
         .filter(|(k, _)| k != "kubernetes.io/hostname")
         .collect();
+    let preferred_node_affinity = modeled_preferred_node_affinity(spec);
     Some(PendingGpuPod {
         uid,
         namespace,
@@ -140,7 +143,54 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         unmodeled_constraints,
         anti_affinity_host_selectors,
         anti_affinity_topology_selectors,
+        preferred_node_affinity,
     })
+}
+
+/// Preferred (soft) node-affinity terms: `(weight, matchExpressions)` from
+/// `nodeAffinity.preferredDuringScheduling…`. matchExpressions are lowered to `NodeAffinityTerm`s
+/// (all operators kept — the label matcher handles In/NotIn/Exists/DoesNotExist/Gt/Lt);
+/// `matchFields` in a preference are ignored (deferred). Weight ≤ 0 or empty exprs ⇒ term dropped.
+fn modeled_preferred_node_affinity(spec: &corev1::PodSpec) -> Vec<crate::model::PreferredNodeTerm> {
+    let mut out = Vec::new();
+    let Some(terms) = spec
+        .affinity
+        .as_ref()
+        .and_then(|a| a.node_affinity.as_ref())
+        .and_then(|na| {
+            na.preferred_during_scheduling_ignored_during_execution
+                .as_ref()
+        })
+    else {
+        return out;
+    };
+    for t in terms {
+        if t.weight <= 0 {
+            continue;
+        }
+        let exprs: Vec<crate::model::NodeAffinityTerm> = t
+            .preference
+            .match_expressions
+            .as_ref()
+            .map(|es| {
+                es.iter()
+                    .map(|e| crate::model::NodeAffinityTerm {
+                        key: e.key.clone(),
+                        operator: e.operator.clone(),
+                        values: e.values.clone().unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if exprs.is_empty() {
+            continue; // matchFields-only preference not modeled (deferred)
+        }
+        out.push(crate::model::PreferredNodeTerm {
+            weight: i64::from(t.weight),
+            exprs,
+        });
+    }
+    out
 }
 
 /// `(topologyKey, selector)` of required pod-anti-affinity terms we can fully model for best-effort
@@ -613,6 +663,40 @@ mod tests {
             vec![container("m", Some(q(&[("nvidia.com/gpu", "1")])), None)],
             vec![],
         )
+    }
+
+    #[test]
+    fn preferred_node_affinity_extracted_with_weight() {
+        use k8s_openapi::api::core::v1::{
+            NodeAffinity, NodeSelectorRequirement, NodeSelectorTerm, PreferredSchedulingTerm,
+        };
+        let mut p = gpu_pending();
+        p.spec.as_mut().unwrap().affinity = Some(corev1::Affinity {
+            node_affinity: Some(NodeAffinity {
+                preferred_during_scheduling_ignored_during_execution: Some(vec![
+                    PreferredSchedulingTerm {
+                        weight: 10,
+                        preference: NodeSelectorTerm {
+                            match_expressions: Some(vec![NodeSelectorRequirement {
+                                key: "zone".into(),
+                                operator: "In".into(),
+                                values: Some(vec!["a".into()]),
+                            }]),
+                            ..Default::default()
+                        },
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let got = classify(&p, &cfg()).unwrap();
+        assert_eq!(got.preferred_node_affinity.len(), 1);
+        let t = &got.preferred_node_affinity[0];
+        assert_eq!(t.weight, 10);
+        assert_eq!(t.exprs.len(), 1);
+        assert_eq!(t.exprs[0].key, "zone");
+        assert_eq!(t.exprs[0].values, vec!["a".to_string()]);
     }
 
     #[test]

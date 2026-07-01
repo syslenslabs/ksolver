@@ -1143,7 +1143,7 @@ pub(crate) fn node_feasibility_reasons(
 }
 
 /// Whether a single node-affinity match-expression holds against the node's labels.
-fn node_affinity_expr_matches(
+pub(crate) fn node_affinity_expr_matches(
     node_labels: &BTreeMap<String, String>,
     term: &crate::model::NodeAffinityTerm,
 ) -> bool {

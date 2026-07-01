@@ -6,8 +6,36 @@ mod enabled {
     use anyhow::{bail, Result};
     use cp_sat::builder::{BoolVar, CpModelBuilder, IntVar, LinearExpr};
     use cp_sat::ffi::cp_solver_response_stats;
-    use cp_sat::proto::{CpSolverStatus, SatParameters};
+    use cp_sat::proto::{CpSolverResponse, CpSolverStatus, SatParameters};
     use std::collections::{HashMap, HashSet};
+
+    /// A variable appearing in the objective, so its exact integer solution value can be read back
+    /// (the reported f64 objective_value is unreliable once the admission weight exceeds 2^53).
+    #[derive(Clone, Copy)]
+    enum ObjVar {
+        Int(IntVar),
+        Bool(BoolVar),
+    }
+    impl ObjVar {
+        fn value(&self, response: &CpSolverResponse) -> i64 {
+            match self {
+                ObjVar::Int(v) => v.solution_value(response),
+                ObjVar::Bool(b) => b.solution_value(response) as i64,
+            }
+        }
+    }
+    /// Build a `LinearExpr` from `(coeff, var)` terms (used for both the objective and, in the
+    /// soft-affinity second phase, the cost-preserving `objective ≤ optimum` constraint).
+    fn expr_from_terms(terms: &[(i64, ObjVar)]) -> LinearExpr {
+        let mut e = LinearExpr::default();
+        for (c, v) in terms {
+            match v {
+                ObjVar::Int(iv) => e += (*c, *iv),
+                ObjVar::Bool(bv) => e += (*c, *bv),
+            }
+        }
+        e
+    }
 
     pub fn solver_info() -> SolverInfo {
         SolverInfo {
@@ -417,24 +445,26 @@ mod enabled {
             }
         }
 
-        let mut objective = LinearExpr::default();
+        // Collect the objective as `(coeff, var)` terms so its exact integer value can be read back
+        // for the soft-affinity second phase (see ObjVar). The LinearExpr is derived from these.
+        let mut obj_terms: Vec<(i64, ObjVar)> = Vec::new();
         for node in &input.nodes {
             let coeff = (node.price.monthly * scenario.cost_weight as f64).round() as i64;
             if coeff != 0 {
-                objective += (coeff, y_vars[&node.name]);
+                obj_terms.push((coeff, ObjVar::Int(y_vars[&node.name])));
             }
-            objective += (scenario.active_node_weight, y_vars[&node.name]);
+            obj_terms.push((scenario.active_node_weight, ObjVar::Int(y_vars[&node.name])));
             if let Some(mem_slack) = mem_slack_vars.get(&node.name) {
-                objective += (scenario.memory_slack_weight, *mem_slack);
+                obj_terms.push((scenario.memory_slack_weight, ObjVar::Int(*mem_slack)));
             }
             if let Some(cpu_slack) = cpu_slack_vars.get(&node.name) {
-                objective += (scenario.cpu_slack_weight, *cpu_slack);
+                obj_terms.push((scenario.cpu_slack_weight, ObjVar::Int(*cpu_slack)));
             }
             for resource_name in node.extended_resources.keys() {
                 if let Some(slack) =
                     scalar_slack_vars.get(&(node.name.clone(), resource_name.clone()))
                 {
-                    objective += (scenario.memory_slack_weight, *slack);
+                    obj_terms.push((scenario.memory_slack_weight, ObjVar::Int(*slack)));
                 }
             }
         }
@@ -443,10 +473,10 @@ mod enabled {
                 let current_count =
                     i64::from(*workload.current_counts.get(node_name).unwrap_or(&0));
                 if current_count > 0 {
-                    objective -= (
-                        scenario.churn_weight,
-                        x_vars[&(workload.id.clone(), node_name.clone())],
-                    );
+                    obj_terms.push((
+                        -scenario.churn_weight,
+                        ObjVar::Int(x_vars[&(workload.id.clone(), node_name.clone())]),
+                    ));
                 }
             }
         }
@@ -458,7 +488,7 @@ mod enabled {
                     .map(|l| l.risk_score)
                     .unwrap_or(0);
                 if risk > 0 {
-                    objective += (scenario.rightsizing_weight * risk / 100, *bv);
+                    obj_terms.push((scenario.rightsizing_weight * risk / 100, ObjVar::Bool(*bv)));
                 }
             }
         }
@@ -532,10 +562,10 @@ mod enabled {
         for placed in placed_vars.values() {
             // Reward admitting a workload; weight dominates the rest of the objective so
             // the solver maximizes admitted count first, then minimizes cost.
-            objective -= (effective_admission_weight, *placed);
+            obj_terms.push((-effective_admission_weight, ObjVar::Bool(*placed)));
         }
 
-        model.minimize(objective);
+        model.minimize(expr_from_terms(&obj_terms));
 
         let validation = model.validate_cp_model();
         if !validation.is_empty() {
@@ -560,6 +590,56 @@ mod enabled {
         if status != CpSolverStatus::Optimal && status != CpSolverStatus::Feasible {
             bail!("cp-sat rust solve failed with status {status:?}; {stats}");
         }
+
+        // Soft-affinity tie-break (Phase 2): only when enabled, Phase 1 is proven OPTIMAL, and some
+        // workload has preferred-node scores. Preserve the cost optimum and the admitted set, then
+        // maximize soft score. Cannot change admission/cost (guarded by the constraint + fixed
+        // placed vars, and by the admission-and-cost invariant test).
+        let want_soft = scenario.enable_soft_affinity
+            && status == CpSolverStatus::Optimal
+            && input.workloads.iter().any(|w| !w.soft_scores.is_empty());
+        let response = if want_soft {
+            // Exact integer Phase-1 objective value (do NOT trust the reported f64; the admission
+            // weight can exceed 2^53).
+            let mut acc: i128 = 0;
+            for (c, v) in &obj_terms {
+                acc += *c as i128 * v.value(&response) as i128;
+            }
+            if acc < i64::MIN as i128 || acc > i64::MAX as i128 {
+                // Objective magnitude out of range for the constraint; skip the soft pass safely.
+                response
+            } else {
+                let phase1_obj = acc as i64;
+                // Pin cost at its optimum and the admitted set at Phase-1's choice.
+                model.add_le(expr_from_terms(&obj_terms), phase1_obj);
+                for placed in placed_vars.values() {
+                    model.add_eq(*placed, placed.solution_value(&response) as i64);
+                }
+                // Maximize soft score = minimize its negation.
+                let mut soft = LinearExpr::default();
+                for workload in &input.workloads {
+                    for (node_name, score) in &workload.soft_scores {
+                        if *score != 0 {
+                            if let Some(x) = x_vars.get(&(workload.id.clone(), node_name.clone())) {
+                                soft += (-*score, *x);
+                            }
+                        }
+                    }
+                }
+                model.minimize(soft);
+                let r2 = model.solve_with_parameters(&params);
+                // The Phase-1 assignment is a feasible witness, so Phase 2 should succeed; if it
+                // somehow doesn't, fall back to the (valid) Phase-1 response.
+                if r2.status() == CpSolverStatus::Optimal || r2.status() == CpSolverStatus::Feasible
+                {
+                    r2
+                } else {
+                    response
+                }
+            }
+        } else {
+            response
+        };
 
         let mut solution = OptimizationSolution::default();
         for workload in &input.workloads {
@@ -1037,6 +1117,75 @@ mod tests {
             .values()
             .filter(|counts| counts.values().any(|c| *c > 0))
             .count()
+    }
+
+    #[test]
+    fn soft_affinity_breaks_ties_without_changing_admission() {
+        use crate::model::ScenarioConfig;
+        use std::collections::BTreeMap;
+        // Two cost-equal nodes; a singleton feasible on both, preferring n2 (soft score 10).
+        let mut w = gpu_singleton("a", 1, &["n1", "n2"]);
+        w.soft_scores = BTreeMap::from([("n2".to_string(), 10)]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![w],
+            ..Default::default()
+        };
+        let base = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        // Soft OFF: admitted (node arbitrary).
+        let (off, _) = super::enabled::solve(&input, &base).expect("solve");
+        assert_eq!(admitted_count(&off), 1);
+        // Soft ON: same admission, and placed on the preferred node n2.
+        let soft = ScenarioConfig {
+            enable_soft_affinity: true,
+            ..base
+        };
+        let (on, info) = super::enabled::solve(&input, &soft).expect("solve");
+        assert_eq!(
+            admitted_count(&on),
+            1,
+            "soft affinity must not change admission; status={}",
+            info.status
+        );
+        let counts = on.assignment_counts.get("t/a").expect("workload admitted");
+        assert!(
+            counts.contains_key("n2"),
+            "soft affinity should place on the preferred node n2, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn soft_affinity_never_over_admits_under_capacity() {
+        use crate::model::ScenarioConfig;
+        use std::collections::BTreeMap;
+        // One 1-GPU node; two 1-GPU singletons both preferring it. Only one can be admitted —
+        // soft affinity must not change that (admission preserved).
+        let mut a = gpu_singleton("a", 1, &["n1"]);
+        a.soft_scores = BTreeMap::from([("n1".to_string(), 10)]);
+        let mut b = gpu_singleton("b", 1, &["n1"]);
+        b.soft_scores = BTreeMap::from([("n1".to_string(), 10)]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![a, b],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            enable_soft_affinity: true,
+            ..Default::default()
+        };
+        let (sol, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol),
+            1,
+            "capacity still caps admission with soft on; status={}",
+            info.status
+        );
     }
 
     #[test]

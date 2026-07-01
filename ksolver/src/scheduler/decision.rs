@@ -167,6 +167,7 @@ mod tests {
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: vec![],
             anti_affinity_topology_selectors: vec![],
+            preferred_node_affinity: vec![],
         }
     }
 

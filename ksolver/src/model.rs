@@ -304,7 +304,7 @@ pub struct AffinityTerm {
     pub selector: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeAffinityTerm {
     #[serde(default)]
     pub key: String,
@@ -341,6 +341,17 @@ pub struct AntiAffinitySelector {
     /// namespaces; `Some(reqs)` = namespaces whose labels match. Union'd with `namespaces`.
     #[serde(default)]
     pub namespace_selector: Option<Vec<LabelSelectorReq>>,
+}
+
+/// A `preferredDuringScheduling` node-affinity term: a `weight` (1–100) plus a preference selector
+/// (matchExpressions over node labels, as `NodeAffinityTerm`s). A node earns `weight` toward its
+/// soft score when ALL `exprs` match its labels. (matchFields in a preference are deferred.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreferredNodeTerm {
+    #[serde(default)]
+    pub weight: i64,
+    #[serde(default)]
+    pub exprs: Vec<NodeAffinityTerm>,
 }
 
 /// One `nodeSelectorTerm`: `match_expressions` are evaluated against node LABELS, `match_fields`
@@ -1161,6 +1172,10 @@ pub struct ScenarioConfig {
     /// CP-SAT wall-clock time limit in seconds. 0 = default (600). Lets benchmarks cap solves.
     #[serde(default)]
     pub solve_time_limit_secs: i64,
+    /// Enable a soft-affinity tie-break pass: after the cost-optimal solve, among equally-optimal
+    /// placements prefer higher preferred-affinity score. Shadow-only; never changes admission/cost.
+    #[serde(default)]
+    pub enable_soft_affinity: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1217,6 +1232,7 @@ impl Default for ScenarioConfig {
             partial_admission: false,
             admission_weight: 0,
             solve_time_limit_secs: 0,
+            enable_soft_affinity: false,
         }
     }
 }
@@ -1328,6 +1344,10 @@ pub struct OptimizationWorkload {
     /// scheduler, never by the offline planner.
     #[serde(default)]
     pub colocate: bool,
+    /// Per-node soft (preferred) affinity score: node name → summed preferred weight if a replica
+    /// lands there. Used only by the soft-affinity tie-break pass; never affects admission/cost.
+    #[serde(default)]
+    pub soft_scores: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

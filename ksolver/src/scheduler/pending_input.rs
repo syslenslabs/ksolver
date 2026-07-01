@@ -553,6 +553,35 @@ pub fn build_pending_input_diagnosed(
             });
             continue;
         }
+        // Soft (preferred) node-affinity scores per feasible node: Σ weight of the gang's preferred
+        // terms whose expressions ALL match the node's labels. Requires gang-member agreement on
+        // preferred terms (else no soft scores — soft is best-effort, so we drop scores not the gang).
+        let mut soft_scores: BTreeMap<String, i64> = BTreeMap::new();
+        let preferred = &members[0].preferred_node_affinity;
+        let preferred_agree = members
+            .iter()
+            .all(|m| m.preferred_node_affinity == *preferred);
+        if preferred_agree && !preferred.is_empty() {
+            for node_name in &feasible_nodes {
+                let empty = BTreeMap::new();
+                let labels = node_labels
+                    .get(node_name.as_str())
+                    .copied()
+                    .unwrap_or(&empty);
+                let score: i64 = preferred
+                    .iter()
+                    .filter(|t| {
+                        t.exprs
+                            .iter()
+                            .all(|e| crate::normalizer::node_affinity_expr_matches(labels, e))
+                    })
+                    .map(|t| t.weight)
+                    .sum();
+                if score > 0 {
+                    soft_scores.insert(node_name.clone(), score);
+                }
+            }
+        }
         workloads.push(OptimizationWorkload {
             id: id.clone(),
             namespace: rep.namespace.clone(),
@@ -571,6 +600,7 @@ pub fn build_pending_input_diagnosed(
             extended_resource_requests: scale_extended(&rep.extended_resource_requests, n),
             feasible_nodes,
             colocate,
+            soft_scores,
             ..Default::default()
         });
         // Self-anti-affine, non-colocated gang -> solver spreads it <=1 replica per node.
@@ -722,6 +752,7 @@ mod tests {
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: vec![],
             anti_affinity_topology_selectors: vec![],
+            preferred_node_affinity: vec![],
         }
     }
 
@@ -1067,6 +1098,7 @@ mod tests {
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: sel_list(selectors),
             anti_affinity_topology_selectors: vec![],
+            preferred_node_affinity: vec![],
         }
     }
 
@@ -1837,6 +1869,36 @@ mod tests {
         let input =
             super::build_pending_input(&cluster, &[ppod("team", "p", None)], &BTreeMap::new());
         assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    // ---- Soft (preferred) node affinity ----
+
+    #[test]
+    fn builder_computes_soft_scores_for_preferred_node_affinity() {
+        use crate::model::{NodeAffinityTerm, PreferredNodeTerm};
+        // n1 labelled zone=a; n2 zone=b. Pending pod prefers zone=a (weight 10).
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("zone".to_string(), "a".to_string())].into();
+        let mut n2 = node("n2", 16000, 64, 110, 8);
+        n2.labels = [("zone".to_string(), "b".to_string())].into();
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![workload("team", "p", "", 1000, 2, 1, &["n1", "n2"])],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "p", None);
+        p.preferred_node_affinity = vec![PreferredNodeTerm {
+            weight: 10,
+            exprs: vec![NodeAffinityTerm {
+                key: "zone".to_string(),
+                operator: "In".to_string(),
+                values: vec!["a".to_string()],
+            }],
+        }];
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        let w = &input.workloads[0];
+        assert_eq!(w.soft_scores.get("n1"), Some(&10));
+        assert!(!w.soft_scores.contains_key("n2")); // zone=b doesn't match ⇒ no score
     }
 
     // ---- F-CNS-2: namespaceSelector ----

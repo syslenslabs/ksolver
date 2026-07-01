@@ -124,6 +124,7 @@ fn build_input_with_grouping(
             feasible_nodes,
             candidate_levels: scale_candidate_levels(&base.candidate_levels, members.len() as i32),
             colocate: false,
+            soft_scores: std::collections::BTreeMap::new(),
         });
     }
 
@@ -179,6 +180,7 @@ fn build_input_with_grouping(
             feasible_nodes,
             candidate_levels: workload.candidate_levels.clone(),
             colocate: false,
+            soft_scores: std::collections::BTreeMap::new(),
         });
     }
 
