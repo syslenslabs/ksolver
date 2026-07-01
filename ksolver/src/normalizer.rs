@@ -580,6 +580,11 @@ impl Normalizer {
             cluster_name: snapshot.metadata.name.clone(),
             collected: snapshot.metadata.collected,
             warnings: snapshot.warnings.clone(),
+            namespace_labels: snapshot
+                .namespaces
+                .iter()
+                .map(|ns| (ns.name.clone(), ns.labels.clone()))
+                .collect(),
             ..Default::default()
         };
         normalized_warning(

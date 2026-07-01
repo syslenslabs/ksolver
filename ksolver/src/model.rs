@@ -2,10 +2,21 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// A cluster Namespace with its labels (for `namespaceSelector`-scoped pod anti-affinity).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NamespaceMeta {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClusterSnapshot {
     #[serde(default)]
     pub metadata: ClusterMetadata,
+    #[serde(default)]
+    pub namespaces: Vec<NamespaceMeta>,
     #[serde(default)]
     pub nodes: Vec<Node>,
     #[serde(default)]
@@ -326,6 +337,10 @@ pub struct AntiAffinitySelector {
     pub reqs: Vec<LabelSelectorReq>,
     #[serde(default)]
     pub namespaces: Vec<String>,
+    /// `namespaceSelector` scope (F-CNS-2): `None` = not set; `Some([])` = empty selector = ALL
+    /// namespaces; `Some(reqs)` = namespaces whose labels match. Union'd with `namespaces`.
+    #[serde(default)]
+    pub namespace_selector: Option<Vec<LabelSelectorReq>>,
 }
 
 /// One `nodeSelectorTerm`: `match_expressions` are evaluated against node LABELS, `match_fields`
@@ -548,6 +563,9 @@ pub struct NormalizedCluster {
     pub nodes: Vec<NormalizedNode>,
     #[serde(default)]
     pub workloads: Vec<NormalizedWorkload>,
+    /// Namespace name → labels, for `namespaceSelector`-scoped anti-affinity (F-CNS-2).
+    #[serde(default)]
+    pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub blockers: Vec<Blocker>,
     #[serde(default)]

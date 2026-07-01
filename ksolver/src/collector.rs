@@ -206,6 +206,26 @@ impl KubeCollector {
             })
             .context("list kubernetes snapshot resources")?;
 
+        // Namespace labels (for namespaceSelector-scoped anti-affinity, F-CNS-2). Non-fatal:
+        // a failure just means no namespace-label-scoped terms are modeled.
+        let namespaces: Vec<crate::model::NamespaceMeta> = {
+            let api: Api<corev1::Namespace> = Api::all(self.client.clone());
+            match api.list(&list_params).await {
+                Ok(list) => list
+                    .items
+                    .into_iter()
+                    .map(|ns| crate::model::NamespaceMeta {
+                        name: ns.metadata.name.unwrap_or_default(),
+                        labels: ns.metadata.labels.unwrap_or_default(),
+                    })
+                    .collect(),
+                Err(err) => {
+                    warn!(error = %err, "failed to list namespaces; continuing without namespace labels");
+                    Vec::new()
+                }
+            }
+        };
+
         let daemonset_count = daemon_sets.items.len();
         let pdb_count = pdbs.items.len();
         let (node_usage_result, pod_usage_result) = tokio::join!(
@@ -239,6 +259,7 @@ impl KubeCollector {
                 collected: Some(Utc::now()),
                 schema_version: crate::state_cache::snapshot_schema_version(),
             },
+            namespaces,
             nodes: nodes
                 .items
                 .into_iter()
@@ -1155,6 +1176,48 @@ pub(crate) fn label_selector_to_reqs(
     Some(reqs)
 }
 
+/// Lower a raw `namespaceSelector` into modeled requirements (F-CNS-2). Unlike a label selector,
+/// an EMPTY selector `{}` is valid and means ALL namespaces ⇒ `Some(vec![])`. Modelable ⇒
+/// `Some(reqs)`; an unsupported operator ⇒ `None` (caller skips the term, still caveated).
+pub(crate) fn namespace_selector_to_reqs(
+    ls: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
+) -> Option<Vec<crate::model::LabelSelectorReq>> {
+    let mut reqs = Vec::new();
+    if let Some(ml) = ls.match_labels.as_ref() {
+        for (k, v) in ml {
+            reqs.push(crate::model::LabelSelectorReq {
+                key: k.clone(),
+                operator: "In".to_string(),
+                values: vec![v.clone()],
+            });
+        }
+    }
+    if let Some(exprs) = ls.match_expressions.as_ref() {
+        for e in exprs {
+            match e.operator.as_str() {
+                "In" | "NotIn" => {
+                    let vals = e.values.clone().unwrap_or_default();
+                    if vals.is_empty() {
+                        return None;
+                    }
+                    reqs.push(crate::model::LabelSelectorReq {
+                        key: e.key.clone(),
+                        operator: e.operator.clone(),
+                        values: vals,
+                    });
+                }
+                "Exists" | "DoesNotExist" => reqs.push(crate::model::LabelSelectorReq {
+                    key: e.key.clone(),
+                    operator: e.operator.clone(),
+                    values: Vec::new(),
+                }),
+                _ => return None, // unsupported operator ⇒ term unmodeled
+            }
+        }
+    }
+    Some(reqs) // empty reqs = `{}` = all namespaces (valid for namespaceSelector)
+}
+
 fn modeled_anti_selectors_all(
     affinity: Option<&corev1::Affinity>,
 ) -> Vec<(String, crate::model::AntiAffinitySelector)> {
@@ -1169,11 +1232,15 @@ fn modeled_anti_selectors_all(
     };
     let mut out = Vec::new();
     for term in terms {
-        // `namespaceSelector` is not modeled (F-CNS-2); an explicit `namespaces` list IS
-        // (F-CNS-1). Empty/absent list ⇒ own namespace.
-        if term.namespace_selector.is_some() {
-            continue;
-        }
+        // namespaceSelector (F-CNS-2): None if absent; Some(reqs) if modelable (empty {} = all);
+        // an unmodelable namespaceSelector ⇒ skip the whole term (stays caveated).
+        let namespace_selector = match term.namespace_selector.as_ref() {
+            None => None,
+            Some(ns_ls) => match namespace_selector_to_reqs(ns_ls) {
+                Some(reqs) => Some(reqs),
+                None => continue,
+            },
+        };
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
@@ -1181,7 +1248,11 @@ fn modeled_anti_selectors_all(
             let namespaces = term.namespaces.clone().unwrap_or_default();
             out.push((
                 term.topology_key.clone(),
-                crate::model::AntiAffinitySelector { reqs, namespaces },
+                crate::model::AntiAffinitySelector {
+                    reqs,
+                    namespaces,
+                    namespace_selector,
+                },
             ));
         }
     }

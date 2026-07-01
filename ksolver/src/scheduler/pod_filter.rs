@@ -145,9 +145,10 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
 
 /// `(topologyKey, selector)` of required pod-anti-affinity terms we can fully model for best-effort
 /// exclusion: a modelable labelSelector (In/NotIn/Exists/DoesNotExist, non-empty). An explicit
-/// `namespaces` list is captured (F-CNS-1; empty ⇒ own namespace); `namespaceSelector` is not
-/// modeled (F-CNS-2) and stays caveated. Callers split hostname vs non-hostname. Selector lowering
-/// is shared with the collector via `label_selector_to_reqs`.
+/// `namespaces` list is captured (F-CNS-1; empty ⇒ own namespace); a `namespaceSelector` with
+/// supported operators is captured too (F-CNS-2; empty `{}` = all namespaces), while an unmodelable
+/// namespaceSelector leaves the whole term unmodeled (caveated). Callers split hostname vs
+/// non-hostname. Selector lowering is shared with the collector.
 fn modeled_anti_affinity_selectors(
     spec: &corev1::PodSpec,
 ) -> Vec<(String, crate::model::AntiAffinitySelector)> {
@@ -164,10 +165,15 @@ fn modeled_anti_affinity_selectors(
         return out;
     };
     for term in terms {
-        // namespaceSelector is not modeled (F-CNS-2); an explicit `namespaces` list is (F-CNS-1).
-        if term.namespace_selector.is_some() {
-            continue;
-        }
+        // namespaceSelector (F-CNS-2): None if absent; Some(reqs) if modelable (empty {} = all);
+        // unmodelable ⇒ skip the whole term (stays caveated).
+        let namespace_selector = match term.namespace_selector.as_ref() {
+            None => None,
+            Some(ns_ls) => match crate::collector::namespace_selector_to_reqs(ns_ls) {
+                Some(reqs) => Some(reqs),
+                None => continue,
+            },
+        };
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
@@ -175,7 +181,11 @@ fn modeled_anti_affinity_selectors(
             let namespaces = term.namespaces.clone().unwrap_or_default();
             out.push((
                 term.topology_key.clone(),
-                crate::model::AntiAffinitySelector { reqs, namespaces },
+                crate::model::AntiAffinitySelector {
+                    reqs,
+                    namespaces,
+                    namespace_selector,
+                },
             ));
         }
     }
@@ -736,12 +746,12 @@ mod tests {
     }
 
     #[test]
-    fn namespace_selector_term_is_not_modeled() {
+    fn namespace_selector_supported_is_modeled() {
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
             LabelSelector, LabelSelectorRequirement,
         };
         let mut p = gpu_pending();
-        // A term with a namespaceSelector is NOT modeled (F-CNS-2), only caveated.
+        // F-CNS-2: a namespaceSelector with a SUPPORTED operator (Exists) IS modeled.
         let mut ml = std::collections::BTreeMap::new();
         ml.insert("app".to_string(), "trainer".to_string());
         let term = corev1::PodAffinityTerm {
@@ -756,6 +766,43 @@ mod tests {
                     key: "team".into(),
                     operator: "Exists".into(),
                     values: None,
+                }]),
+            }),
+            ..Default::default()
+        };
+        set_anti_affinity(&mut p, vec![term]);
+        let got = classify(&p, &cfg()).unwrap();
+        assert_eq!(got.anti_affinity_host_selectors.len(), 1);
+        let ns_sel = got.anti_affinity_host_selectors[0]
+            .namespace_selector
+            .as_ref()
+            .expect("namespace_selector captured");
+        assert!(ns_sel
+            .iter()
+            .any(|r| r.key == "team" && r.operator == "Exists"));
+    }
+
+    #[test]
+    fn namespace_selector_unsupported_operator_not_modeled() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+        let mut p = gpu_pending();
+        // An unsupported namespaceSelector operator (Gt) ⇒ whole term unmodeled + caveated.
+        let mut ml = std::collections::BTreeMap::new();
+        ml.insert("app".to_string(), "trainer".to_string());
+        let term = corev1::PodAffinityTerm {
+            topology_key: "kubernetes.io/hostname".to_string(),
+            label_selector: Some(LabelSelector {
+                match_labels: Some(ml),
+                match_expressions: None,
+            }),
+            namespace_selector: Some(LabelSelector {
+                match_labels: None,
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: "rank".into(),
+                    operator: "Gt".into(),
+                    values: Some(vec!["3".into()]),
                 }]),
             }),
             ..Default::default()

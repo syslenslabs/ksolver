@@ -113,6 +113,7 @@ pub fn generate(s: &BenchScenario) -> (NormalizedCluster, Vec<PendingGpuPod>) {
                     values: vec![v],
                 }],
                 namespaces: Vec::new(),
+                namespace_selector: None,
             }]
         };
         let selectors: Vec<crate::model::AntiAffinitySelector> = match s.anti {
