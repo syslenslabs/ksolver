@@ -15,7 +15,7 @@
 - `cpsat_rust::solve` returns `Ok((solution, info))` for `Optimal`/`Feasible` (incl. time-limited incumbents), and `Err` for `UNKNOWN` (no incumbent)/`INFEASIBLE`/validation/feature-off. `run_one_solve` maps `Err` to `(Default::default(), "error".to_string())` today.
 - Signal is binary: `solve_ok = solve() returned Ok`. Do not try to parse the status string (fragile).
 - Only the *submitted-but-unresolved* branch changes when `solve_ok == false`. "Not submitted" (filtered during build) is a build-time fact independent of the solve, so it is unchanged. Placed pods only exist when `solve_ok == true`.
-- Reason string: `"solver produced no solution within the time budget (timeout or infeasible model)"`.
+- Reason string (generic — `Err` covers timeout/infeasible/feature-off/validation, so don't claim a specific cause; the trace's `solver_status` carries detail): `"solver produced no usable solution (see solver_status)"` (codex must-fix).
 - No behavior/placement change; trace-reason only. Binds nothing. Offline planner untouched.
 - Unit tests without the `rust-cp-sat` feature. `cargo fmt` + clean clippy.
 
