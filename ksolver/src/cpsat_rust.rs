@@ -671,11 +671,15 @@ mod enabled {
         let workload_count = input.workloads.len();
         let assignment_edges: usize = input.workloads.iter().map(|w| w.feasible_nodes.len()).sum();
 
-        let by_model = if workload_count >= 8_000 || assignment_edges >= 200_000 {
-            1
-        } else if workload_count >= 3_000 || assignment_edges >= 75_000 {
+        // Down-throttle only genuinely huge models (the offline planner's single big
+        // grouped model), where per-worker model copies threaten memory. The pending/
+        // shadow path is small (≤~1000 workloads × ~100 nodes ⇒ ≤~100k edges) and is
+        // latency-bound, not memory-bound, so it now lands in the 8-worker tier — a
+        // measured ~2.4x admission win at the shadow time cap. The final count is still
+        // capped by available cores in max_worker_cap(), so we never oversubscribe.
+        let by_model = if workload_count >= 20_000 || assignment_edges >= 1_000_000 {
             2
-        } else if workload_count >= 1_000 || assignment_edges >= 25_000 {
+        } else if workload_count >= 8_000 || assignment_edges >= 400_000 {
             4
         } else {
             8
@@ -765,14 +769,27 @@ mod tests {
     }
 
     #[test]
-    fn large_models_use_single_worker() {
+    fn large_models_throttle_to_four() {
+        // 8_000 workloads hits the middle (memory) tier -> 4 workers (was 1 pre-Phase-7b).
         let input = OptimizationInput {
             nodes: nodes(100),
             workloads: wls(8_000, 1),
             anti_affinity_pairs: Vec::new(),
             ..Default::default()
         };
-        assert_eq!(model_worker_count(&input), 1);
+        assert_eq!(model_worker_count(&input), 4);
+    }
+
+    #[test]
+    fn huge_model_still_throttles() {
+        // Planner protection preserved: an enormous model (>=20k workloads) stays at 2.
+        let input = OptimizationInput {
+            nodes: nodes(100),
+            workloads: wls(25_000, 1),
+            anti_affinity_pairs: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(model_worker_count(&input), 2);
     }
 
     #[test]
@@ -787,18 +804,23 @@ mod tests {
     }
 
     #[test]
-    fn medium_model_four_workers() {
+    fn pending_scale_model_uses_eight_workers() {
+        // The Phase-7b win: a 100-node pending-style model with 900 singleton workloads
+        // each feasible on all 100 nodes (~90k assignment edges) now gets 8 workers,
+        // not the 2 the old edge-throttle gave it. Asserts the pure pre-cap value so this
+        // passes regardless of CI core count.
         let input = OptimizationInput {
             nodes: nodes(100),
-            workloads: wls(500, 100),
+            workloads: wls(900, 100),
             anti_affinity_pairs: vec![],
             ..Default::default()
         };
-        assert_eq!(model_worker_count(&input), 4);
+        assert_eq!(model_worker_count(&input), 8);
     }
 
     #[test]
     fn extreme_nodes_capped() {
+        // The by_nodes secondary cap still bites at >=5000 nodes -> 2 workers.
         let input = OptimizationInput {
             nodes: nodes(5000),
             workloads: wls(2, 5000),
