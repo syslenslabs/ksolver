@@ -11,6 +11,10 @@ pub struct PendingGpuPod {
     pub gang_key: Option<String>,
     /// True when the configured co-location label is set to "true" (gang wants one node).
     pub colocate: bool,
+    /// Scheduling constraints present on the pod that shadow mode does NOT model
+    /// (e.g. "pod affinity", "pod anti-affinity", "topology spread"); surfaced as
+    /// per-decision caveats so recommendations are not silently misleading.
+    pub unmodeled_constraints: Vec<String>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -112,6 +116,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
             .and_then(|l| l.get(&cfg.gang_colocate_label))
             .map(|v| v == "true")
             .unwrap_or(false);
+    let unmodeled_constraints = unmodeled_constraints(spec);
     Some(PendingGpuPod {
         uid,
         namespace,
@@ -119,7 +124,46 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         gpu_request: gpu,
         gang_key,
         colocate,
+        unmodeled_constraints,
     })
+}
+
+/// Names of hard scheduling constraints present on the pod that shadow does not model:
+/// required pod affinity, required pod anti-affinity, and DoNotSchedule topology spread.
+/// (Node affinity IS enforced by feasibility, so it is not listed.)
+fn unmodeled_constraints(spec: &corev1::PodSpec) -> Vec<String> {
+    let mut out = Vec::new();
+    let has_terms = |t: &Option<Vec<corev1::PodAffinityTerm>>| {
+        t.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+    };
+    if let Some(aff) = spec.affinity.as_ref() {
+        if aff
+            .pod_affinity
+            .as_ref()
+            .map(|a| has_terms(&a.required_during_scheduling_ignored_during_execution))
+            .unwrap_or(false)
+        {
+            out.push("pod affinity".to_string());
+        }
+        if aff
+            .pod_anti_affinity
+            .as_ref()
+            .map(|a| has_terms(&a.required_during_scheduling_ignored_during_execution))
+            .unwrap_or(false)
+        {
+            out.push("pod anti-affinity".to_string());
+        }
+    }
+    // Only DoNotSchedule spread is a hard feasibility constraint; ScheduleAnyway is soft.
+    let hard_spread = spec
+        .topology_spread_constraints
+        .as_ref()
+        .map(|v| v.iter().any(|c| c.when_unsatisfiable == "DoNotSchedule"))
+        .unwrap_or(false);
+    if hard_spread {
+        out.push("topology spread".to_string());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -333,6 +377,82 @@ mod tests {
         let got = classify(&p, &cfg()).unwrap();
         assert_eq!(got.gang_key, None);
         assert!(!got.colocate);
+    }
+
+    #[test]
+    fn detects_pod_anti_affinity_and_spread() {
+        let mut p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        if let Some(spec) = p.spec.as_mut() {
+            spec.affinity = Some(corev1::Affinity {
+                pod_anti_affinity: Some(corev1::PodAntiAffinity {
+                    required_during_scheduling_ignored_during_execution: Some(vec![
+                        corev1::PodAffinityTerm {
+                            topology_key: "kubernetes.io/hostname".to_string(),
+                            ..Default::default()
+                        },
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            spec.topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+                max_skew: 1,
+                topology_key: "zone".to_string(),
+                when_unsatisfiable: "DoNotSchedule".to_string(),
+                ..Default::default()
+            }]);
+        }
+        let got = classify(&p, &cfg()).expect("classify");
+        assert!(got
+            .unmodeled_constraints
+            .contains(&"pod anti-affinity".to_string()));
+        assert!(got
+            .unmodeled_constraints
+            .contains(&"topology spread".to_string()));
+    }
+
+    #[test]
+    fn no_caveats_for_plain_pod() {
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        assert!(classify(&p, &cfg())
+            .unwrap()
+            .unmodeled_constraints
+            .is_empty());
+    }
+
+    #[test]
+    fn schedule_anyway_spread_is_not_a_caveat() {
+        let mut p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        if let Some(spec) = p.spec.as_mut() {
+            spec.topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+                max_skew: 1,
+                topology_key: "zone".to_string(),
+                when_unsatisfiable: "ScheduleAnyway".to_string(),
+                ..Default::default()
+            }]);
+        }
+        assert!(classify(&p, &cfg())
+            .unwrap()
+            .unmodeled_constraints
+            .is_empty());
     }
 
     #[test]

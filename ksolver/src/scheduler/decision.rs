@@ -124,6 +124,7 @@ mod tests {
             gpu_request: 1,
             gang_key: Some(format!("{ns}/job")),
             colocate: false,
+            unmodeled_constraints: vec![],
         }
     }
 
