@@ -549,6 +549,10 @@ pub struct NormalizedWorkload {
     pub name: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// matchLabels of this workload's fully-modeled hostname pod-anti-affinity terms
+    /// (for symmetry enforcement in the shadow scheduler).
+    #[serde(default)]
+    pub anti_affinity_host_selectors: Vec<BTreeMap<String, String>>,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]
