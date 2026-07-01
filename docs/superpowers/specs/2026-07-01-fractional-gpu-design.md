@@ -21,24 +21,26 @@ The **solver core already supports arbitrary integer extended resources generica
 ## Approaches
 
 ### A. MIG as distinct integer resources (recommended first)
-Treat each MIG profile as its own extended resource. Nodes advertise `nvidia.com/mig-1g.5gb: 7` etc.; pods request them. **~0 solver work** (generic scalar path). Work is: (1) collector already reads all extended resources into `NormalizedNode.extended_resources` — verify MIG names pass through; (2) shadow `gpu_resource_names` config must recognize MIG resource names (glob/prefix `nvidia.com/mig-*`) so MIG pods are IN-SCOPE and their requests counted; (3) quota should sum across a configurable GPU-resource *set*, not a single `GPU_RESOURCE` const; (4) decision-trace `gpu_request` should report the slice profile.
-- **Pros:** minimal, exact, reuses verified machinery; covers the most common real fractional deployment (MIG).
+Treat each MIG profile as its own extended resource. Nodes advertise `nvidia.com/mig-1g.5gb: 7` etc.; pods request them. **~0 solver work** (generic scalar path). Work is: (1) collector already reads all extended resources into `NormalizedNode.extended_resources` — verify MIG names pass through; (2) shadow `gpu_resource_names` config must recognize MIG resource names (glob/prefix `nvidia.com/mig-*`) so MIG pods are IN-SCOPE and their requests counted; (3) quota should sum **per exact resource** across a configurable GPU-resource *set*, not a single `GPU_RESOURCE` const; (4) decision-trace `gpu_request` should report the slice profile.
+- **Scope — MIG `mixed` strategy only (codex):** the NVIDIA device plugin's `mixed` strategy exposes each profile as a distinct `nvidia.com/mig-<profile>` extended resource — exactly the integer model here. The `single` strategy instead exposes MIG devices as plain `nvidia.com/gpu` (so those are already handled by the existing integer path, but the *profile* is invisible). F1 targets `mixed`; `single` MIG needs no change but also can't be sliced-aware. Detection: presence of `nvidia.com/mig-*` node resources ⇒ mixed.
+- **Pros:** minimal, exact, reuses verified machinery; covers the most common sliced deployment (MIG mixed).
 - **Cons:** doesn't model the *equivalence* between a whole GPU and its slices (a node with a free whole GPU can't auto-satisfy a MIG request unless it's partitioned) — but that mirrors real k8s behavior (MIG geometry is fixed at node config), so it's correct, not a limitation.
 
-### B. Fractional shares (scaled integers)
-Model a shared GPU as a scaled integer budget: advertise capacity `1000` milli-GPU per physical GPU, requests in milli-GPU (`0.5` → `500`). Mirror the existing millicpu pattern. Requires: parse fractional GPU quantities (don't floor), scale node capacity + requests by 1000, keep quota in milli-GPU.
-- **Pros:** models time-slicing/fractional; small, self-contained (parsing + scaling).
-- **Cons:** time-slicing has no memory isolation — "fits" ≠ "performs"; must disclose (caveat) that fractional packing is best-effort on non-MIG GPUs.
+### B. Time-slicing as integer replicas (recommended second)
+**Correction (codex):** Kubernetes extended resources are **integer-only** — a pod cannot request `nvidia.com/gpu: 0.5`; the API rejects it. NVIDIA time-slicing instead advertises a physical GPU as N integer **replicas** (`nvidia.com/gpu: 4` from one card) and documents that replicas share the GPU with NO memory/fault isolation and no proportional-compute guarantee. So the native model is: a time-sliced node simply reports a larger integer `nvidia.com/gpu` capacity, which the existing integer path ALREADY handles — the only real work is **observability/labeling** (mark such nodes as oversubscribed and attach a "time-sliced: shared, no isolation" caveat to placements there, so we don't imply isolated capacity).
+- Optional **milli-GPU** modeling (capacity ×1000, requests in milli-GPU like millicpu) is ONLY valid if the cluster runs a non-standard admission/controller layer that accepts fractional GPU requests; it is NOT kube-native and must be gated behind explicit opt-in, not assumed.
+- **Pros:** integer-replica path is near-free; matches how time-slicing actually surfaces.
+- **Cons:** must disclose (caveat) that time-sliced replicas are shared/non-isolated — "fits" ≠ "performs".
 
 ### C. DRA (ResourceClaim / DeviceClass)
 Model `ResourceClaim`s referenced by pods and device availability per node from `ResourceSlice`s. Substantial: new collection (ResourceClaim/ResourceClaimTemplate/DeviceClass/ResourceSlice), a new feasibility predicate (claim satisfiable on node), and solver variables for claim→device assignment.
-- **Pros:** the forward-looking k8s standard; where the ecosystem is heading.
-- **Cons:** large; beta API churn; most fleets today still use MIG/device-plugin. **Defer** until A/B land and DRA adoption warrants it.
+- **Pros:** the k8s-native standard (DRA reached **stable in v1.35** — codex; not a beta).
+- **Cons:** large implementation (new collection + feasibility predicate + assignment variables); most production GPU fleets today still run MIG/device-plugin. **Defer for effort/adoption reasons** (not API instability) until A/B land and DRA usage warrants the investment; gets its own spec.
 
 ## Recommendation & phasing
 
 1. **Phase F1 — MIG (Approach A).** Generalize the GPU-resource *set* (config: exact names + `nvidia.com/mig-*` prefix), make quota sum over that set, ensure MIG pods are in-scope and counted, surface the profile in the trace. Almost entirely input/config/observability; solver untouched. Highest value/effort ratio.
-2. **Phase F2 — Fractional shares (Approach B).** Milli-GPU scaling for time-sliced/fractional requests, with a "no memory isolation" caveat. Self-contained parsing/scaling change.
+2. **Phase F2 — Time-slicing (Approach B).** Integer-replica capacity already places correctly; the work is labeling oversubscribed nodes + a "shared, no isolation" caveat on placements there. Milli-GPU modeling only behind explicit opt-in for non-standard fractional-admission clusters.
 3. **Phase F3 — DRA (Approach C).** Only after F1/F2 and once DRA adoption justifies the collection + solver work. Its own spec.
 
 ## Data model / component impact (F1)
@@ -60,7 +62,7 @@ Model `ResourceClaim`s referenced by pods and device availability per node from 
 ## Testing strategy
 
 - F1: unit tests for the GPU-resource matcher (exact + glob), `effective_gpu_request` summing MIG slices, quota over the set; a builder test with a MIG node + MIG pod placing correctly; a conformance bucket check (MIG pod is strict, not expected-divergence).
-- F2: fractional parse/scale unit tests; a 0.5-GPU pair sharing one GPU; caveat presence.
+- F2: a time-sliced node (integer replicas, e.g. `nvidia.com/gpu: 4` from one card) places replica pods and each carries the "shared, no isolation" caveat; oversubscription labeling test. Milli-GPU parse/scale tests only if the opt-in path is built.
 - All shadow-only, binds nothing.
 
 ## Out of scope (this spec)
