@@ -40,7 +40,8 @@
     #[serde(default)]
     pub colocate: bool,
 ```
-- [ ] **Step 2: Build (no feature).** `cargo build -p ksolver` → compiles (Default derive covers the new field; existing struct literals that use `..Default::default()` are fine; any full literal in code/tests must add `colocate: false` — the compiler will list them).
+- [ ] **Step 1b: Fix non-test full literals (codex #8).** `optimizer_input.rs` builds `OptimizationWorkload` with **full** field lists (no `..Default::default()`) in two places (the grouped builder ~L106-125 and the ungrouped builder ~L162-179). Add `colocate: false,` to both, or append `..Default::default()` — otherwise the crate won't compile. (Test helpers using `..Default::default()` are unaffected.)
+- [ ] **Step 2: Build (no feature).** `cargo build -p ksolver` → compiles. The compiler lists any remaining full literals needing `colocate: false`.
 - [ ] **Step 3: Commit.**
 ```bash
 cargo fmt
@@ -69,11 +70,17 @@ git commit -m "feat(solver): add colocate flag to OptimizationWorkload"
                     model.add_le(x, (group_size, used));
                     used_sum += used;
                 }
-                // At most one node may hold this gang's replicas.
-                model.add_le(used_sum, 1_i64);
+                // At most one node may hold this gang's replicas. When the workload is
+                // unadmitted under partial_admission this is 0 (tightening avoids a
+                // spurious used=1); the bound is <= placed if the latch exists, else <= 1.
+                if let Some(placed) = placed_vars.get(&workload.id) {
+                    model.add_le(used_sum, *placed);
+                } else {
+                    model.add_le(used_sum, 1_i64);
+                }
             }
 ```
-(`LinearExpr` and `sanitize` are already in scope in this module.)
+(`LinearExpr` and `sanitize` are already in scope. **Node-grouping caveat (codex #3):** `used[w,n]` selects one `OptimizationNode`; co-location = single *physical* node only when nodes are physical (`count == 1`). Shadow's `pending_input` always emits `count: 1` nodes, so this holds. Document on the `colocate` field that it assumes physical-node inputs; the planner never sets it. **Anti-affinity (codex #4):** a co-located `N>1` gang combined with required anti-affinity (`x <= 1` per node) is unadmittable; shadow's `pending_input` emits no `anti_affinity_pairs`, so no conflict arises there — leave as-is but note it.)
 
 - [ ] **Step 2: Feature-gated test.** In the `#[cfg(all(test, feature = "rust-cp-sat"))]` tests, add: two 2-GPU nodes, one gang `group_size=4`, `colocate=true`, total gpu=4 (1/replica), feasible on both nodes; `partial_admission=true`. Assert the gang is **not** admitted (no `assignment_counts` entry — 4 replicas can't fit on any single 2-GPU node). Then a sibling with `colocate=false` asserts it **is** admitted (spread 2+2 across the two nodes, `sum == 4`). This proves co-location forces single-node.
 ```rust
@@ -152,12 +159,14 @@ git commit -m "feat(scheduler): co-location label -> PendingGpuPod.colocate"
 
 - [ ] **Step 1: Member agreement.** A gang is co-located iff **all** members have `colocate == true`; if members disagree, exclude the gang (extend the homogeneity check — add each pod's `colocate` to the per-gang agreement test). Determine `colocate` from the (agreed) members.
 
-- [ ] **Step 2: Feasibility by whole gang.** For a co-located gang, filter `feasible_nodes` by `residual.fits(total_requests, total_ext)` (the node must hold all N replicas), where `total = scale by N` of the representative per-replica requests. For non-co-located gangs keep the per-replica filter (Phase 5b). Set `colocate` on the emitted `OptimizationWorkload`.
+- [ ] **Step 2a: Fix `Residual::fits` pod handling (codex #5).** Today `fits` only checks `self.pods < 1`, ignoring `requests.pods`. Change the pod check to `self.pods < requests.pods.max(1)` so a whole-gang total (with `pods = N`) requires N free pod slots; per-replica callers (pods 0) still require ≥1. Add a pod-capacity test (node residual pods < N ⇒ co-located gang excluded even if GPUs suffice).
+- [ ] **Step 2b: Feasibility by whole gang.** For a co-located gang, filter `feasible_nodes` by `residual.fits(&total_requests, &total_ext)` where `total_requests = scale_requests(rep.requests, N)` (so `pods = N`) and `total_ext = scale_extended(rep.ext, N)` — the node must hold all N replicas (GPU, cpu, mem, AND pod slots). For non-co-located gangs keep the per-replica filter (Phase 5b — pass `rep.requests`/`rep.ext`). Set `colocate` on the emitted `OptimizationWorkload`.
 
 - [ ] **Step 3: Tests.**
-  - co-located gang of 2 (1 GPU each) on a node with residual 1 GPU → excluded (can't fit whole gang); the same gang non-co-located → included (spread) — proves the whole-gang feasibility filter.
-  - members disagree on colocate → excluded.
-  - co-located gang emits `workloads[0].colocate == true`.
+  - co-located gang of 2 (1 GPU each) on a single node with residual **1** GPU → excluded (whole gang doesn't fit); same gang with the node at **2** GPUs → included with `colocate == true` and `group_size == 2`.
+  - co-located gang of 2 where the node has enough GPU but residual **pods = 1** → excluded (proves the `fits` pod fix).
+  - members disagree on `colocate` (one true, one false) → excluded (homogeneity).
+  - non-co-located gang of 2 on a 1-GPU-each pair of nodes → included (per-replica feasibility, spread) — contrast with the co-located exclusion.
 
 - [ ] **Step 4: Run.** `cargo test -p ksolver scheduler::pending_input` → PASS.
 - [ ] **Step 5: Commit.**
@@ -183,7 +192,11 @@ git commit -m "feat(scheduler): mark co-located gangs and filter by whole-gang r
 - Per-workload `colocate` (serde default false) → planner/simulator/singletons unaffected.
 - Whole-gang residual feasibility for co-located gangs; per-replica for spread gangs.
 - Member agreement on co-location folded into gang homogeneity (disagreement → exclude).
-- Decision builder unchanged: a co-located gang yields `assignment_counts = {node: N}`, which the existing per-member distribution maps onto that node.
+- Decision builder unchanged: a co-located gang yields `assignment_counts = {node: N}`; the existing distribution expands counts into `[node; N]` and uses `nodes.get(i)`, mapping all N members onto that node (no `%` — codex #7 wording corrected).
+- Node-grouping caveat (codex #3): `colocate` assumes physical (`count == 1`) node inputs, which shadow guarantees; documented on the field, never set by the planner.
+- Anti-affinity (codex #4): co-located `N>1` + required anti-affinity is unadmittable; shadow emits no anti-affinity pairs, so no conflict; noted.
+- `Residual::fits` now honors `requests.pods` (codex #5), so whole-gang pod-slot capacity is enforced.
+- Non-test `OptimizationWorkload` literals in `optimizer_input.rs` updated for the new field (codex #8).
 - Feature-gated tests prove co-location forces single-node (4-gang rejected on 2-GPU nodes) while spread still admits.
 - Deferred: multi-node topology (NVLink/rack-aware placement, cross-node RDMA locality) — a larger L2 topology phase; this phase covers the single-node case only.
 ```
