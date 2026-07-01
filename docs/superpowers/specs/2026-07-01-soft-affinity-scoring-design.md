@@ -5,9 +5,13 @@ lexicographic tie-break); preferred **pod** affinity/anti-affinity now shipped t
 domain-aware (label-based `node.labels[topologyKey]` for all keys), accumulating `+weight`/`-weight`
 per matching running pod into the same per-node `soft_scores`, consumed by the existing Phase-2 pass.
 Both contribute to one soft score; cpsat handles negative scores (anti-affinity) natively via
-`soft += (-score, x)`. Remaining follow-up: **symmetry** (a running pod's preferred terms steering
-incoming pods) and **co-placement** preferred pod affinity (two pending pods preferring each other).
-Plan: `docs/superpowers/plans/2026-07-01-preferred-pod-affinity.md`.
+`soft += (-score, x)`. **Symmetry now shipped too** (2026-07-01): a running pod's preferred pod
+(anti-)affinity terms — collected onto `NormalizedWorkload.preferred_pod_affinity` via a parser
+shared with pod_filter — steer a pending pod's candidate-node scores when the term matches EVERY
+gang member and the candidate shares the running pod's topology domain (soft mirror of required
+symmetry 5h). Sole remaining follow-up: **co-placement** preferred pod affinity (two *pending* pods
+preferring each other). Plans: `docs/superpowers/plans/2026-07-01-preferred-pod-affinity.md`,
+`docs/superpowers/plans/2026-07-01-preferred-pod-affinity-symmetry.md`.
 **Author:** autonomous design pass (2026-07-01), pending user review.
 **Related:** `docs/superpowers/specs/2026-06-30-gpu-scheduler-design.md` (§13 status), the anti-affinity
 phases (5e–5h, 12, matchExpressions), node-affinity fixes.
