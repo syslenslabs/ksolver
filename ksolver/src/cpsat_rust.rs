@@ -398,8 +398,7 @@ mod enabled {
                 }
                 let mut expr = LinearExpr::default();
                 for wid in &group.workload_ids {
-                    let (Some(placed), Some(w)) =
-                        (placed_vars.get(wid), by_id.get(wid.as_str()))
+                    let (Some(placed), Some(w)) = (placed_vars.get(wid), by_id.get(wid.as_str()))
                     else {
                         continue;
                     };
