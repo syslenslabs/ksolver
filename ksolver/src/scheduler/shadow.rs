@@ -3,7 +3,7 @@ use crate::scheduler::config::ShadowConfig;
 use crate::scheduler::decision::build_decision_trace;
 use crate::scheduler::trace::{DecisionTrace, PodPlacement, TraceStore};
 use crate::scheduler::watch_state::WatchState;
-use crate::{collector, cpsat_rust, metrics, normalizer, optimizer_input, pricing};
+use crate::{collector, cpsat_rust, metrics, normalizer, pricing};
 use anyhow::Result;
 use axum::extract::State;
 use axum::routing::get;
@@ -169,12 +169,14 @@ async fn run_one_solve(
     let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
     let normalized = normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
         .normalize(&snapshot);
-    // Strict (ungrouped) so workload ids are "{ns}/{name}" and node names are real.
-    // ignore_unschedulable = true: drop infeasible workloads so an unrelated
-    // unschedulable pod cannot make the whole CP-SAT solve bail (it errors on any
-    // workload with no feasible nodes). Dropped ksolver pods are still reported
-    // honestly by the decision builder as "not submitted (filtered as unschedulable)".
-    let input = optimizer_input::build_input_strict(&normalized, true);
+    // Pending-only solve: place ONLY the observed ksolver pods; every already-placed
+    // pod is fixed context (subtracted from node capacity). Small and fast versus the
+    // whole-cluster solve, and correct per-pod against residual capacity.
+    let pending_ids: std::collections::HashSet<String> = pending
+        .iter()
+        .map(|p| format!("{}/{}", p.namespace, p.name))
+        .collect();
+    let input = crate::scheduler::pending_input::build_pending_input(&normalized, &pending_ids);
 
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
