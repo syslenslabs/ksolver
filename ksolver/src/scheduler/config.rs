@@ -11,6 +11,8 @@ pub struct ShadowConfig {
     pub cluster_name: String,
     pub kubeconfig: String,
     pub http_addr: String,
+    /// Pod label whose value groups pods into a gang (all-or-nothing). Empty disables grouping.
+    pub gang_label_key: String,
 }
 
 fn csv_env(key: &str) -> Vec<String> {
@@ -47,6 +49,8 @@ impl ShadowConfig {
             kubeconfig: std::env::var("KUBECONFIG").unwrap_or_default(),
             http_addr: std::env::var("KSOLVER_SHADOW_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:8090".to_string()),
+            gang_label_key: std::env::var("KSOLVER_SHADOW_GANG_LABEL")
+                .unwrap_or_else(|_| "scheduling.x-k8s.io/pod-group".to_string()),
         }
     }
 
@@ -68,6 +72,7 @@ mod tests {
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
+            gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
         }
     }
 

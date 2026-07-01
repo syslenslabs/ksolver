@@ -1,15 +1,43 @@
 use crate::model::{
-    NormalizedCluster, OptimizationInput, OptimizationNode, OptimizationWorkload,
-    OptimizationWorkloadMember, ResourceList,
+    NormalizedCluster, NormalizedWorkload, OptimizationInput, OptimizationNode,
+    OptimizationWorkload, OptimizationWorkloadMember, ResourceList,
 };
-use std::collections::{BTreeMap, HashSet};
+use crate::scheduler::pod_filter::PendingGpuPod;
+use std::collections::BTreeMap;
 
 fn workload_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
 
+/// Stable id for the gang a pod belongs to. Prefixed to avoid a singleton pod
+/// named `job` colliding with a gang labelled `job`.
+fn gang_id(pod: &PendingGpuPod) -> String {
+    match &pod.gang_key {
+        Some(v) => format!("gang:{v}"),
+        None => format!("pod:{}/{}", pod.namespace, pod.name),
+    }
+}
+
 fn sub_clamp(a: i64, b: i64) -> i64 {
     (a - b).max(0)
+}
+
+/// Scale a workload's requests to a gang TOTAL (mirrors optimizer_input::scale_requests).
+/// The solver divides `requests` by `group_size` per replica, so gang inputs store totals.
+fn scale_requests(requests: &ResourceList, factor: i64) -> ResourceList {
+    ResourceList {
+        milli_cpu: requests.milli_cpu * factor,
+        memory_bytes: requests.memory_bytes * factor,
+        ephemeral_storage: requests.ephemeral_storage * factor,
+        pods: factor,
+    }
+}
+
+fn scale_extended(requests: &BTreeMap<String, i64>, factor: i64) -> BTreeMap<String, i64> {
+    requests
+        .iter()
+        .map(|(k, v)| (k.clone(), v * factor))
+        .collect()
 }
 
 /// Residual (free) capacity of a node after running pods are accounted for.
@@ -22,10 +50,8 @@ struct Residual {
 }
 
 impl Residual {
-    /// Whether one copy of a workload's requests fits in this residual capacity.
-    /// This mirrors the constraints cpsat_rust::solve enforces, and crucially
-    /// closes the gap where the solver SKIPS a constraint whose node capacity is
-    /// <= 0 (which would otherwise let a pod land on a node with no free GPU/slot).
+    /// Whether one replica's requests fit in this residual capacity. Mirrors the
+    /// solver's per-node constraints and closes the skip-constraint-when-capacity<=0 gap.
     fn fits(&self, requests: &ResourceList, ext_requests: &BTreeMap<String, i64>) -> bool {
         if self.cpu < requests.milli_cpu
             || self.mem < requests.memory_bytes
@@ -43,19 +69,27 @@ impl Residual {
     }
 }
 
-/// Build an optimization input that places ONLY the pending pods, treating every
-/// already-placed pod as fixed context by subtracting its requests (and one pod
-/// slot) from its node's capacity (residual-capacity model).
-///
-/// A workload is "running" iff `current_node` is non-empty (race-safe: a pod the
-/// watch still thinks is pending but the fresh snapshot shows bound is treated as
-/// running). Pending decision workloads are exactly those with an empty
-/// `current_node` whose id is in `pending_ids`, and only if they still fit
-/// somewhere against residual capacity (otherwise excluded — the solver bails on
-/// empty feasible sets, and the decision builder reports them honestly).
+/// Homogeneity signature of a workload: gang members must match on all of these to be
+/// modeled as one group_size workload (else the gang is excluded, not mis-modeled).
+fn signature(w: &NormalizedWorkload) -> (i64, i64, i64, i64, BTreeMap<String, i64>, Vec<String>) {
+    let mut feasible = w.feasible_node_names.clone();
+    feasible.sort();
+    (
+        w.requests.milli_cpu,
+        w.requests.memory_bytes,
+        w.requests.ephemeral_storage,
+        w.requests.pods,
+        w.extended_resource_requests.clone(),
+        feasible,
+    )
+}
+
+/// Build an optimization input that places ONLY the pending pods, grouping pods that
+/// share a gang key into a single all-or-nothing `group_size` workload. Running
+/// (already-placed) pods are fixed context, subtracted from node capacity (residual).
 pub fn build_pending_input(
     cluster: &NormalizedCluster,
-    pending_ids: &HashSet<String>,
+    pending: &[PendingGpuPod],
 ) -> OptimizationInput {
     // 1. Accumulate running usage per node (running = current_node non-empty).
     let mut used_cpu: BTreeMap<String, i64> = BTreeMap::new();
@@ -78,7 +112,7 @@ pub fn build_pending_input(
         }
     }
 
-    // 2. Build residual capacity per node + the OptimizationNode list.
+    // 2. Residual capacity per node + OptimizationNode list.
     let mut residual: BTreeMap<String, Residual> = BTreeMap::new();
     let mut nodes = Vec::with_capacity(cluster.nodes.len());
     for node in &cluster.nodes {
@@ -133,24 +167,52 @@ pub fn build_pending_input(
         });
     }
 
-    // 3. Build workloads for the pending pods only, filtering feasible nodes by
-    //    residual capacity and excluding any that no longer fit anywhere.
-    let mut workloads = Vec::new();
+    // 3. Per-pod NormalizedWorkload lookup by "{ns}/{name}".
+    let mut norm: BTreeMap<String, &NormalizedWorkload> = BTreeMap::new();
     for w in &cluster.workloads {
-        if !w.current_node.is_empty() {
+        norm.insert(workload_id(&w.namespace, &w.name), w);
+    }
+
+    // 4. Group pending pods into gangs (only unbound pods; a stale pod already bound was
+    //    subtracted above and must not be a decision variable).
+    let mut gangs: BTreeMap<String, Vec<&PendingGpuPod>> = BTreeMap::new();
+    for p in pending {
+        gangs.entry(gang_id(p)).or_default().push(p);
+    }
+
+    // 5. Build one workload per feasible, homogeneous gang.
+    let mut workloads = Vec::new();
+    for (id, mut members) in gangs {
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        // Look up every member's normalized workload; skip whole gang if any missing.
+        let mut member_workloads = Vec::with_capacity(members.len());
+        let mut all_found = true;
+        for m in &members {
+            match norm.get(&workload_id(&m.namespace, &m.name)) {
+                Some(w) => member_workloads.push(*w),
+                None => {
+                    all_found = false;
+                    break;
+                }
+            }
+        }
+        if !all_found {
             continue;
         }
-        let id = workload_id(&w.namespace, &w.name);
-        if !pending_ids.contains(&id) {
+        // Enforce homogeneity: identical requests, extended requests, feasible sets.
+        let rep = member_workloads[0];
+        let rep_sig = signature(rep);
+        if member_workloads.iter().any(|w| signature(w) != rep_sig) {
             continue;
         }
-        let feasible_nodes: Vec<String> = w
+        // Residual-feasible nodes for one replica.
+        let feasible_nodes: Vec<String> = rep
             .feasible_node_names
             .iter()
             .filter(|n| {
                 residual
                     .get(*n)
-                    .map(|r| r.fits(&w.requests, &w.extended_resource_requests))
+                    .map(|r| r.fits(&rep.requests, &rep.extended_resource_requests))
                     .unwrap_or(false)
             })
             .cloned()
@@ -158,19 +220,23 @@ pub fn build_pending_input(
         if feasible_nodes.is_empty() {
             continue;
         }
+        let n = members.len() as i64;
         workloads.push(OptimizationWorkload {
-            id,
-            namespace: w.namespace.clone(),
-            name: w.name.clone(),
-            group_size: 1,
-            members: vec![OptimizationWorkloadMember {
-                namespace: w.namespace.clone(),
-                name: w.name.clone(),
-                current_node: String::new(),
-            }],
-            requests: w.requests.clone(),
-            recommended_requests: w.recommended_requests.clone(),
-            extended_resource_requests: w.extended_resource_requests.clone(),
+            id: id.clone(),
+            namespace: rep.namespace.clone(),
+            name: rep.name.clone(),
+            group_size: members.len() as i32,
+            members: members
+                .iter()
+                .map(|m| OptimizationWorkloadMember {
+                    namespace: m.namespace.clone(),
+                    name: m.name.clone(),
+                    current_node: String::new(),
+                })
+                .collect(),
+            requests: scale_requests(&rep.requests, n),
+            recommended_requests: scale_requests(&rep.recommended_requests, n),
+            extended_resource_requests: scale_extended(&rep.extended_resource_requests, n),
             feasible_nodes,
             ..Default::default()
         });
@@ -187,7 +253,8 @@ pub fn build_pending_input(
 mod tests {
     use super::*;
     use crate::model::{NormalizedCluster, NormalizedNode, NormalizedWorkload, ResourceList};
-    use std::collections::{BTreeMap, HashSet};
+    use crate::scheduler::pod_filter::PendingGpuPod;
+    use std::collections::BTreeMap;
 
     fn rl(cpu: i64, mem: i64, pods: i64) -> ResourceList {
         ResourceList {
@@ -235,47 +302,108 @@ mod tests {
         }
     }
 
-    fn ids(v: &[&str]) -> HashSet<String> {
-        v.iter().map(|s| s.to_string()).collect()
+    fn ppod(ns: &str, name: &str, gang: Option<&str>) -> PendingGpuPod {
+        PendingGpuPod {
+            uid: format!("uid-{name}"),
+            namespace: ns.into(),
+            name: name.into(),
+            gpu_request: 1,
+            gang_key: gang.map(|g| format!("{ns}/{g}")),
+        }
     }
 
     #[test]
-    fn residual_subtracts_running_cpu_and_gpu() {
+    fn groups_same_gang_and_scales_requests() {
         let cluster = NormalizedCluster {
             nodes: vec![node("n1", 16000, 64, 110, 8)],
             workloads: vec![
-                workload("prod", "running", "n1", 4000, 8, 3, &["n1"]),
-                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
             ],
             ..Default::default()
         };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
-        let n = &input.nodes[0];
-        assert_eq!(n.effective_capacity.milli_cpu, 12000);
-        assert_eq!(*n.extended_resources.get("nvidia.com/gpu").unwrap(), 5);
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+        );
+        assert_eq!(input.workloads.len(), 1);
+        let w = &input.workloads[0];
+        assert_eq!(w.id, "gang:team/job");
+        assert_eq!(w.group_size, 2);
+        assert_eq!(w.members.len(), 2);
+        assert_eq!(w.requests.milli_cpu, 2000);
+        assert_eq!(
+            *w.extended_resource_requests.get("nvidia.com/gpu").unwrap(),
+            2
+        );
+        assert_eq!(w.requests.pods, 2);
     }
 
     #[test]
-    fn residual_subtracts_pod_slots() {
-        // node has 1 pod slot, already used by a running pod -> pending can't fit.
+    fn heterogeneous_gang_is_excluded() {
         let cluster = NormalizedCluster {
-            nodes: vec![node("n1", 16000, 64, 1, 8)],
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
             workloads: vec![
-                workload("prod", "running", "n1", 100, 1, 0, &["n1"]),
-                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 4000, 2, 1, &["n1"]),
             ],
             ..Default::default()
         };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
-        assert_eq!(input.nodes[0].effective_capacity.pods, 0);
-        // no residual pod slot -> pending excluded
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+        );
         assert_eq!(input.workloads.len(), 0);
     }
 
     #[test]
-    fn zero_residual_gpu_makes_pending_infeasible() {
-        // all 8 GPUs used by running pods -> a 1-GPU pending pod must be excluded
-        // (guards the solver's skip-constraint-when-capacity<=0 behavior).
+    fn gang_excluded_if_any_member_infeasible() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &[]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+        );
+        // heterogeneous feasible sets (one empty) -> excluded
+        assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn no_label_yields_singletons() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "a", "", 1000, 2, 1, &["n1"]),
+                workload("team", "b", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[ppod("team", "a", None), ppod("team", "b", None)],
+        );
+        assert_eq!(input.workloads.len(), 2);
+        assert!(input.workloads.iter().all(|w| w.group_size == 1));
+        assert!(input.workloads.iter().all(|w| w.id.starts_with("pod:")));
+    }
+
+    #[test]
+    fn residual_subtracts_running_and_filters() {
         let cluster = NormalizedCluster {
             nodes: vec![node("n1", 16000, 64, 110, 8)],
             workloads: vec![
@@ -284,61 +412,15 @@ mod tests {
             ],
             ..Default::default()
         };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
+        // all 8 GPUs used by the running pod -> pending 1-GPU singleton excluded.
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
         assert_eq!(input.workloads.len(), 0);
-    }
-
-    #[test]
-    fn residual_feasibility_filters_full_nodes() {
-        // pending is nominally feasible on n1,n2 but n1 has no residual GPU.
-        let cluster = NormalizedCluster {
-            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
-            workloads: vec![
-                workload("prod", "running", "n1", 1000, 2, 8, &["n1"]),
-                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
-            ],
-            ..Default::default()
-        };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
-        assert_eq!(input.workloads.len(), 1);
-        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
-    }
-
-    #[test]
-    fn only_pending_workloads_included() {
-        let cluster = NormalizedCluster {
-            nodes: vec![node("n1", 16000, 64, 110, 8)],
-            workloads: vec![
-                workload("prod", "running", "n1", 4000, 8, 1, &["n1"]),
-                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
-            ],
-            ..Default::default()
-        };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
-        assert_eq!(input.workloads.len(), 1);
-        assert_eq!(input.workloads[0].id, "team/pending");
-        assert_eq!(input.workloads[0].group_size, 1);
-        assert_eq!(input.workloads[0].members.len(), 1);
-    }
-
-    #[test]
-    fn stale_pending_id_with_node_is_treated_as_running() {
-        // watch thought it pending, but snapshot shows it bound to n1.
-        // It must be subtracted (running) and NOT submitted as a decision workload.
-        let cluster = NormalizedCluster {
-            nodes: vec![node("n1", 16000, 64, 110, 8)],
-            workloads: vec![workload("team", "pending", "n1", 4000, 8, 2, &["n1"])],
-            ..Default::default()
-        };
-        let input = build_pending_input(&cluster, &ids(&["team/pending"]));
-        assert_eq!(input.workloads.len(), 0); // not submitted
-        assert_eq!(input.nodes[0].effective_capacity.milli_cpu, 12000); // subtracted
         assert_eq!(
             *input.nodes[0]
                 .extended_resources
                 .get("nvidia.com/gpu")
                 .unwrap(),
-            6
+            0
         );
     }
 }

@@ -101,6 +101,7 @@ mod tests {
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
+            gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
         }
     }
 

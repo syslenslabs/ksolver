@@ -7,6 +7,8 @@ pub struct PendingGpuPod {
     pub namespace: String,
     pub name: String,
     pub gpu_request: i64,
+    /// `Some("{namespace}/{label-value}")` when the configured gang label is present.
+    pub gang_key: Option<String>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -90,11 +92,22 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     if gpu < 1 {
         return None;
     }
+    let gang_key = if cfg.gang_label_key.is_empty() {
+        None
+    } else {
+        pod.metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(&cfg.gang_label_key))
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("{namespace}/{v}"))
+    };
     Some(PendingGpuPod {
         uid,
         namespace,
         name,
         gpu_request: gpu,
+        gang_key,
     })
 }
 
@@ -117,6 +130,7 @@ mod tests {
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
+            gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
         }
     }
 
@@ -276,5 +290,34 @@ mod tests {
             vec![],
         );
         assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 0);
+    }
+
+    #[test]
+    fn extracts_gang_key_from_label() {
+        let mut p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        p.metadata.labels = Some(BTreeMap::from([(
+            "scheduling.x-k8s.io/pod-group".to_string(),
+            "job-7".to_string(),
+        )]));
+        let got = classify(&p, &cfg()).expect("classify");
+        assert_eq!(got.gang_key.as_deref(), Some("team-a/job-7"));
+    }
+
+    #[test]
+    fn no_gang_key_when_label_absent() {
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        assert_eq!(classify(&p, &cfg()).unwrap().gang_key, None);
     }
 }

@@ -684,6 +684,101 @@ mod tests {
         );
     }
 
+    fn gang_workload(group_size: i32, total_gpu: i64, feasible: &[&str]) -> OptimizationWorkload {
+        use crate::model::{OptimizationWorkloadMember, ResourceList};
+        use std::collections::BTreeMap;
+        let mut ext = BTreeMap::new();
+        ext.insert("nvidia.com/gpu".to_string(), total_gpu); // TOTAL across the gang
+        OptimizationWorkload {
+            id: "gang:t/job".to_string(),
+            namespace: "t".to_string(),
+            name: "job".to_string(),
+            group_size,
+            members: (0..group_size)
+                .map(|i| OptimizationWorkloadMember {
+                    namespace: "t".to_string(),
+                    name: format!("m{i}"),
+                    current_node: String::new(),
+                })
+                .collect(),
+            requests: ResourceList {
+                milli_cpu: 1000 * i64::from(group_size),
+                memory_bytes: (1 << 30) * i64::from(group_size),
+                ephemeral_storage: 0,
+                pods: i64::from(group_size),
+            },
+            extended_resource_requests: ext,
+            feasible_nodes: feasible.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn gpu_node(name: &str, gpus: i64) -> OptimizationNode {
+        use crate::model::ResourceList;
+        use std::collections::BTreeMap;
+        let mut node_ext = BTreeMap::new();
+        node_ext.insert("nvidia.com/gpu".to_string(), gpus);
+        OptimizationNode {
+            name: name.to_string(),
+            count: 1,
+            members: vec![name.to_string()],
+            effective_capacity: ResourceList {
+                milli_cpu: 64000,
+                memory_bytes: 256 << 30,
+                ephemeral_storage: 0,
+                pods: 110,
+            },
+            extended_resources: node_ext,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gang_of_five_rejected_on_four_gpus() {
+        use crate::model::ScenarioConfig;
+        // group_size=5, total 5 GPU (1/replica). 4-GPU node can't fit all 5 -> not admitted.
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![gang_workload(5, 5, &["n1"])],
+            anti_affinity_pairs: vec![],
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("solve should succeed");
+        assert!(
+            !solution.assignment_counts.contains_key("gang:t/job"),
+            "5-replica gang must not be admitted on 4 GPUs; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn gang_of_five_admitted_on_five_gpus() {
+        use crate::model::ScenarioConfig;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 5)],
+            workloads: vec![gang_workload(5, 5, &["n1"])],
+            anti_affinity_pairs: vec![],
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, _info) =
+            super::enabled::solve(&input, &scenario).expect("solve should succeed");
+        let total: i64 = solution
+            .assignment_counts
+            .get("gang:t/job")
+            .map(|c| c.values().map(|v| i64::from(*v)).sum())
+            .unwrap_or(0);
+        assert_eq!(total, 5, "5-replica gang must be fully admitted on 5 GPUs");
+    }
+
     #[test]
     fn hard_equality_is_infeasible_when_flag_off() {
         use crate::model::ScenarioConfig;
