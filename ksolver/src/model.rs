@@ -1092,6 +1092,9 @@ pub struct ScenarioConfig {
     /// a weight that dominates the rest of the objective (maximize admitted count first).
     #[serde(default)]
     pub admission_weight: i64,
+    /// CP-SAT wall-clock time limit in seconds. 0 = default (600). Lets benchmarks cap solves.
+    #[serde(default)]
+    pub solve_time_limit_secs: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1147,6 +1150,7 @@ impl Default for ScenarioConfig {
             candidate_instance_types: Vec::new(),
             partial_admission: false,
             admission_weight: 0,
+            solve_time_limit_secs: 0,
         }
     }
 }

@@ -509,8 +509,13 @@ mod enabled {
         }
 
         let worker_count = recommended_worker_count(input);
+        let time_limit = if scenario.solve_time_limit_secs > 0 {
+            scenario.solve_time_limit_secs as f64
+        } else {
+            600.0
+        };
         let params = SatParameters {
-            max_time_in_seconds: Some(600.0),
+            max_time_in_seconds: Some(time_limit),
             num_search_workers: Some(worker_count),
             ..SatParameters::default()
         };
@@ -625,7 +630,7 @@ mod enabled {
             .collect()
     }
 
-    pub(crate) fn recommended_worker_count(input: &OptimizationInput) -> i32 {
+    pub fn recommended_worker_count(input: &OptimizationInput) -> i32 {
         let node_count = input.nodes.len();
         let workload_count = input.workloads.len();
         let assignment_edges: usize = input.workloads.iter().map(|w| w.feasible_nodes.len()).sum();
@@ -663,9 +668,13 @@ mod enabled {
     ) -> Result<(OptimizationSolution, SolverInfo)> {
         bail!("cp-sat-rust unavailable: build with --features rust-cp-sat and provide OR-Tools")
     }
+
+    pub fn recommended_worker_count(_input: &OptimizationInput) -> i32 {
+        1
+    }
 }
 
-pub use enabled::{solve, solver_info};
+pub use enabled::{recommended_worker_count, solve, solver_info};
 
 #[cfg(all(test, feature = "rust-cp-sat"))]
 mod tests {
