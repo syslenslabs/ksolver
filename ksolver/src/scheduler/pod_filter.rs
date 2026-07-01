@@ -30,9 +30,9 @@ fn parse_gpu_quantity(raw: &str) -> i64 {
     raw.trim().parse::<i64>().unwrap_or(0)
 }
 
-/// Sum of GPU resources named in `gpu_names` within one container's effective map
-/// (requests, falling back to limits when requests is absent).
-fn container_gpu(container: &corev1::Container, gpu_names: &[String]) -> i64 {
+/// Sum of GPU resources (exact names or MIG prefixes, per `cfg.is_gpu_resource`) within one
+/// container's effective map (requests, falling back to limits when requests is absent).
+fn container_gpu(container: &corev1::Container, cfg: &ShadowConfig) -> i64 {
     let Some(res) = container.resources.as_ref() else {
         return 0;
     };
@@ -42,31 +42,27 @@ fn container_gpu(container: &corev1::Container, gpu_names: &[String]) -> i64 {
     };
     let mut total = 0i64;
     for (name, qty) in map {
-        if gpu_names.iter().any(|g| g == name) {
+        if cfg.is_gpu_resource(name) {
             total += parse_gpu_quantity(&qty.0);
         }
     }
     total
 }
 
-/// Kubernetes effective resource request: max(sum of normal containers,
-/// max over init containers).
-pub fn effective_gpu_request(pod: &corev1::Pod, gpu_names: &[String]) -> i64 {
+/// Kubernetes effective resource request across all GPU resources (whole GPUs + MIG slices):
+/// max(sum of normal containers, max over init containers).
+pub fn effective_gpu_request(pod: &corev1::Pod, cfg: &ShadowConfig) -> i64 {
     let Some(spec) = pod.spec.as_ref() else {
         return 0;
     };
-    let normal_sum: i64 = spec
-        .containers
-        .iter()
-        .map(|c| container_gpu(c, gpu_names))
-        .sum();
+    let normal_sum: i64 = spec.containers.iter().map(|c| container_gpu(c, cfg)).sum();
     let init_max: i64 = spec
         .init_containers
         .as_ref()
         .map(|inits| {
             inits
                 .iter()
-                .map(|c| container_gpu(c, gpu_names))
+                .map(|c| container_gpu(c, cfg))
                 .max()
                 .unwrap_or(0)
         })
@@ -101,7 +97,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
             return None;
         }
     }
-    let gpu = effective_gpu_request(pod, &cfg.gpu_resource_names);
+    let gpu = effective_gpu_request(pod, cfg);
     if gpu < 1 {
         return None;
     }
@@ -242,6 +238,7 @@ mod tests {
             batch_window: Duration::from_secs(10),
             namespace_allowlist: vec![],
             gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
+            gpu_resource_prefixes: vec!["nvidia.com/mig-".to_string()],
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
@@ -364,7 +361,7 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 3);
+        assert_eq!(effective_gpu_request(&p, &cfg()), 3);
     }
 
     #[test]
@@ -379,7 +376,7 @@ mod tests {
             ],
             vec![container("init", Some(q(&[("nvidia.com/gpu", "5")])), None)],
         );
-        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 5);
+        assert_eq!(effective_gpu_request(&p, &cfg()), 5);
     }
 
     #[test]
@@ -391,7 +388,7 @@ mod tests {
             vec![container("a", None, Some(q(&[("nvidia.com/gpu", "2")])))],
             vec![],
         );
-        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 2);
+        assert_eq!(effective_gpu_request(&p, &cfg()), 2);
     }
 
     #[test]
@@ -407,7 +404,46 @@ mod tests {
             )],
             vec![],
         );
-        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 0);
+        assert_eq!(effective_gpu_request(&p, &cfg()), 0);
+    }
+
+    #[test]
+    fn mig_slices_are_counted_and_in_scope() {
+        // MIG mixed-strategy slice resources are recognized via the prefix matcher.
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container(
+                "a",
+                Some(q(&[("nvidia.com/mig-1g.5gb", "2")])),
+                None,
+            )],
+            vec![],
+        );
+        assert_eq!(effective_gpu_request(&p, &cfg()), 2);
+        // classify accepts it (in-scope) with the summed slice count.
+        let got = classify(&p, &cfg()).expect("MIG pod should be in scope");
+        assert_eq!(got.gpu_request, 2);
+    }
+
+    #[test]
+    fn mixed_whole_gpu_and_mig_slices_sum() {
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container(
+                "a",
+                Some(q(&[
+                    ("nvidia.com/gpu", "1"),
+                    ("nvidia.com/mig-1g.5gb", "1"),
+                ])),
+                None,
+            )],
+            vec![],
+        );
+        assert_eq!(effective_gpu_request(&p, &cfg()), 2);
     }
 
     #[test]

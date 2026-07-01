@@ -1533,6 +1533,34 @@ mod tests {
         assert_eq!(drops[0].pod_scopes, vec!["team/pending".to_string()]);
     }
 
+    #[test]
+    fn mig_slice_pod_places_via_generic_extended_resource_path() {
+        // A MIG node advertises a slice resource; a pending pod requesting that slice is
+        // emitted and feasible — no GPU-specific solver/builder code, just the generic path.
+        let mut mig_node = node("n1", 16000, 64, 110, 0);
+        mig_node
+            .extended_resources
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 7);
+        let mut w = workload("team", "slice", "", 1000, 2, 0, &["n1"]);
+        w.extended_resource_requests
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 1);
+        let cluster = NormalizedCluster {
+            nodes: vec![mig_node],
+            workloads: vec![w],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "slice", None)]);
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
+        assert_eq!(
+            *input.workloads[0]
+                .extended_resource_requests
+                .get("nvidia.com/mig-1g.5gb")
+                .unwrap(),
+            1
+        );
+    }
+
     // End-to-end pipeline: build_pending_input -> cpsat_rust::solve -> build_decision_trace,
     // exercising per-namespace quota + partial admission together (needs the CP-SAT backend).
     #[cfg(feature = "rust-cp-sat")]

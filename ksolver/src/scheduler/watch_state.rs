@@ -98,6 +98,7 @@ mod tests {
             batch_window: Duration::from_secs(10),
             namespace_allowlist: vec![],
             gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
+            gpu_resource_prefixes: vec!["nvidia.com/mig-".to_string()],
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),

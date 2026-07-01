@@ -9,6 +9,9 @@ pub struct ShadowConfig {
     pub namespace_allowlist: Vec<String>,
     /// Exact resource names counted as GPUs (e.g. "nvidia.com/gpu").
     pub gpu_resource_names: Vec<String>,
+    /// Resource-name prefixes counted as GPUs — for MIG (mixed strategy) slices like
+    /// `nvidia.com/mig-1g.5gb`. Default `["nvidia.com/mig-"]`.
+    pub gpu_resource_prefixes: Vec<String>,
     pub cluster_name: String,
     pub kubeconfig: String,
     pub http_addr: String,
@@ -73,12 +76,17 @@ impl ShadowConfig {
         if gpu_resource_names.is_empty() {
             gpu_resource_names = vec!["nvidia.com/gpu".to_string()];
         }
+        let mut gpu_resource_prefixes = csv_env("KSOLVER_SHADOW_GPU_RESOURCE_PREFIXES");
+        if gpu_resource_prefixes.is_empty() {
+            gpu_resource_prefixes = vec!["nvidia.com/mig-".to_string()];
+        }
         Self {
             scheduler_name: std::env::var("KSOLVER_SHADOW_SCHEDULER_NAME")
                 .unwrap_or_else(|_| "ksolver".to_string()),
             batch_window: Duration::from_secs(batch_secs),
             namespace_allowlist: csv_env("KSOLVER_SHADOW_NAMESPACES"),
             gpu_resource_names,
+            gpu_resource_prefixes,
             cluster_name: std::env::var("KSOLVER_CLUSTER_NAME")
                 .unwrap_or_else(|_| "default".to_string()),
             kubeconfig: std::env::var("KUBECONFIG").unwrap_or_default(),
@@ -98,6 +106,16 @@ impl ShadowConfig {
     pub fn namespace_in_scope(&self, ns: &str) -> bool {
         self.namespace_allowlist.is_empty() || self.namespace_allowlist.iter().any(|n| n == ns)
     }
+
+    /// Whether an extended-resource name counts as a GPU: an exact `gpu_resource_names` match
+    /// or a `gpu_resource_prefixes` prefix (MIG mixed-strategy slices, e.g. nvidia.com/mig-*).
+    pub fn is_gpu_resource(&self, name: &str) -> bool {
+        self.gpu_resource_names.iter().any(|n| n == name)
+            || self
+                .gpu_resource_prefixes
+                .iter()
+                .any(|p| name.starts_with(p))
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +128,7 @@ mod tests {
             batch_window: std::time::Duration::from_secs(10),
             namespace_allowlist: vec![],
             gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
+            gpu_resource_prefixes: vec!["nvidia.com/mig-".to_string()],
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
@@ -148,6 +167,16 @@ mod tests {
     #[test]
     fn empty_allowlist_allows_all() {
         assert!(base().namespace_in_scope("anything"));
+    }
+
+    #[test]
+    fn is_gpu_resource_matches_exact_and_mig_prefix() {
+        let cfg = base();
+        assert!(cfg.is_gpu_resource("nvidia.com/gpu"));
+        assert!(cfg.is_gpu_resource("nvidia.com/mig-1g.5gb"));
+        assert!(cfg.is_gpu_resource("nvidia.com/mig-3g.20gb"));
+        assert!(!cfg.is_gpu_resource("cpu"));
+        assert!(!cfg.is_gpu_resource("example.com/fpga"));
     }
 
     #[test]
