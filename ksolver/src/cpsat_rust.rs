@@ -597,7 +597,8 @@ mod enabled {
         // placed vars, and by the admission-and-cost invariant test).
         let want_soft = scenario.enable_soft_affinity
             && status == CpSolverStatus::Optimal
-            && input.workloads.iter().any(|w| !w.soft_scores.is_empty());
+            && (input.workloads.iter().any(|w| !w.soft_scores.is_empty())
+                || !input.soft_coplacement_pairs.is_empty());
         let response = if want_soft {
             // Exact integer Phase-1 objective value (do NOT trust the reported f64; the admission
             // weight can exceed 2^53).
@@ -624,6 +625,37 @@ mod enabled {
                                 soft += (-*score, *x);
                             }
                         }
+                    }
+                }
+                // Co-placement rewards (Phase 2 only): reward `both` when a and b share a domain.
+                // Upper bounds only — maximization (minimize -weight) sets `both`=1 iff a and b BOTH
+                // place in the domain. Admission/cost already pinned above, so this only reorders
+                // cost-equal, admission-equal placements. weight>0 required (a negative weight would
+                // flip the upper-bound reward into an unenforced penalty).
+                for (ci, cp) in input.soft_coplacement_pairs.iter().enumerate() {
+                    if cp.weight <= 0 {
+                        continue;
+                    }
+                    for (di, dom) in cp.domains.iter().enumerate() {
+                        let mut sum_a = LinearExpr::default();
+                        for n in &dom.a_nodes {
+                            if let Some(x) = x_vars.get(&(cp.a.clone(), n.clone())) {
+                                sum_a += (1_i64, *x);
+                            }
+                        }
+                        let mut sum_b = LinearExpr::default();
+                        for n in &dom.b_nodes {
+                            if let Some(x) = x_vars.get(&(cp.b.clone(), n.clone())) {
+                                sum_b += (1_i64, *x);
+                            }
+                        }
+                        let both =
+                            model.new_bool_var_with_name(format!("coplace_{ci}_{di}"));
+                        let mut both_e = LinearExpr::default();
+                        both_e += (1_i64, both);
+                        model.add_le(both_e.clone(), sum_a); // both <= Σ x_a in domain
+                        model.add_le(both_e, sum_b); // both <= Σ x_b in domain
+                        soft += (-cp.weight, both); // minimize -weight*both == maximize reward
                     }
                 }
                 model.minimize(soft);
@@ -1188,6 +1220,104 @@ mod tests {
         assert!(
             counts.contains_key("n2") && !counts.contains_key("n1"),
             "negative soft score should steer placement to n2, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn coplacement_rewards_same_node_without_changing_admission() {
+        use crate::model::{CoplacementDomain, ScenarioConfig, SoftCoplacement};
+        // Two singletons a,b each feasible on n1,n2 (cost-equal). Co-placement reward on the
+        // per-node (hostname) domains -> the solver should co-locate them on one node.
+        let a = gpu_singleton("a", 1, &["n1", "n2"]);
+        let b = gpu_singleton("b", 1, &["n1", "n2"]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![a, b],
+            soft_coplacement_pairs: vec![SoftCoplacement {
+                a: "t/a".to_string(),
+                b: "t/b".to_string(),
+                weight: 50,
+                domains: vec![
+                    CoplacementDomain {
+                        a_nodes: vec!["n1".into()],
+                        b_nodes: vec!["n1".into()],
+                    },
+                    CoplacementDomain {
+                        a_nodes: vec!["n2".into()],
+                        b_nodes: vec!["n2".into()],
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            enable_soft_affinity: true,
+            ..Default::default()
+        };
+        let (sol, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol),
+            2,
+            "co-placement must not change admission; status={}",
+            info.status
+        );
+        let a_node = sol
+            .assignment_counts
+            .get("t/a")
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let b_node = sol
+            .assignment_counts
+            .get("t/b")
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            a_node, b_node,
+            "co-placement reward should put a and b on the same node"
+        );
+    }
+
+    #[test]
+    fn coplacement_never_over_admits_under_capacity() {
+        use crate::model::{CoplacementDomain, ScenarioConfig, SoftCoplacement};
+        // One 1-GPU node; two 1-GPU singletons that prefer co-placement. Only one fits — the
+        // reward (upper-bound only) cannot force both on. Admission stays capped at 1.
+        let a = gpu_singleton("a", 1, &["n1"]);
+        let b = gpu_singleton("b", 1, &["n1"]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![a, b],
+            soft_coplacement_pairs: vec![SoftCoplacement {
+                a: "t/a".to_string(),
+                b: "t/b".to_string(),
+                weight: 50,
+                domains: vec![CoplacementDomain {
+                    a_nodes: vec!["n1".into()],
+                    b_nodes: vec!["n1".into()],
+                }],
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            enable_soft_affinity: true,
+            ..Default::default()
+        };
+        let (sol, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&sol),
+            1,
+            "capacity still caps admission with co-placement on; status={}",
+            info.status
         );
     }
 
