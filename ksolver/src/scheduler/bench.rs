@@ -406,9 +406,12 @@ mod tests {
             .filter(|w| w.current_node.is_empty())
             .count();
         assert_eq!(pend_wls, 6);
-        assert!(cluster.workloads.iter().all(|w| w.current_node.is_empty()
-            == !w.feasible_node_names.is_empty()
-            || !w.current_node.is_empty()));
+        // every pending (unbound) workload has a non-empty feasible set.
+        assert!(cluster
+            .workloads
+            .iter()
+            .filter(|w| w.current_node.is_empty())
+            .all(|w| !w.feasible_node_names.is_empty()));
     }
 
     #[test]
