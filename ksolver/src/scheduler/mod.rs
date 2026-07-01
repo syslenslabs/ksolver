@@ -2,6 +2,7 @@
 //! observe and compute placement decisions; never bind pods.
 
 pub mod bench;
+pub mod binder;
 pub mod binding;
 pub mod config;
 pub mod decision;
