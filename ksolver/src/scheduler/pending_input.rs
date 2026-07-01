@@ -1532,4 +1532,78 @@ mod tests {
         assert!(drops[0].reason.contains("no feasible node"));
         assert_eq!(drops[0].pod_scopes, vec!["team/pending".to_string()]);
     }
+
+    // End-to-end pipeline: build_pending_input -> cpsat_rust::solve -> build_decision_trace,
+    // exercising per-namespace quota + partial admission together (needs the CP-SAT backend).
+    #[cfg(feature = "rust-cp-sat")]
+    #[test]
+    fn pipeline_quota_caps_admissions_end_to_end() {
+        use crate::model::ScenarioConfig;
+        use crate::scheduler::decision::build_decision_trace;
+        use std::collections::HashMap;
+
+        // Two 4-GPU nodes (ample capacity), three 1-GPU singletons in `team`, quota team=2.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 4), node("n2", 16000, 64, 110, 4)],
+            workloads: vec![
+                workload("team", "a", "", 1000, 2, 1, &["n1", "n2"]),
+                workload("team", "b", "", 1000, 2, 1, &["n1", "n2"]),
+                workload("team", "c", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let pending = vec![
+            ppod("team", "a", None),
+            ppod("team", "b", None),
+            ppod("team", "c", None),
+        ];
+        let quotas = BTreeMap::from([("team".to_string(), 2_i64)]);
+        let (input, drops) = super::build_pending_input_diagnosed(&cluster, &pending, &quotas);
+        assert_eq!(input.workloads.len(), 3); // all fit capacity; quota limits admission, not build
+        assert!(drops.is_empty());
+
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, info) = crate::cpsat_rust::solve(&input, &scenario).expect("solve");
+
+        let drop_reasons: HashMap<String, String> = HashMap::new();
+        let trace = build_decision_trace(
+            1,
+            &pending,
+            &input,
+            &solution,
+            &info.status,
+            true,
+            5,
+            5,
+            1,
+            &drop_reasons,
+        );
+        let placed = trace
+            .decisions
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.placement,
+                    crate::scheduler::trace::PodPlacement::Placed { .. }
+                )
+            })
+            .count();
+        let unplaced = trace
+            .decisions
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.placement,
+                    crate::scheduler::trace::PodPlacement::Unplaced { .. }
+                )
+            })
+            .count();
+        // Quota of 2 GPUs => exactly 2 of the 3 singletons admitted end-to-end.
+        assert_eq!(placed, 2, "status={}", info.status);
+        assert_eq!(unplaced, 1);
+    }
 }
