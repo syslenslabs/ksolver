@@ -1073,6 +1073,14 @@ pub struct ScenarioConfig {
     pub rightsizing_weight: i64,
     #[serde(default)]
     pub candidate_instance_types: Vec<CandidateInstanceType>,
+    /// Scheduler mode: place what fits and leave the rest unplaced instead of
+    /// failing the whole solve. Off for the offline planner. See cpsat_rust::solve.
+    #[serde(default)]
+    pub partial_admission: bool,
+    /// Per-workload admission reward when `partial_admission` is set. 0 = auto-compute
+    /// a weight that dominates the rest of the objective (maximize admitted count first).
+    #[serde(default)]
+    pub admission_weight: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1126,6 +1134,8 @@ impl Default for ScenarioConfig {
             enable_joint_rightsizing: false,
             rightsizing_weight: default_rightsizing_weight(),
             candidate_instance_types: Vec::new(),
+            partial_admission: false,
+            admission_weight: 0,
         }
     }
 }
