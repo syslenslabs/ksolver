@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Detection is label-based and conservative:** time-sliced iff `nvidia.com/gpu.sharing-strategy == "time-slicing"` OR `nvidia.com/gpu.replicas` parses to an integer > 1. Absent/unparseable ⇒ not time-sliced.
+- **Detection is label-based and conservative (codex):** if `nvidia.com/gpu.sharing-strategy` is PRESENT, time-sliced iff it equals `time-slicing` (values `none`/`mps` are NOT time-slicing — MPS also uses replicas, so don't treat replicas as authoritative when the strategy label exists). Only when the sharing-strategy label is ABSENT, fall back to `nvidia.com/gpu.replicas > 1` (legacy time-slicing). Unparseable/absent ⇒ not time-sliced.
 - **Placement unchanged:** only a caveat is added to already-`Placed` decisions; unplaced/other logic untouched.
 - **Caveat is additive:** appended to the decision's `caveats` vec (which already carries pod-level caveats); dedupe not required (node caveat is distinct text).
 - `cargo fmt` + clean clippy; pure detector unit-tested + a decision-trace test; binds nothing.
@@ -28,17 +28,20 @@
 - [ ] In `decision.rs` add:
 ```rust
 pub(crate) fn is_time_sliced_node(labels: &std::collections::BTreeMap<String, String>) -> bool {
-    if labels.get("nvidia.com/gpu.sharing-strategy").map(|s| s == "time-slicing").unwrap_or(false) {
-        return true;
+    // If the sharing-strategy label is present it is authoritative: only "time-slicing"
+    // counts (MPS also uses replicas, so replicas is not authoritative here). Fall back to
+    // replicas>1 ONLY when the strategy label is absent (legacy time-slicing).
+    match labels.get("nvidia.com/gpu.sharing-strategy") {
+        Some(s) => s == "time-slicing",
+        None => labels
+            .get("nvidia.com/gpu.replicas")
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(|n| n > 1)
+            .unwrap_or(false),
     }
-    labels
-        .get("nvidia.com/gpu.replicas")
-        .and_then(|v| v.parse::<i64>().ok())
-        .map(|n| n > 1)
-        .unwrap_or(false)
 }
 ```
-- [ ] Unit tests: sharing-strategy label ⇒ true; replicas "4" ⇒ true; replicas "1" ⇒ false; replicas "x" ⇒ false; no labels ⇒ false. Run → commit.
+- [ ] Unit tests: `sharing-strategy=time-slicing` ⇒ true; `sharing-strategy=mps` (even with `replicas=4`) ⇒ FALSE (codex — MPS is not time-slicing); `sharing-strategy=none` ⇒ false; no strategy + `replicas=4` ⇒ true (fallback); no strategy + `replicas=1` ⇒ false; `replicas=x` ⇒ false; no labels ⇒ false. Run → commit.
 
 ### Task 2: Trace caveat + wiring
 - [ ] `build_decision_trace(..., time_sliced_nodes: &HashSet<String>)`: after building each `PodDecision`, if its placement is `Placed { node }` and `time_sliced_nodes.contains(node)`, push `"time-sliced GPU: shared, no isolation"` to `caveats`. (Do it where the decision is assembled, using the resolved node.)
