@@ -1200,7 +1200,7 @@ fn selector_to_map(selector: Option<&LabelSelector>) -> BTreeMap<String, String>
 
 fn to_required_node_affinity(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<crate::model::NodeAffinityTerm> {
+) -> Vec<Vec<crate::model::NodeAffinityTerm>> {
     let node_affinity = match affinity.and_then(|a| a.node_affinity.as_ref()) {
         Some(na) => na,
         None => return Vec::new(),
@@ -1212,19 +1212,24 @@ fn to_required_node_affinity(
         Some(r) => r,
         None => return Vec::new(),
     };
-    let mut terms = Vec::new();
+    // OR-of-terms: one inner Vec per nodeSelectorTerm (its matchExpressions, ANDed).
+    // matchFields are not modeled, so a matchFields-only term yields an empty inner Vec
+    // (the matcher skips empty groups rather than treating them as match-all).
+    let mut groups = Vec::new();
     for selector_term in &required.node_selector_terms {
-        if let Some(exprs) = &selector_term.match_expressions {
-            for expr in exprs {
-                terms.push(crate::model::NodeAffinityTerm {
+        let mut exprs = Vec::new();
+        if let Some(match_exprs) = &selector_term.match_expressions {
+            for expr in match_exprs {
+                exprs.push(crate::model::NodeAffinityTerm {
                     key: expr.key.clone(),
                     operator: expr.operator.clone(),
                     values: expr.values.clone().unwrap_or_default(),
                 });
             }
         }
+        groups.push(exprs);
     }
-    terms
+    groups
 }
 
 fn extract_node_zones(pv: &corev1::PersistentVolume) -> Vec<String> {

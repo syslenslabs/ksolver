@@ -98,8 +98,12 @@ pub struct Pod {
     /// exclusion in the shadow scheduler (Phase 12).
     #[serde(default)]
     pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
+    /// Required node affinity as OR-of-terms: the outer Vec is OR (nodeSelectorTerms), each
+    /// inner Vec is AND (a term's matchExpressions). matchFields are not modeled, so a
+    /// matchFields-only term is an empty inner Vec; matching SKIPS empty inner Vecs (they are
+    /// not match-all branches), and if no non-empty group remains the pod is unconstrained.
     #[serde(default)]
-    pub required_node_affinity: Vec<NodeAffinityTerm>,
+    pub required_node_affinity: Vec<Vec<NodeAffinityTerm>>,
     #[serde(default)]
     pub topology_spread_constraints: i32,
     #[serde(default)]

@@ -1126,34 +1126,48 @@ pub(crate) fn node_feasibility_reasons(
     feasible_on_node(pod, node, volumes_by_claim, options)
 }
 
+/// Whether a single node-affinity match-expression holds against the node's labels.
+fn node_affinity_expr_matches(
+    node_labels: &BTreeMap<String, String>,
+    term: &crate::model::NodeAffinityTerm,
+) -> bool {
+    let node_value = node_labels.get(&term.key);
+    match term.operator.as_str() {
+        "In" => node_value.map(|v| term.values.contains(v)).unwrap_or(false),
+        "NotIn" => node_value.map(|v| !term.values.contains(v)).unwrap_or(true),
+        "Exists" => node_value.is_some(),
+        "DoesNotExist" => node_value.is_none(),
+        "Gt" => node_value
+            .and_then(|v| v.parse::<i64>().ok())
+            .zip(term.values.first().and_then(|v| v.parse::<i64>().ok()))
+            .map(|(nv, tv)| nv > tv)
+            .unwrap_or(false),
+        "Lt" => node_value
+            .and_then(|v| v.parse::<i64>().ok())
+            .zip(term.values.first().and_then(|v| v.parse::<i64>().ok()))
+            .map(|(nv, tv)| nv < tv)
+            .unwrap_or(false),
+        _ => true,
+    }
+}
+
+/// Kubernetes `nodeSelectorTerms` semantics: OR across terms (groups), AND across a term's
+/// matchExpressions. Empty modeled groups (e.g. matchFields-only terms, which we don't model)
+/// are SKIPPED — they are not match-all OR branches. If no non-empty group remains, the pod
+/// is unconstrained (matches any node), which is also the empty-affinity case.
 fn matches_required_node_affinity(
     node_labels: &BTreeMap<String, String>,
-    terms: &[crate::model::NodeAffinityTerm],
+    groups: &[Vec<crate::model::NodeAffinityTerm>],
 ) -> bool {
-    for term in terms {
-        let node_value = node_labels.get(&term.key);
-        let matched = match term.operator.as_str() {
-            "In" => node_value.map(|v| term.values.contains(v)).unwrap_or(false),
-            "NotIn" => node_value.map(|v| !term.values.contains(v)).unwrap_or(true),
-            "Exists" => node_value.is_some(),
-            "DoesNotExist" => node_value.is_none(),
-            "Gt" => node_value
-                .and_then(|v| v.parse::<i64>().ok())
-                .zip(term.values.first().and_then(|v| v.parse::<i64>().ok()))
-                .map(|(nv, tv)| nv > tv)
-                .unwrap_or(false),
-            "Lt" => node_value
-                .and_then(|v| v.parse::<i64>().ok())
-                .zip(term.values.first().and_then(|v| v.parse::<i64>().ok()))
-                .map(|(nv, tv)| nv < tv)
-                .unwrap_or(false),
-            _ => true,
-        };
-        if !matched {
-            return false;
-        }
+    let mut modeled = groups.iter().filter(|g| !g.is_empty()).peekable();
+    if modeled.peek().is_none() {
+        return true;
     }
-    true
+    modeled.any(|exprs| {
+        exprs
+            .iter()
+            .all(|t| node_affinity_expr_matches(node_labels, t))
+    })
 }
 
 #[derive(Default)]
@@ -1632,20 +1646,23 @@ mod tests {
             [("zone".to_string(), "us-east-1a".to_string())].into();
         let labels_no_match: BTreeMap<String, String> =
             [("zone".to_string(), "eu-west-1a".to_string())].into();
-        let terms = vec![NodeAffinityTerm {
+        let groups = vec![vec![NodeAffinityTerm {
             key: "zone".to_string(),
             operator: "In".to_string(),
             values: vec!["us-east-1a".to_string(), "us-east-1b".to_string()],
-        }];
+        }]];
 
-        assert!(super::matches_required_node_affinity(&labels_match, &terms));
+        assert!(super::matches_required_node_affinity(
+            &labels_match,
+            &groups
+        ));
         assert!(!super::matches_required_node_affinity(
             &labels_no_match,
-            &terms
+            &groups
         ));
         assert!(!super::matches_required_node_affinity(
             &BTreeMap::new(),
-            &terms
+            &groups
         ));
     }
 
@@ -1655,15 +1672,86 @@ mod tests {
         use std::collections::BTreeMap;
 
         let labels: BTreeMap<String, String> = [("gpu".to_string(), "true".to_string())].into();
-        let terms = vec![NodeAffinityTerm {
+        let groups = vec![vec![NodeAffinityTerm {
             key: "gpu".to_string(),
             operator: "Exists".to_string(),
             values: Vec::new(),
-        }];
-        assert!(super::matches_required_node_affinity(&labels, &terms));
+        }]];
+        assert!(super::matches_required_node_affinity(&labels, &groups));
         assert!(!super::matches_required_node_affinity(
             &BTreeMap::new(),
-            &terms
+            &groups
         ));
+    }
+
+    #[test]
+    fn node_affinity_or_of_terms_matches_either() {
+        use crate::model::NodeAffinityTerm;
+        use std::collections::BTreeMap;
+        // Two SEPARATE terms => OR: zone in {a} OR zone in {b}.
+        let inn = |v: &str| {
+            vec![NodeAffinityTerm {
+                key: "zone".to_string(),
+                operator: "In".to_string(),
+                values: vec![v.to_string()],
+            }]
+        };
+        let groups = vec![inn("a"), inn("b")];
+        let node =
+            |z: &str| -> BTreeMap<String, String> { [("zone".into(), z.to_string())].into() };
+        assert!(super::matches_required_node_affinity(&node("a"), &groups));
+        assert!(super::matches_required_node_affinity(&node("b"), &groups));
+        // Pre-fix (AND of a and b) this would be false for "a"; the bug is now fixed.
+        assert!(!super::matches_required_node_affinity(&node("c"), &groups));
+    }
+
+    #[test]
+    fn node_affinity_single_term_ands_expressions() {
+        use crate::model::NodeAffinityTerm;
+        use std::collections::BTreeMap;
+        // One term with two expressions => AND: zone in {a} AND gpu Exists.
+        let groups = vec![vec![
+            NodeAffinityTerm {
+                key: "zone".to_string(),
+                operator: "In".to_string(),
+                values: vec!["a".to_string()],
+            },
+            NodeAffinityTerm {
+                key: "gpu".to_string(),
+                operator: "Exists".to_string(),
+                values: Vec::new(),
+            },
+        ]];
+        let both: BTreeMap<String, String> =
+            [("zone".into(), "a".into()), ("gpu".into(), "1".into())].into();
+        let missing_gpu: BTreeMap<String, String> = [("zone".into(), "a".into())].into();
+        assert!(super::matches_required_node_affinity(&both, &groups));
+        assert!(!super::matches_required_node_affinity(
+            &missing_gpu,
+            &groups
+        ));
+    }
+
+    #[test]
+    fn node_affinity_empty_group_is_not_match_all() {
+        use crate::model::NodeAffinityTerm;
+        use std::collections::BTreeMap;
+        // (zone In a) OR (matchFields-only/empty term). The empty group must NOT make it
+        // match-all: a zone=b node still fails; zone=a matches.
+        let groups = vec![
+            vec![NodeAffinityTerm {
+                key: "zone".to_string(),
+                operator: "In".to_string(),
+                values: vec!["a".to_string()],
+            }],
+            vec![], // e.g. a matchFields-only term we don't model
+        ];
+        let za: BTreeMap<String, String> = [("zone".into(), "a".into())].into();
+        let zb: BTreeMap<String, String> = [("zone".into(), "b".into())].into();
+        assert!(super::matches_required_node_affinity(&za, &groups));
+        assert!(!super::matches_required_node_affinity(&zb, &groups));
+        // All-empty (only matchFields-only/empty terms) => unconstrained fallback (true).
+        let all_empty: Vec<Vec<NodeAffinityTerm>> = vec![vec![]];
+        assert!(super::matches_required_node_affinity(&zb, &all_empty));
     }
 }
