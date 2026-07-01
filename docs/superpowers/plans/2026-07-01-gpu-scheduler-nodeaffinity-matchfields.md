@@ -19,7 +19,7 @@ Because a `matchFields`-only group is now evaluable (not empty), it is matched, 
 ## Global Constraints
 
 - **OR/AND semantics preserved** from the prior fix; only add the `matchFields` dimension within a group.
-- **`matchFields`: `metadata.name` only, operators `In`/`NotIn` only** (codex). Unknown field key or unsupported operator ⇒ that field term does not match (group fails), never match-all.
+- **`matchFields`: `metadata.name` only, operators `In`/`NotIn` only, EXACTLY ONE value** (codex; kube parse rule `len(values)==1`). Unknown key, unsupported operator, or value count ≠ 1 ⇒ that field term does not match (group fails), never match-all.
 - **Empty-affinity vs empty-terms** (codex): no required affinity ⇒ true; required affinity with only empty terms ⇒ false (selects nothing). This corrects the prior fix's all-empty→true for the has-affinity case.
 - **No regression:** `matchExpressions`-only groups behave exactly as after the OR fix (a real pod always has ≥1 non-empty term).
 - `cargo fmt` + clean clippy; update existing node-affinity tests to the new group struct; add matchFields tests; update the conformance divergence test. Binds nothing.
@@ -54,9 +54,13 @@ fn node_affinity_field_matches(node_name: &str, term: &crate::model::NodeAffinit
     if term.key != "metadata.name" {
         return false; // only metadata.name is a valid node field selector
     }
+    // matchFields In/NotIn require EXACTLY ONE value (kube parse rule); else invalid => non-match.
+    if term.values.len() != 1 {
+        return false;
+    }
     match term.operator.as_str() {
-        "In" => term.values.iter().any(|v| v == node_name),
-        "NotIn" => !term.values.iter().any(|v| v == node_name),
+        "In" => term.values[0] == node_name,
+        "NotIn" => term.values[0] != node_name,
         _ => false, // fields support only In/NotIn
     }
 }
@@ -96,7 +100,7 @@ fn matches_required_node_affinity(
 - [ ] In `conformance.rs` `pod_has_unmodeled_constructs`, REMOVE the `matchFields` check (matchFields is now modeled). Update the doc comment. Update `unmodeled_constructs_detects_expected_divergence` so the matchFields pod is now NOT flagged (assert false) — leaving pod affinity/anti-affinity, spread, priority as the only expected-divergence constructs. Run conformance tests. fmt + clippy. Commit.
 
 ## Self-Review Notes
-- `matchFields` (metadata.name, In/NotIn single-value) now modeled exactly against `node.name` (codex); removes the prior conservative false-negative.
+- `matchFields` (metadata.name, In/NotIn, exactly one value) now modeled exactly against `node.name` (codex); value-count ≠ 1 ⇒ non-match; removes the prior conservative false-negative.
 - Empty-affinity ⇒ true; has-affinity-with-only-empty-terms ⇒ false (codex; corrects prior all-empty→true). Unknown field key/operator never match-all.
 - OR/AND semantics preserved for `matchExpressions`.
 - Conformance divergence bucket tightened (matchFields moves to strict).
