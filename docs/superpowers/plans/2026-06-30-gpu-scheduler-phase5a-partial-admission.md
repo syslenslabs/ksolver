@@ -180,7 +180,10 @@ Replace with a version that, under the flag, ties the sum to a `placed` bool and
                 }
                 explicit
             } else {
-                rest_bound + 1
+                // rightsizing objective terms cannot coexist (Step 0 bails on
+                // partial_admission && enable_joint_rightsizing), so rest_bound covers
+                // the full objective. saturating_add guards the i128::MAX saturated case.
+                rest_bound.saturating_add(1)
             };
             let n = placed_vars.len() as i128;
             let total = w
