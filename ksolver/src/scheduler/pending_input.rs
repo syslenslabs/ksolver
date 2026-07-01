@@ -366,6 +366,16 @@ pub fn build_pending_input_diagnosed(
         Vec<BTreeMap<String, String>>,
     );
     let mut emitted_meta: Vec<EmittedMeta> = Vec::new();
+    // (id, namespace, feasible_nodes, member_labels, agreed preferred-affinity terms) per emitted
+    // workload, for co-placement preferred-affinity pairing.
+    type EmittedPref = (
+        String,
+        String,
+        Vec<String>,
+        Vec<BTreeMap<String, String>>,
+        Vec<crate::model::PreferredPodTerm>,
+    );
+    let mut emitted_pref: Vec<EmittedPref> = Vec::new();
     for (id, mut members) in gangs {
         members.sort_by(|a, b| a.name.cmp(&b.name));
         // Look up every member's normalized workload; skip whole gang if any missing.
@@ -648,6 +658,18 @@ pub fn build_pending_input_diagnosed(
             }
         }
         soft_scores.retain(|_, v| *v != 0);
+        // Record co-placement metadata BEFORE `feasible_nodes`/`id` are moved into the workload.
+        emitted_pref.push((
+            id.clone(),
+            rep.namespace.clone(),
+            feasible_nodes.clone(),
+            member_workloads.iter().map(|w| w.labels.clone()).collect(),
+            if pref_pod_agree {
+                pref_pod.clone()
+            } else {
+                Vec::new()
+            },
+        ));
         workloads.push(OptimizationWorkload {
             id: id.clone(),
             namespace: rep.namespace.clone(),
@@ -729,8 +751,61 @@ pub fn build_pending_input_diagnosed(
         });
     }
 
-    // Populated in Task 3 (co-placement preferred-affinity detection).
-    let soft_coplacement_pairs: Vec<crate::model::SoftCoplacement> = Vec::new();
+    // Soft co-placement (preferred pod AFFINITY between two PENDING workloads). Beyond kube (which
+    // scores only vs running pods): jointly reward co-placing two pending pods that prefer each
+    // other. For each ordered pair (i,j), workload i's AGREED preferred-affinity term (anti=false)
+    // whose selector scopes to j's namespace and matches ALL of j's member labels rewards sharing a
+    // topology domain. Both directions emitted separately (kube sums directions). Applied only in
+    // the Phase-2 soft pass, so admission/cost are unaffected.
+    let mut soft_coplacement_pairs: Vec<crate::model::SoftCoplacement> = Vec::new();
+    for i in 0..emitted_pref.len() {
+        for j in 0..emitted_pref.len() {
+            if i == j {
+                continue;
+            }
+            let (id_i, ns_i, feas_i, _labels_i, terms_i) = &emitted_pref[i];
+            let (id_j, ns_j, feas_j, labels_j, _terms_j) = &emitted_pref[j];
+            for term in terms_i {
+                if term.anti {
+                    continue; // co-placement rewards affinity only (anti is out of scope)
+                }
+                if !selector_scopes_ns(&term.selector, ns_i, ns_j, ns_labels) {
+                    continue;
+                }
+                if !labels_j
+                    .iter()
+                    .all(|ml| selector_matches(&term.selector.reqs, ml))
+                {
+                    continue;
+                }
+                // Group i's and j's feasible nodes by topology domain value (skip nodes lacking it).
+                let mut by_domain: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+                for nn in feas_i {
+                    if let Some(d) = domain(nn, &term.topology_key) {
+                        by_domain.entry(d).or_default().0.push(nn.clone());
+                    }
+                }
+                for nn in feas_j {
+                    if let Some(d) = domain(nn, &term.topology_key) {
+                        by_domain.entry(d).or_default().1.push(nn.clone());
+                    }
+                }
+                let domains: Vec<crate::model::CoplacementDomain> = by_domain
+                    .into_values()
+                    .filter(|(a, b)| !a.is_empty() && !b.is_empty())
+                    .map(|(a_nodes, b_nodes)| crate::model::CoplacementDomain { a_nodes, b_nodes })
+                    .collect();
+                if !domains.is_empty() {
+                    soft_coplacement_pairs.push(crate::model::SoftCoplacement {
+                        a: id_i.clone(),
+                        b: id_j.clone(),
+                        weight: term.weight,
+                        domains,
+                    });
+                }
+            }
+        }
+    }
 
     (
         OptimizationInput {
@@ -2137,6 +2212,74 @@ mod tests {
             &[ppod("team", "m0", Some("job")), ppod("team", "m1", Some("job"))],
         );
         assert!(input.workloads[0].soft_scores.is_empty()); // not ALL members match -> no score
+    }
+
+    #[test]
+    fn coplacement_pair_emitted_for_preferred_affinity() {
+        // a prefers to be near app=b (hostname); a,b singletons feasible on n1,n2.
+        let mut n1 = node("n1", 16000, 64, 110, 8);
+        n1.labels = [("kubernetes.io/hostname".into(), "n1".into())].into();
+        let mut n2 = node("n2", 16000, 64, 110, 8);
+        n2.labels = [("kubernetes.io/hostname".into(), "n2".into())].into();
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1", "n2"], &[("app", "a")]),
+                labeled_pending("team", "b", &["n1", "n2"], &[("app", "b")]),
+            ],
+            ..Default::default()
+        };
+        let mut pa = ppod("team", "a", None);
+        pa.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 40,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "b")]),
+            anti: false,
+        }];
+        let input = build_pending_input(&cluster, &[pa, ppod("team", "b", None)]);
+        let cps = &input.soft_coplacement_pairs;
+        assert_eq!(cps.len(), 1);
+        assert_eq!(cps[0].a, "pod:team/a");
+        assert_eq!(cps[0].b, "pod:team/b");
+        assert_eq!(cps[0].weight, 40);
+        assert_eq!(cps[0].domains.len(), 2); // two hostname domains (n1, n2), both feasible for a,b
+    }
+
+    #[test]
+    fn no_coplacement_pair_when_no_preferred_affinity() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1"], &[("app", "a")]),
+                labeled_pending("team", "b", &["n1"], &[("app", "b")]),
+            ],
+            ..Default::default()
+        };
+        let input =
+            build_pending_input(&cluster, &[ppod("team", "a", None), ppod("team", "b", None)]);
+        assert!(input.soft_coplacement_pairs.is_empty());
+    }
+
+    #[test]
+    fn coplacement_pair_skips_anti_affinity_terms() {
+        // a has preferred ANTI-affinity toward b -> NOT a co-placement reward (out of scope).
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                labeled_pending("team", "a", &["n1", "n2"], &[("app", "a")]),
+                labeled_pending("team", "b", &["n1", "n2"], &[("app", "b")]),
+            ],
+            ..Default::default()
+        };
+        let mut pa = ppod("team", "a", None);
+        pa.preferred_pod_affinity = vec![crate::model::PreferredPodTerm {
+            weight: 40,
+            topology_key: "kubernetes.io/hostname".into(),
+            selector: sel(&[("app", "b")]),
+            anti: true, // anti -> skipped
+        }];
+        let input = build_pending_input(&cluster, &[pa, ppod("team", "b", None)]);
+        assert!(input.soft_coplacement_pairs.is_empty());
     }
 
     // ---- F-CNS-2: namespaceSelector ----
