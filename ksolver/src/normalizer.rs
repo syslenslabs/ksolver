@@ -1112,11 +1112,22 @@ fn feasible_on_node(
     reasons
 }
 
+/// Build the `claim -> VolumeAttachment` map exactly as `normalize` does, so the conformance
+/// harness can call `node_feasibility_reasons` with the same volume context.
+pub(crate) fn build_volumes_by_claim(
+    snapshot: &ClusterSnapshot,
+) -> BTreeMap<String, VolumeAttachment> {
+    snapshot
+        .volumes
+        .iter()
+        .cloned()
+        .map(|v| (namespaced_name(&v.namespace, &v.claim_name), v))
+        .collect()
+}
+
 /// Public wrapper over `feasible_on_node` for the conformance harness: returns the
 /// infeasibility reasons (empty ⇒ we consider the pod feasible on the node). Kept as a
-/// thin delegate so the predicate logic stays in one place. Wired by the `conform`
-/// subcommand (Phase 2 Task 4); allow dead_code until then.
-#[allow(dead_code)]
+/// thin delegate so the predicate logic stays in one place.
 pub(crate) fn node_feasibility_reasons(
     pod: &Pod,
     node: &NormalizedNode,

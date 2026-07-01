@@ -174,12 +174,52 @@ async fn main() -> Result<()> {
             let results = bench::run_matrix(&bench::default_matrix());
             bench::print_table(&results);
         }
+        Some("conform") => {
+            // Parse simple flags from the remaining args.
+            let rest: Vec<String> = args.collect();
+            let flag = |name: &str| -> Option<String> {
+                rest.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| rest.get(i + 1).cloned())
+            };
+            let simulator_url = flag("--simulator")
+                .or_else(|| std::env::var("KSOLVER_SCHEDULER_SIMULATOR_URL").ok())
+                .or_else(|| std::env::var("SCHEDULER_SIMULATOR_URL").ok())
+                .unwrap_or_default();
+            if simulator_url.trim().is_empty() {
+                println!(
+                    "conformance skipped: no kube-scheduler-simulator URL configured (set --simulator <url> or KSOLVER_SCHEDULER_SIMULATOR_URL)"
+                );
+                return Ok(());
+            }
+            let sample: usize = flag("--sample").and_then(|v| v.parse().ok()).unwrap_or(20);
+            let cluster = flag("--cluster")
+                .or_else(|| std::env::var("KSOLVER_CLUSTER_NAME").ok())
+                .unwrap_or_else(|| "default".to_string());
+            let kubeconfig = flag("--kubeconfig")
+                .or_else(|| std::env::var("KUBECONFIG").ok())
+                .unwrap_or_default();
+            info!(
+                command = "conform",
+                %cluster,
+                sample,
+                "running feasibility conformance vs kube-scheduler-simulator (read-only)"
+            );
+            let report = ksolver::conformance::run_conformance(
+                &kubeconfig,
+                &cluster,
+                simulator_url.trim(),
+                sample,
+            )
+            .await?;
+            print!("{}", report.render());
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver version"
             );
         }
     }

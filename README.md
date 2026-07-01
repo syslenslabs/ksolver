@@ -121,6 +121,20 @@ rules:
 It grants no `create`/`update`/`patch`/`delete` and no `pods/binding` — shadow
 mode cannot mutate the cluster even if a bug tried to.
 
+## Feasibility conformance
+
+`ksolver conform` checks that our node-feasibility logic agrees with the real kube-scheduler
+Filter phase. For each pending pod and each (non-cordoned) node it gets two verdicts — ours
+(`feasible_on_node`) and the scheduler's — and reports every disagreement:
+
+    KSOLVER_SCHEDULER_SIMULATOR_URL=http://localhost:8080 \
+      ksolver conform --sample 20 --cluster my-cluster
+
+- The scheduler verdict comes from [kube-scheduler-simulator](https://github.com/kubernetes-sigs/kube-scheduler-simulator): we import a snapshot with exactly **one node** (empty of other pods) plus the pod; the pod binding to that node means Filter passed, unschedulable means it failed. One node isolates Filter from Score.
+- Both sides test raw allocatable (empty node), so DaemonSet-reserve/overcommit/headroom — separate ksolver layers, not Filter predicates — don't skew the comparison.
+- Pods carrying constructs we intentionally don't model (pod affinity/anti-affinity, `DoNotSchedule` topology spread, priority, `matchFields` node affinity) are bucketed as **expected divergence**; only plain pods must match exactly. `FALSE-POSITIVE` results (we say feasible, the scheduler rejects) are listed first — those are the dangerous ones.
+- Read-only on the real cluster; only the simulator (a sandbox) is scheduled against. With no simulator URL configured, `conform` prints a skip notice and exits 0.
+
 ## License
 
 MIT

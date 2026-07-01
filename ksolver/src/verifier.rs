@@ -16,7 +16,8 @@ use tokio::time::{sleep, Duration, Instant};
 use tracing::{info, warn};
 
 const SELECTED_NODE_ANNOTATION: &str = "kube-scheduler-simulator.sigs.k8s.io/selected-node";
-const FILTER_RESULT_ANNOTATION: &str = "kube-scheduler-simulator.sigs.k8s.io/filter-result";
+pub(crate) const FILTER_RESULT_ANNOTATION: &str =
+    "kube-scheduler-simulator.sigs.k8s.io/filter-result";
 const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(350);
 
@@ -187,33 +188,33 @@ impl Verifier {
 }
 
 #[derive(Clone, Default)]
-struct SimulatorResources {
-    pods: Vec<corev1::Pod>,
-    nodes: Vec<corev1::Node>,
-    pvs: Vec<corev1::PersistentVolume>,
-    pvcs: Vec<corev1::PersistentVolumeClaim>,
-    storage_classes: Vec<storagev1::StorageClass>,
-    priority_classes: Vec<schedulingv1::PriorityClass>,
-    namespaces: Vec<corev1::Namespace>,
+pub(crate) struct SimulatorResources {
+    pub(crate) pods: Vec<corev1::Pod>,
+    pub(crate) nodes: Vec<corev1::Node>,
+    pub(crate) pvs: Vec<corev1::PersistentVolume>,
+    pub(crate) pvcs: Vec<corev1::PersistentVolumeClaim>,
+    pub(crate) storage_classes: Vec<storagev1::StorageClass>,
+    pub(crate) priority_classes: Vec<schedulingv1::PriorityClass>,
+    pub(crate) namespaces: Vec<corev1::Namespace>,
 }
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SimulatorImportPayload {
-    pods: Vec<corev1::Pod>,
-    nodes: Vec<corev1::Node>,
-    pvs: Vec<corev1::PersistentVolume>,
-    pvcs: Vec<corev1::PersistentVolumeClaim>,
-    storage_classes: Vec<storagev1::StorageClass>,
-    priority_classes: Vec<schedulingv1::PriorityClass>,
-    namespaces: Vec<corev1::Namespace>,
+pub(crate) struct SimulatorImportPayload {
+    pub(crate) pods: Vec<corev1::Pod>,
+    pub(crate) nodes: Vec<corev1::Node>,
+    pub(crate) pvs: Vec<corev1::PersistentVolume>,
+    pub(crate) pvcs: Vec<corev1::PersistentVolumeClaim>,
+    pub(crate) storage_classes: Vec<storagev1::StorageClass>,
+    pub(crate) priority_classes: Vec<schedulingv1::PriorityClass>,
+    pub(crate) namespaces: Vec<corev1::Namespace>,
 }
 
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SimulatorExportPayload {
+pub(crate) struct SimulatorExportPayload {
     #[serde(default)]
-    pods: Vec<corev1::Pod>,
+    pub(crate) pods: Vec<corev1::Pod>,
 }
 
 fn normalize_backend_name(value: &str) -> &str {
@@ -223,7 +224,7 @@ fn normalize_backend_name(value: &str) -> &str {
     }
 }
 
-async fn collect_simulator_resources(kubeconfig: &str) -> Result<SimulatorResources> {
+pub(crate) async fn collect_simulator_resources(kubeconfig: &str) -> Result<SimulatorResources> {
     let client = build_client(kubeconfig).await?;
     let list_params = ListParams::default();
 
@@ -303,7 +304,7 @@ fn prepare_simulator_payload(
     }
 }
 
-fn clone_as_unscheduled_verification_pod(mut pod: corev1::Pod) -> corev1::Pod {
+pub(crate) fn clone_as_unscheduled_verification_pod(mut pod: corev1::Pod) -> corev1::Pod {
     if let Some(spec) = pod.spec.as_mut() {
         spec.node_name = None;
     }
@@ -414,6 +415,54 @@ async fn wait_for_export(
             return Ok(_latest);
         }
 
+        sleep(VERIFICATION_POLL_INTERVAL).await;
+    }
+}
+
+/// Reset the simulator, import a snapshot, and poll the export until the pod at `pod_scope`
+/// has either an assigned node or a filter-result annotation (or timeout). Used by the
+/// feasibility conformance harness to obtain the scheduler's Filter verdict for one pod.
+pub(crate) async fn schedule_snapshot(
+    simulator_url: &str,
+    payload: &SimulatorImportPayload,
+    pod_scope_target: &str,
+) -> Result<SimulatorExportPayload> {
+    let client = reqwest::Client::new();
+    let base_url = simulator_url.trim_end_matches('/');
+    reset_simulator(&client, base_url).await?;
+    import_snapshot(&client, base_url, payload).await?;
+
+    let deadline = Instant::now() + VERIFICATION_TIMEOUT;
+    loop {
+        let response = client
+            .get(format!("{base_url}/api/v1/export"))
+            .send()
+            .await
+            .context("send scheduler-simulator export request")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "scheduler-simulator export failed with status {}",
+                response.status()
+            );
+        }
+        let latest = response
+            .json::<SimulatorExportPayload>()
+            .await
+            .context("decode scheduler-simulator export response")?;
+
+        let resolved = latest.pods.iter().any(|pod| {
+            pod_scope(pod) == pod_scope_target
+                && (pod_assigned_node(pod).is_some()
+                    || pod
+                        .metadata
+                        .annotations
+                        .as_ref()
+                        .map(|a| a.contains_key(FILTER_RESULT_ANNOTATION))
+                        .unwrap_or(false))
+        });
+        if resolved || Instant::now() >= deadline {
+            return Ok(latest);
+        }
         sleep(VERIFICATION_POLL_INTERVAL).await;
     }
 }
@@ -536,7 +585,7 @@ fn build_simulator_report(
     report
 }
 
-fn pod_scope(pod: &corev1::Pod) -> String {
+pub(crate) fn pod_scope(pod: &corev1::Pod) -> String {
     format!(
         "{}/{}",
         pod.metadata.namespace.clone().unwrap_or_default(),
@@ -544,7 +593,7 @@ fn pod_scope(pod: &corev1::Pod) -> String {
     )
 }
 
-fn pod_assigned_node(pod: &corev1::Pod) -> Option<String> {
+pub(crate) fn pod_assigned_node(pod: &corev1::Pod) -> Option<String> {
     pod.metadata
         .annotations
         .as_ref()
