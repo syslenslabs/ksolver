@@ -65,6 +65,12 @@ helpers). Commit.
   (the running pod's scope must include the PENDING pod's namespace).
 - [ ] Cross-workload (5g): the pair guard `a.namespace == b.namespace` generalizes — a's selector
   applies to b iff `scope_matches(&a_sel.namespaces, a.namespace, &b.namespace)` (and symmetrically).
+- [ ] **Self-anti-affine gang (5f) — codex:** the `self_anti` computation must also require the
+  selector to apply to the gang's OWN namespace. A gang's members all share `rep.namespace`, so add
+  `scope_matches(&s.namespaces, rep.namespace, rep.namespace)` (empty ⇒ own-ns ⇒ today's behavior;
+  else own ns must be listed) alongside the existing `selector_matches(&s.reqs, member labels)`. This
+  prevents a gang whose selector targets only other namespaces from wrongly self-spreading /
+  triggering the colocate-vs-self-spread conflict.
 - [ ] `canonical_selectors`/`canonical_topology_selectors`: include `namespaces` (sorted) in the
   canonical form for gang-member agreement.
 - [ ] Update test helpers (`reqs`/`sel_list`/`ppod_aa`/`gang_member_aa`/`running_anti`/`ppod_topo`) to
@@ -82,3 +88,5 @@ helpers). Commit.
 - `namespaceSelector` remains unmodeled + caveated (F-CNS-2).
 - Only the namespace scope generalizes; `reqs` matching unchanged.
 - Canonical form includes namespaces for deterministic gang agreement.
+- Self-anti-affine (5f) gates on the selector applying to the gang's own namespace (codex), so an
+  other-namespace-scoped selector doesn't wrongly self-spread.
