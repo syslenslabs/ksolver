@@ -78,6 +78,8 @@ git commit -m "feat(solver): add partial_admission + admission_weight scenario f
         }
 ```
 
+- [ ] **Step 0b: Defensively clamp x-var bounds (fix 5).** In the earlier variable-creation loop where `let upper = i64::from(workload.group_size);` sets the x-var domain `[(0, upper)]`, change it to `let upper = i64::from(workload.group_size).max(0);` so a stray negative `group_size` can never create invalid variable bounds. This is a no-op for all real inputs (builders emit `group_size >= 1`; `Default` is 0) and does not change valid behavior.
+
 - [ ] **Step 1: Introduce `placed[w]` and switch the equality.** Locate the workload constraint loop (currently):
 ```rust
         for workload in &input.workloads {
@@ -128,25 +130,55 @@ Replace with a version that, under the flag, ties the sum to a `placed` bool and
 - [ ] **Step 2: Compute the dominating admission weight and add the reward.** Just before `model.minimize(objective);`, add. This computes a conservative `i128` upper bound of the rest of the objective, sets `W = rest_bound + 1` (or the explicit override), overflow-checks, then rewards each `placed`:
 ```rust
         let effective_admission_weight = if scenario.partial_admission && !placed_vars.is_empty() {
-            // Conservative upper bound (i128) of the max magnitude of all non-admission terms.
+            // Conservative upper bound (i128) of the max magnitude of ALL non-admission
+            // objective terms. Node terms use int vars y in [0, node.count], so every
+            // per-node term scales by node.count. Slack <= capacity * count. Use the
+            // absolute value of each weight (weights are not validated nonnegative).
             let mut rest_bound: i128 = 0;
             for node in &input.nodes {
-                let cost_coeff = (node.price.monthly * scenario.cost_weight as f64).round() as i128;
-                rest_bound += cost_coeff.abs();
-                rest_bound += scenario.active_node_weight as i128;
-                rest_bound += scenario.memory_slack_weight as i128 * node.effective_capacity.memory_bytes as i128;
-                rest_bound += scenario.cpu_slack_weight as i128 * node.effective_capacity.milli_cpu as i128;
+                let count = i128::from(node.count.max(0));
+                let cost_coeff =
+                    ((node.price.monthly * scenario.cost_weight as f64).round() as i128).abs();
+                rest_bound = rest_bound.saturating_add(cost_coeff.saturating_mul(count));
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.active_node_weight as i128).abs().saturating_mul(count),
+                );
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.memory_slack_weight as i128)
+                        .abs()
+                        .saturating_mul((node.effective_capacity.memory_bytes as i128).max(0))
+                        .saturating_mul(count),
+                );
+                rest_bound = rest_bound.saturating_add(
+                    (scenario.cpu_slack_weight as i128)
+                        .abs()
+                        .saturating_mul((node.effective_capacity.milli_cpu as i128).max(0))
+                        .saturating_mul(count),
+                );
                 for cap in node.extended_resources.values() {
-                    rest_bound += scenario.memory_slack_weight as i128 * (*cap).max(0) as i128;
+                    rest_bound = rest_bound.saturating_add(
+                        (scenario.memory_slack_weight as i128)
+                            .abs()
+                            .saturating_mul((*cap).max(0) as i128)
+                            .saturating_mul(count),
+                    );
                 }
             }
-            // churn reward magnitude (bounded by churn_weight * total current replicas)
+            // Churn reward: -churn_weight * x on edges with current_count>0; x <= group_size,
+            // so per workload the magnitude is bounded by churn_weight * group_size.
             for workload in &input.workloads {
-                let cur: i128 = workload.current_counts.values().map(|c| *c as i128).sum();
-                rest_bound += scenario.churn_weight as i128 * cur.max(0);
+                let gs = i128::from(workload.group_size.max(0));
+                rest_bound = rest_bound
+                    .saturating_add((scenario.churn_weight as i128).abs().saturating_mul(gs));
             }
             let w: i128 = if scenario.admission_weight > 0 {
-                scenario.admission_weight as i128
+                let explicit = scenario.admission_weight as i128;
+                if explicit <= rest_bound {
+                    bail!(
+                        "admission_weight {explicit} does not dominate objective bound {rest_bound}; use 0 for auto or a larger value"
+                    );
+                }
+                explicit
             } else {
                 rest_bound + 1
             };
