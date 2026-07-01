@@ -630,21 +630,49 @@ mod enabled {
             .collect()
     }
 
-    pub fn recommended_worker_count(input: &OptimizationInput) -> i32 {
+    /// Pure model-size worker heuristic (deterministic; no CPU/env coupling).
+    /// Primary tier = workloads x assignment edges (true var/constraint count); node
+    /// count is a secondary cap (per-node vars + per-worker model copies cost memory),
+    /// but does not force single-worker for small models (the pending/shadow path).
+    pub fn model_worker_count(input: &OptimizationInput) -> i32 {
         let node_count = input.nodes.len();
         let workload_count = input.workloads.len();
         let assignment_edges: usize = input.workloads.iter().map(|w| w.feasible_nodes.len()).sum();
 
-        if workload_count >= 8_000 || assignment_edges >= 200_000 || node_count >= 96 {
-            return 1;
+        let by_model = if workload_count >= 8_000 || assignment_edges >= 200_000 {
+            1
+        } else if workload_count >= 3_000 || assignment_edges >= 75_000 {
+            2
+        } else if workload_count >= 1_000 || assignment_edges >= 25_000 {
+            4
+        } else {
+            8
+        };
+        let by_nodes = if node_count >= 5_000 {
+            2
+        } else if node_count >= 2_000 {
+            4
+        } else {
+            8
+        };
+        by_model.min(by_nodes)
+    }
+
+    fn max_worker_cap() -> i32 {
+        if let Ok(v) = std::env::var("KSOLVER_SOLVER_MAX_WORKERS") {
+            if let Ok(n) = v.parse::<i32>() {
+                if n >= 1 {
+                    return n;
+                }
+            }
         }
-        if workload_count >= 3_000 || assignment_edges >= 75_000 || node_count >= 48 {
-            return 2;
-        }
-        if workload_count >= 1_000 || assignment_edges >= 25_000 {
-            return 4;
-        }
-        8
+        std::thread::available_parallelism()
+            .map(|n| (n.get().saturating_sub(1)).max(1) as i32)
+            .unwrap_or(1)
+    }
+
+    pub fn recommended_worker_count(input: &OptimizationInput) -> i32 {
+        model_worker_count(input).min(max_worker_cap()).max(1)
     }
 }
 
@@ -669,39 +697,89 @@ mod enabled {
         bail!("cp-sat-rust unavailable: build with --features rust-cp-sat and provide OR-Tools")
     }
 
+    pub fn model_worker_count(_input: &OptimizationInput) -> i32 {
+        1
+    }
+
     pub fn recommended_worker_count(_input: &OptimizationInput) -> i32 {
         1
     }
 }
 
-pub use enabled::{recommended_worker_count, solve, solver_info};
+pub use enabled::{model_worker_count, recommended_worker_count, solve, solver_info};
 
 #[cfg(all(test, feature = "rust-cp-sat"))]
 mod tests {
-    use super::enabled::recommended_worker_count;
+    use super::enabled::{model_worker_count, recommended_worker_count};
     use crate::model::{OptimizationInput, OptimizationNode, OptimizationWorkload};
+
+    fn nodes(n: usize) -> Vec<OptimizationNode> {
+        (0..n)
+            .map(|i| OptimizationNode {
+                name: format!("n-{i}"),
+                count: 1,
+                ..Default::default()
+            })
+            .collect()
+    }
+    fn wls(w: usize, feas: usize) -> Vec<OptimizationWorkload> {
+        (0..w)
+            .map(|i| OptimizationWorkload {
+                id: format!("w-{i}"),
+                feasible_nodes: (0..feas).map(|k| format!("n-{k}")).collect(),
+                ..Default::default()
+            })
+            .collect()
+    }
 
     #[test]
     fn large_models_use_single_worker() {
         let input = OptimizationInput {
-            nodes: (0..100)
-                .map(|i| OptimizationNode {
-                    name: format!("n-{i}"),
-                    count: 1,
-                    ..Default::default()
-                })
-                .collect(),
-            workloads: (0..8_000)
-                .map(|i| OptimizationWorkload {
-                    id: format!("w-{i}"),
-                    feasible_nodes: vec!["n-0".to_string()],
-                    ..Default::default()
-                })
-                .collect(),
+            nodes: nodes(100),
+            workloads: wls(8_000, 1),
             anti_affinity_pairs: Vec::new(),
         };
+        assert_eq!(model_worker_count(&input), 1);
+    }
 
-        assert_eq!(recommended_worker_count(&input), 1);
+    #[test]
+    fn many_nodes_few_workloads() {
+        let input = OptimizationInput {
+            nodes: nodes(100),
+            workloads: wls(50, 100),
+            anti_affinity_pairs: vec![],
+        };
+        assert_eq!(model_worker_count(&input), 8);
+    }
+
+    #[test]
+    fn medium_model_four_workers() {
+        let input = OptimizationInput {
+            nodes: nodes(100),
+            workloads: wls(500, 100),
+            anti_affinity_pairs: vec![],
+        };
+        assert_eq!(model_worker_count(&input), 4);
+    }
+
+    #[test]
+    fn extreme_nodes_capped() {
+        let input = OptimizationInput {
+            nodes: nodes(5000),
+            workloads: wls(2, 5000),
+            anti_affinity_pairs: vec![],
+        };
+        assert_eq!(model_worker_count(&input), 2);
+    }
+
+    #[test]
+    fn recommended_never_below_one() {
+        let input = OptimizationInput {
+            nodes: nodes(4),
+            workloads: wls(2, 4),
+            anti_affinity_pairs: vec![],
+        };
+        assert!(recommended_worker_count(&input) >= 1);
     }
 
     fn two_competing_gpu_pods() -> OptimizationInput {
