@@ -1,9 +1,12 @@
 use crate::model::{
     NormalizedCluster, NormalizedWorkload, OptimizationInput, OptimizationNode,
-    OptimizationWorkload, OptimizationWorkloadMember, ResourceList,
+    OptimizationWorkload, OptimizationWorkloadMember, QuotaGroup, ResourceList,
 };
 use crate::scheduler::pod_filter::PendingGpuPod;
 use std::collections::BTreeMap;
+
+/// Resource name used for per-namespace quotas (MVP: GPUs only).
+const GPU_RESOURCE: &str = "nvidia.com/gpu";
 
 fn workload_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
@@ -112,13 +115,17 @@ fn signature(w: &NormalizedWorkload) -> (i64, i64, i64, i64, BTreeMap<String, i6
 pub fn build_pending_input(
     cluster: &NormalizedCluster,
     pending: &[PendingGpuPod],
+    quotas: &BTreeMap<String, i64>,
 ) -> OptimizationInput {
-    // 1. Accumulate running usage per node (running = current_node non-empty).
+    // 1. Accumulate running usage per node (running = current_node non-empty). In the same
+    //    pass, sum each namespace's running GPU usage so quotas count existing consumption
+    //    (computed here, not in a second loop, to avoid drift from the residual math).
     let mut used_cpu: BTreeMap<String, i64> = BTreeMap::new();
     let mut used_mem: BTreeMap<String, i64> = BTreeMap::new();
     let mut used_disk: BTreeMap<String, i64> = BTreeMap::new();
     let mut used_pods: BTreeMap<String, i64> = BTreeMap::new();
     let mut used_ext: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    let mut running_gpu_by_ns: BTreeMap<String, i64> = BTreeMap::new();
     for w in &cluster.workloads {
         if w.current_node.is_empty() {
             continue;
@@ -131,6 +138,9 @@ pub fn build_pending_input(
         let node_ext = used_ext.entry(node).or_default();
         for (res, qty) in &w.extended_resource_requests {
             *node_ext.entry(res.clone()).or_default() += *qty;
+        }
+        if let Some(gpu) = w.extended_resource_requests.get(GPU_RESOURCE) {
+            *running_gpu_by_ns.entry(w.namespace.clone()).or_default() += *gpu;
         }
     }
 
@@ -372,11 +382,32 @@ pub fn build_pending_input(
         }
     }
 
+    // Per-namespace GPU quota groups: for each configured namespace, cap the total GPUs of
+    // its admitted pending workloads at (configured cap - already-running GPUs), clamped ≥0.
+    // Only emit a group when that namespace actually has pending workloads to constrain.
+    let mut quota_groups: Vec<QuotaGroup> = Vec::new();
+    for (ns, cap) in quotas {
+        let remaining = (cap - running_gpu_by_ns.get(ns).copied().unwrap_or(0)).max(0);
+        let workload_ids: Vec<String> = emitted_meta
+            .iter()
+            .filter(|m| &m.1 == ns)
+            .map(|m| m.0.clone())
+            .collect();
+        if workload_ids.is_empty() {
+            continue;
+        }
+        quota_groups.push(QuotaGroup {
+            workload_ids,
+            resource: GPU_RESOURCE.to_string(),
+            limit: remaining,
+        });
+    }
+
     OptimizationInput {
         nodes,
         workloads,
         anti_affinity_pairs,
-        ..Default::default()
+        quota_groups,
     }
 }
 
@@ -386,6 +417,16 @@ mod tests {
     use crate::model::{NormalizedCluster, NormalizedNode, NormalizedWorkload, ResourceList};
     use crate::scheduler::pod_filter::PendingGpuPod;
     use std::collections::BTreeMap;
+
+    /// Test wrapper: most tests don't exercise quotas. Shadows the real (3-arg)
+    /// `build_pending_input` (explicit item wins over the `use super::*` glob) with an
+    /// empty-quota call. Quota tests call `super::build_pending_input` directly.
+    fn build_pending_input(
+        cluster: &NormalizedCluster,
+        pending: &[PendingGpuPod],
+    ) -> OptimizationInput {
+        super::build_pending_input(cluster, pending, &BTreeMap::new())
+    }
 
     fn rl(cpu: i64, mem: i64, pods: i64) -> ResourceList {
         ResourceList {
@@ -1028,5 +1069,84 @@ mod tests {
         let m1 = ppod("team", "m1", Some("job")); // no selectors -> disagreement
         let input = build_pending_input(&cluster, &[m0, m1]);
         assert_eq!(input.workloads.len(), 0);
+    }
+
+    #[test]
+    fn quota_group_emitted_with_pending_ids_and_full_limit() {
+        // Two 1-GPU pending singletons in `team`, nothing running -> one quota group over
+        // both ids with the full configured limit.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "a", "", 1000, 2, 1, &["n1"]),
+                workload("team", "b", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let quotas = BTreeMap::from([("team".to_string(), 1_i64)]);
+        let input = super::build_pending_input(
+            &cluster,
+            &[ppod("team", "a", None), ppod("team", "b", None)],
+            &quotas,
+        );
+        assert_eq!(input.quota_groups.len(), 1);
+        let g = &input.quota_groups[0];
+        assert_eq!(g.resource, "nvidia.com/gpu");
+        assert_eq!(g.limit, 1);
+        let mut ids = g.workload_ids.clone();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["pod:team/a".to_string(), "pod:team/b".to_string()]
+        );
+    }
+
+    #[test]
+    fn quota_limit_clamped_by_running_usage() {
+        // Cap 2, but a running 1-GPU pod in `team` already consumes 1 -> remaining 1.
+        // A second running pod would drive it to 0 (clamped, never negative).
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "running", "n1", 1000, 2, 1, &["n1"]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let quotas = BTreeMap::from([("team".to_string(), 2_i64)]);
+        let input = super::build_pending_input(&cluster, &[ppod("team", "pending", None)], &quotas);
+        assert_eq!(input.quota_groups.len(), 1);
+        assert_eq!(input.quota_groups[0].limit, 1);
+        assert_eq!(
+            input.quota_groups[0].workload_ids,
+            vec!["pod:team/pending".to_string()]
+        );
+
+        // Same cap but 2 running GPUs -> remaining clamped to 0.
+        let cluster2 = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "r0", "n1", 1000, 2, 1, &["n1"]),
+                workload("team", "r1", "n1", 1000, 2, 1, &["n1"]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input2 =
+            super::build_pending_input(&cluster2, &[ppod("team", "pending", None)], &quotas);
+        assert_eq!(input2.quota_groups[0].limit, 0);
+    }
+
+    #[test]
+    fn no_quota_group_for_unconfigured_namespace() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![workload("team", "a", "", 1000, 2, 1, &["n1"])],
+            ..Default::default()
+        };
+        // quota configured for a different namespace -> no group for `team`.
+        let quotas = BTreeMap::from([("other".to_string(), 5_i64)]);
+        let input = super::build_pending_input(&cluster, &[ppod("team", "a", None)], &quotas);
+        assert!(input.quota_groups.is_empty());
     }
 }

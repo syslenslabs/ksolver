@@ -165,7 +165,7 @@ pub fn run_scenario(s: &BenchScenario) -> BenchResult {
     let (cluster, pending) = generate(s);
 
     let t0 = Instant::now();
-    let input = build_pending_input(&cluster, &pending);
+    let input = build_pending_input(&cluster, &pending, &BTreeMap::new());
     let build_ms = t0.elapsed().as_millis();
 
     let workers = cpsat_rust::recommended_worker_count(&input);
@@ -440,7 +440,7 @@ mod tests {
         // gang8-spread style: 3 gangs of 8 on 100 nodes -> 3 workloads reach the solver.
         let s = sc("t", 100, 8, 3, 8, false, AntiAffinity::None, 0, (3, 3));
         let (cluster, pending) = generate(&s);
-        let input = build_pending_input(&cluster, &pending);
+        let input = build_pending_input(&cluster, &pending, &BTreeMap::new());
         assert_eq!(input.workloads.len(), 3);
         assert!(input.workloads.iter().all(|w| w.group_size == 8));
     }

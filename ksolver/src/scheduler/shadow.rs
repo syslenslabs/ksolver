@@ -189,7 +189,11 @@ async fn run_one_solve(
     // Pending-only solve: place ONLY the observed ksolver pods (gang-grouped by label);
     // every already-placed pod is fixed context (subtracted from node capacity). Small
     // and fast versus the whole-cluster solve, and correct per-pod against residual.
-    let input = crate::scheduler::pending_input::build_pending_input(&normalized, pending);
+    let input = crate::scheduler::pending_input::build_pending_input(
+        &normalized,
+        pending,
+        &cfg.namespace_gpu_quotas,
+    );
 
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),

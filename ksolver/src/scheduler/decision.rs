@@ -77,8 +77,7 @@ pub fn build_decision_trace(
                 placement_for.insert(pod_key(&m.namespace, &m.name), placement);
             }
         } else {
-            let reason =
-                unresolved_reason("gang not admitted (insufficient capacity for all replicas)");
+            let reason = unresolved_reason("gang not admitted (insufficient capacity or quota)");
             for m in &members {
                 placement_for.insert(
                     pod_key(&m.namespace, &m.name),
