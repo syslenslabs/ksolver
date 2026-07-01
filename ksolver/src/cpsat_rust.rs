@@ -851,6 +851,50 @@ mod tests {
     }
 
     #[test]
+    fn self_anti_affine_gang_spreads_one_per_node() {
+        use crate::model::ScenarioConfig;
+        let w = gang_workload(3, 3, &["n1", "n2", "n3"]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4), gpu_node("n3", 4)],
+            workloads: vec![w],
+            anti_affinity_pairs: vec![("gang:t/job".to_string(), "gang:t/job".to_string())],
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (sol, _i) = super::enabled::solve(&input, &scenario).expect("solve");
+        let counts = sol.assignment_counts.get("gang:t/job").expect("admitted");
+        assert_eq!(counts.values().sum::<i32>(), 3);
+        assert!(
+            counts.values().all(|c| *c <= 1),
+            "spread should be <=1 per node"
+        );
+    }
+
+    #[test]
+    fn self_anti_affine_gang_rejected_when_too_few_nodes() {
+        use crate::model::ScenarioConfig;
+        let w = gang_workload(3, 3, &["n1", "n2"]);
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![w],
+            anti_affinity_pairs: vec![("gang:t/job".to_string(), "gang:t/job".to_string())],
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (sol, _i) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert!(
+            !sol.assignment_counts.contains_key("gang:t/job"),
+            "3-replica spread cannot fit <=1/node on 2 nodes"
+        );
+    }
+
+    #[test]
     fn hard_equality_is_infeasible_when_flag_off() {
         use crate::model::ScenarioConfig;
         let input = two_competing_gpu_pods();
