@@ -1108,9 +1108,56 @@ fn to_required_affinity(affinity: Option<&corev1::Affinity>) -> Vec<AffinityTerm
 /// non-empty matchLabels, no matchExpressions, no namespace scoping), read from the raw
 /// affinity so lossy conversions cannot broaden the selector. Mirrors the pending-pod
 /// rule in scheduler::pod_filter.
+/// Lower a raw `LabelSelector` into a modeled requirement list, or `None` if it cannot be
+/// fully modeled. `matchLabels {k:v}` becomes `In [v]`; `matchExpressions` are carried for the
+/// supported operators (In/NotIn require non-empty values; Exists/DoesNotExist ignore values).
+/// Any other operator, or an empty selector (which would match all pods), yields `None` so the
+/// term stays unmodeled (and caveated) rather than over-excluding.
+pub(crate) fn label_selector_to_reqs(
+    ls: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
+) -> Option<Vec<crate::model::LabelSelectorReq>> {
+    let mut reqs = Vec::new();
+    if let Some(ml) = ls.match_labels.as_ref() {
+        for (k, v) in ml {
+            reqs.push(crate::model::LabelSelectorReq {
+                key: k.clone(),
+                operator: "In".to_string(),
+                values: vec![v.clone()],
+            });
+        }
+    }
+    if let Some(exprs) = ls.match_expressions.as_ref() {
+        for e in exprs {
+            match e.operator.as_str() {
+                "In" | "NotIn" => {
+                    let vals = e.values.clone().unwrap_or_default();
+                    if vals.is_empty() {
+                        return None; // invalid In/NotIn (no values)
+                    }
+                    reqs.push(crate::model::LabelSelectorReq {
+                        key: e.key.clone(),
+                        operator: e.operator.clone(),
+                        values: vals,
+                    });
+                }
+                "Exists" | "DoesNotExist" => reqs.push(crate::model::LabelSelectorReq {
+                    key: e.key.clone(),
+                    operator: e.operator.clone(),
+                    values: Vec::new(),
+                }),
+                _ => return None, // unsupported operator ⇒ unmodeled
+            }
+        }
+    }
+    if reqs.is_empty() {
+        return None; // empty selector matches all ⇒ don't model as anti-affinity
+    }
+    Some(reqs)
+}
+
 fn modeled_anti_selectors_all(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<(String, BTreeMap<String, String>)> {
+) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
     let Some(terms) = affinity
         .and_then(|a| a.pod_anti_affinity.as_ref())
         .and_then(|pa| {
@@ -1134,37 +1181,28 @@ fn modeled_anti_selectors_all(
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
-        if ls
-            .match_expressions
-            .as_ref()
-            .map(|e| !e.is_empty())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        match ls.match_labels.as_ref() {
-            Some(ml) if !ml.is_empty() => out.push((term.topology_key.clone(), ml.clone())),
-            _ => {}
+        if let Some(reqs) = label_selector_to_reqs(ls) {
+            out.push((term.topology_key.clone(), reqs));
         }
     }
     out
 }
 
-/// matchLabels of fully-modeled *hostname* anti-affinity terms (Phase 5e–5h path).
+/// Fully-modeled *hostname* anti-affinity selectors (Phase 5e–5h path).
 fn modeled_host_anti_selectors(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<BTreeMap<String, String>> {
+) -> Vec<Vec<crate::model::LabelSelectorReq>> {
     modeled_anti_selectors_all(affinity)
         .into_iter()
         .filter(|(k, _)| k == "kubernetes.io/hostname")
-        .map(|(_, ml)| ml)
+        .map(|(_, reqs)| reqs)
         .collect()
 }
 
-/// `(topologyKey, matchLabels)` of fully-modeled *non-hostname* anti-affinity terms (Phase 12).
+/// `(topologyKey, selector-requirements)` of fully-modeled *non-hostname* terms (Phase 12).
 fn modeled_topology_anti_selectors(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<(String, BTreeMap<String, String>)> {
+) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
     modeled_anti_selectors_all(affinity)
         .into_iter()
         .filter(|(k, _)| k != "kubernetes.io/hostname")

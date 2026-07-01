@@ -1,5 +1,5 @@
 use crate::model::{
-    NormalizedCluster, NormalizedWorkload, OptimizationInput, OptimizationNode,
+    LabelSelectorReq, NormalizedCluster, NormalizedWorkload, OptimizationInput, OptimizationNode,
     OptimizationWorkload, OptimizationWorkloadMember, QuotaGroup, ResourceList,
 };
 use crate::scheduler::pod_filter::PendingGpuPod;
@@ -43,39 +43,67 @@ fn scale_extended(requests: &BTreeMap<String, i64>, factor: i64) -> BTreeMap<Str
         .collect()
 }
 
-/// A matchLabels selector matches a workload's labels iff every selector entry is
-/// present with the same value (superset match).
-fn selector_matches(
-    selector: &BTreeMap<String, String>,
-    labels: &BTreeMap<String, String>,
-) -> bool {
-    selector.iter().all(|(k, v)| labels.get(k) == Some(v))
+/// Whether one label-selector requirement holds against a pod's labels (Kubernetes semantics:
+/// NotIn/DoesNotExist are satisfied by a MISSING key).
+fn req_matches(req: &LabelSelectorReq, labels: &BTreeMap<String, String>) -> bool {
+    match req.operator.as_str() {
+        "In" => labels
+            .get(&req.key)
+            .map(|v| req.values.contains(v))
+            .unwrap_or(false),
+        "NotIn" => labels
+            .get(&req.key)
+            .map(|v| !req.values.contains(v))
+            .unwrap_or(true),
+        "Exists" => labels.contains_key(&req.key),
+        "DoesNotExist" => !labels.contains_key(&req.key),
+        _ => false,
+    }
 }
 
-/// Deterministic canonical form of a selector set for order-insensitive comparison
-/// (each map -> sorted key/value pairs; outer vector sorted).
-fn canonical_selectors(sels: &[BTreeMap<String, String>]) -> Vec<Vec<(String, String)>> {
-    let mut out: Vec<Vec<(String, String)>> = sels
+/// A modeled selector (a list of requirements, ANDed) matches a workload's labels iff every
+/// requirement holds.
+fn selector_matches(selector: &[LabelSelectorReq], labels: &BTreeMap<String, String>) -> bool {
+    selector.iter().all(|req| req_matches(req, labels))
+}
+
+/// Deterministic canonical form of a requirement so gang-member selector sets compare
+/// order-insensitively (values sorted within a requirement).
+fn canonical_req(r: &LabelSelectorReq) -> (String, String, Vec<String>) {
+    let mut vals = r.values.clone();
+    vals.sort();
+    (r.key.clone(), r.operator.clone(), vals)
+}
+
+/// Canonical form of a selector set (list of selectors) for order-insensitive comparison.
+#[allow(clippy::type_complexity)]
+fn canonical_selectors(sels: &[Vec<LabelSelectorReq>]) -> Vec<Vec<(String, String, Vec<String>)>> {
+    let mut out: Vec<Vec<(String, String, Vec<String>)>> = sels
         .iter()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|sel| {
+            let mut reqs: Vec<(String, String, Vec<String>)> =
+                sel.iter().map(canonical_req).collect();
+            reqs.sort();
+            reqs
+        })
         .collect();
     out.sort();
     out
 }
 
-/// Canonical form of a `(topologyKey, matchLabels)` selector set for order-insensitive
-/// gang-member agreement comparison (Phase 12).
+/// Canonical form of a `(topologyKey, selector)` set for order-insensitive gang-member
+/// agreement comparison (Phase 12).
 #[allow(clippy::type_complexity)]
 fn canonical_topology_selectors(
-    sels: &[(String, BTreeMap<String, String>)],
-) -> Vec<(String, Vec<(String, String)>)> {
-    let mut out: Vec<(String, Vec<(String, String)>)> = sels
+    sels: &[(String, Vec<LabelSelectorReq>)],
+) -> Vec<(String, Vec<(String, String, Vec<String>)>)> {
+    let mut out: Vec<(String, Vec<(String, String, Vec<String>)>)> = sels
         .iter()
-        .map(|(k, m)| {
-            (
-                k.clone(),
-                m.iter().map(|(a, b)| (a.clone(), b.clone())).collect(),
-            )
+        .map(|(k, sel)| {
+            let mut reqs: Vec<(String, String, Vec<String>)> =
+                sel.iter().map(canonical_req).collect();
+            reqs.sort();
+            (k.clone(), reqs)
         })
         .collect();
     out.sort();
@@ -257,7 +285,7 @@ pub fn build_pending_input(
     type EmittedMeta = (
         String,
         String,
-        Vec<BTreeMap<String, String>>,
+        Vec<Vec<LabelSelectorReq>>,
         Vec<BTreeMap<String, String>>,
     );
     let mut emitted_meta: Vec<EmittedMeta> = Vec::new();
@@ -798,16 +826,25 @@ mod tests {
         w
     }
 
+    /// matchLabels pairs -> a modeled selector (each pair as `In [v]`).
+    fn reqs(pairs: &[(&str, &str)]) -> Vec<LabelSelectorReq> {
+        pairs
+            .iter()
+            .map(|(k, v)| LabelSelectorReq {
+                key: k.to_string(),
+                operator: "In".to_string(),
+                values: vec![v.to_string()],
+            })
+            .collect()
+    }
+    /// A list of matchLabels selectors -> modeled selector list.
+    fn sel_list(selectors: &[&[(&str, &str)]]) -> Vec<Vec<LabelSelectorReq>> {
+        selectors.iter().map(|s| reqs(s)).collect()
+    }
+
     fn ppod_aa(ns: &str, name: &str, selectors: &[&[(&str, &str)]]) -> PendingGpuPod {
         let mut p = ppod(ns, name, None);
-        p.anti_affinity_host_selectors = selectors
-            .iter()
-            .map(|s| {
-                s.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect()
-            })
-            .collect();
+        p.anti_affinity_host_selectors = sel_list(selectors);
         p
     }
 
@@ -889,14 +926,7 @@ mod tests {
             gang_key: Some(format!("{ns}/{gang}")),
             colocate,
             unmodeled_constraints: vec![],
-            anti_affinity_host_selectors: selectors
-                .iter()
-                .map(|s| {
-                    s.iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect()
-                })
-                .collect(),
+            anti_affinity_host_selectors: sel_list(selectors),
             anti_affinity_topology_selectors: vec![],
         }
     }
@@ -981,14 +1011,7 @@ mod tests {
         selectors: &[&[(&str, &str)]],
     ) -> NormalizedWorkload {
         let mut w = workload(ns, name, node, 1000, 2, 1, &[node]);
-        w.anti_affinity_host_selectors = selectors
-            .iter()
-            .map(|s| {
-                s.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect()
-            })
-            .collect();
+        w.anti_affinity_host_selectors = sel_list(selectors);
         w
     }
 
@@ -1141,7 +1164,7 @@ mod tests {
             ..Default::default()
         };
         let mut m0 = ppod("team", "m0", Some("job"));
-        m0.anti_affinity_host_selectors = vec![[("app".to_string(), "x".to_string())].into()];
+        m0.anti_affinity_host_selectors = vec![reqs(&[("app", "x")])];
         let m1 = ppod("team", "m1", Some("job")); // no selectors -> disagreement
         let input = build_pending_input(&cluster, &[m0, m1]);
         assert_eq!(input.workloads.len(), 0);
@@ -1240,13 +1263,7 @@ mod tests {
 
     fn ppod_topo(ns: &str, name: &str, key: &str, labels: &[(&str, &str)]) -> PendingGpuPod {
         let mut p = ppod(ns, name, None);
-        p.anti_affinity_topology_selectors = vec![(
-            key.to_string(),
-            labels
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        )];
+        p.anti_affinity_topology_selectors = vec![(key.to_string(), reqs(labels))];
         p
     }
 
@@ -1303,10 +1320,8 @@ mod tests {
         // A running pod carries a ZONE anti-affinity on app=trainer and sits in za (n1).
         // A pending app=trainer pod with NO own selector must still avoid all of za (n2 too).
         let mut peer = running_labeled("team", "peer", "n1", &[]);
-        peer.anti_affinity_topology_selectors = vec![(
-            ZONE.to_string(),
-            [("app".to_string(), "trainer".to_string())].into(),
-        )];
+        peer.anti_affinity_topology_selectors =
+            vec![(ZONE.to_string(), reqs(&[("app", "trainer")]))];
         let cluster = NormalizedCluster {
             nodes: vec![
                 zoned_node("n1", 8, Some("za")),
@@ -1343,5 +1358,68 @@ mod tests {
             &BTreeMap::new(),
         );
         assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+    }
+
+    // ---- matchExpressions in anti-affinity ----
+
+    fn one_req(key: &str, op: &str, values: &[&str]) -> Vec<Vec<LabelSelectorReq>> {
+        vec![vec![LabelSelectorReq {
+            key: key.to_string(),
+            operator: op.to_string(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+        }]]
+    }
+
+    #[test]
+    fn exists_selector_excludes_node_with_matching_key() {
+        // Pending pod's hostname anti-affinity: `app Exists`. A running pod on n1 carries any
+        // `app` label ⇒ n1 excluded; n2 (no matching running pod) stays.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "anything")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.anti_affinity_host_selectors = one_req("app", "Exists", &[]);
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    #[test]
+    fn notin_selector_excludes_node_when_key_missing() {
+        // Pending pod's anti-affinity: `tier NotIn [db]`. A running pod on n1 LACKS `tier`, so
+        // per kube NotIn-missing semantics it MATCHES ⇒ n1 excluded; n2 stays.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "x")]), // no `tier` label
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.anti_affinity_host_selectors = one_req("tier", "NotIn", &["db"]);
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    #[test]
+    fn in_selector_multivalue_matches_any() {
+        // `app In [trainer, infer]` matches a running pod with app=infer ⇒ node excluded.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("team", "peer", "n1", &[("app", "infer")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.anti_affinity_host_selectors = one_req("app", "In", &["trainer", "infer"]);
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
     }
 }

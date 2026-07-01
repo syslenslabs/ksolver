@@ -88,16 +88,16 @@ pub struct Pod {
     pub required_affinity: Vec<AffinityTerm>,
     #[serde(default)]
     pub required_anti: Vec<AffinityTerm>,
-    /// matchLabels of *fully-modeled* hostname pod-anti-affinity terms (no matchExpressions,
-    /// no namespace scoping), computed from the raw affinity by the collector. Used for
-    /// anti-affinity symmetry enforcement in the shadow scheduler.
+    /// *Fully-modeled* hostname pod-anti-affinity selectors (In/NotIn/Exists/DoesNotExist, no
+    /// namespace scoping), computed from the raw affinity by the collector. Each inner Vec is
+    /// one labelSelector's requirements (ANDed). Used for anti-affinity symmetry enforcement.
     #[serde(default)]
-    pub modeled_host_anti_selectors: Vec<BTreeMap<String, String>>,
-    /// `(topologyKey, matchLabels)` of *fully-modeled* NON-hostname pod-anti-affinity terms
-    /// (e.g. zone/rack). Same strict rules as above. Enforced best-effort by topology-domain
+    pub modeled_host_anti_selectors: Vec<Vec<LabelSelectorReq>>,
+    /// `(topologyKey, selector-requirements)` of *fully-modeled* NON-hostname pod-anti-affinity
+    /// terms (e.g. zone/rack). Same strict rules. Enforced best-effort by topology-domain
     /// exclusion in the shadow scheduler (Phase 12).
     #[serde(default)]
-    pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
+    pub anti_affinity_topology_selectors: Vec<(String, Vec<LabelSelectorReq>)>,
     /// Required node affinity as OR-of-terms: the outer Vec is OR (nodeSelectorTerms), each
     /// `NodeAffinityGroup` is one term (its matchExpressions ANDed against labels, matchFields
     /// ANDed against node fields). No required affinity ⇒ unconstrained; required affinity whose
@@ -296,6 +296,19 @@ pub struct AffinityTerm {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeAffinityTerm {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub operator: String,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// One requirement of a pod label selector (matchLabels lowers to `In [v]`; matchExpressions
+/// carried as-is). Supported operators: In, NotIn, Exists, DoesNotExist. Used for best-effort
+/// pod anti-affinity selectors in the shadow scheduler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelSelectorReq {
     #[serde(default)]
     pub key: String,
     #[serde(default)]
@@ -569,14 +582,14 @@ pub struct NormalizedWorkload {
     pub name: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// matchLabels of this workload's fully-modeled hostname pod-anti-affinity terms
-    /// (for symmetry enforcement in the shadow scheduler).
+    /// Fully-modeled hostname pod-anti-affinity selectors (each inner Vec = one labelSelector's
+    /// requirements, ANDed) for symmetry enforcement in the shadow scheduler.
     #[serde(default)]
-    pub anti_affinity_host_selectors: Vec<BTreeMap<String, String>>,
-    /// `(topologyKey, matchLabels)` of this workload's fully-modeled NON-hostname
+    pub anti_affinity_host_selectors: Vec<Vec<LabelSelectorReq>>,
+    /// `(topologyKey, selector-requirements)` of this workload's fully-modeled NON-hostname
     /// pod-anti-affinity terms (zone/rack), for topology-domain exclusion (Phase 12).
     #[serde(default)]
-    pub anti_affinity_topology_selectors: Vec<(String, BTreeMap<String, String>)>,
+    pub anti_affinity_topology_selectors: Vec<(String, Vec<LabelSelectorReq>)>,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]

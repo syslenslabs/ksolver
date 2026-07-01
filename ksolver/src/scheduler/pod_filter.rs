@@ -15,13 +15,13 @@ pub struct PendingGpuPod {
     /// (e.g. "pod affinity", "pod anti-affinity", "topology spread"); surfaced as
     /// per-decision caveats so recommendations are not silently misleading.
     pub unmodeled_constraints: Vec<String>,
-    /// matchLabels selectors of *modeled* hostname pod-anti-affinity terms used for
-    /// best-effort node exclusion against running pods. Empty when none/unmodeled.
-    /// (The "pod anti-affinity" caveat is still raised — enforcement is partial.)
-    pub anti_affinity_host_selectors: Vec<std::collections::BTreeMap<String, String>>,
-    /// `(topologyKey, matchLabels)` of *modeled* NON-hostname pod-anti-affinity terms
+    /// *Modeled* hostname pod-anti-affinity selectors (each inner Vec = one labelSelector's
+    /// requirements: In/NotIn/Exists/DoesNotExist) for best-effort node exclusion against
+    /// running pods. Empty when none/unmodeled. (The "pod anti-affinity" caveat is still raised.)
+    pub anti_affinity_host_selectors: Vec<Vec<crate::model::LabelSelectorReq>>,
+    /// `(topologyKey, selector-requirements)` of *modeled* NON-hostname pod-anti-affinity terms
     /// (zone/rack) for best-effort topology-domain exclusion (Phase 12).
-    pub anti_affinity_topology_selectors: Vec<(String, std::collections::BTreeMap<String, String>)>,
+    pub anti_affinity_topology_selectors: Vec<(String, Vec<crate::model::LabelSelectorReq>)>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -128,7 +128,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     let anti_affinity_host_selectors = all
         .iter()
         .filter(|(k, _)| k == "kubernetes.io/hostname")
-        .map(|(_, ml)| ml.clone())
+        .map(|(_, reqs)| reqs.clone())
         .collect();
     let anti_affinity_topology_selectors = all
         .into_iter()
@@ -147,13 +147,14 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     })
 }
 
-/// `(topologyKey, matchLabels)` of required pod-anti-affinity terms we can fully model for
-/// best-effort exclusion: non-empty matchLabels, NO matchExpressions, and no cross-namespace
-/// scoping (namespaces / namespaceSelector). Callers split hostname vs non-hostname. Anything
-/// else is left unmodeled (and still caveated).
+/// `(topologyKey, selector-requirements)` of required pod-anti-affinity terms we can fully model
+/// for best-effort exclusion: a modelable labelSelector (In/NotIn/Exists/DoesNotExist, non-empty)
+/// with no cross-namespace scoping (namespaces / namespaceSelector). Callers split hostname vs
+/// non-hostname. Anything else is left unmodeled (and still caveated). Selector lowering is
+/// shared with the collector via `label_selector_to_reqs`.
 fn modeled_anti_affinity_selectors(
     spec: &corev1::PodSpec,
-) -> Vec<(String, std::collections::BTreeMap<String, String>)> {
+) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
     let mut out = Vec::new();
     let Some(terms) = spec
         .affinity
@@ -180,18 +181,8 @@ fn modeled_anti_affinity_selectors(
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
-        // Reject matchExpressions (the collector drops them; we cannot model them).
-        if ls
-            .match_expressions
-            .as_ref()
-            .map(|e| !e.is_empty())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        match ls.match_labels.as_ref() {
-            Some(ml) if !ml.is_empty() => out.push((term.topology_key.clone(), ml.clone())),
-            _ => continue,
+        if let Some(reqs) = crate::collector::label_selector_to_reqs(ls) {
+            out.push((term.topology_key.clone(), reqs));
         }
     }
     out
@@ -595,10 +586,10 @@ mod tests {
         let got = classify(&p, &cfg()).unwrap();
         assert_eq!(got.anti_affinity_host_selectors.len(), 1);
         assert!(got.anti_affinity_topology_selectors.is_empty());
-        assert_eq!(
-            got.anti_affinity_host_selectors[0].get("app").unwrap(),
-            "trainer"
-        );
+        let req = &got.anti_affinity_host_selectors[0][0];
+        assert_eq!(req.key, "app");
+        assert_eq!(req.operator, "In");
+        assert_eq!(req.values, vec!["trainer".to_string()]);
         assert!(got
             .unmodeled_constraints
             .contains(&"pod anti-affinity".to_string()));
@@ -625,20 +616,19 @@ mod tests {
             got.anti_affinity_topology_selectors[0].0,
             "topology.kubernetes.io/zone"
         );
-        assert_eq!(
-            got.anti_affinity_topology_selectors[0]
-                .1
-                .get("app")
-                .unwrap(),
-            "trainer"
-        );
+        let treq = &got.anti_affinity_topology_selectors[0].1[0];
+        assert_eq!(treq.key, "app");
+        assert_eq!(treq.operator, "In");
+        assert_eq!(treq.values, vec!["trainer".to_string()]);
         assert!(got
             .unmodeled_constraints
             .contains(&"pod anti-affinity".to_string()));
     }
 
     #[test]
-    fn matchexpressions_term_is_not_modeled() {
+    fn matchexpressions_supported_operator_is_modeled() {
+        // matchLabels (app=trainer -> In) AND a supported matchExpression (team Exists) are now
+        // both modeled into one hostname selector's requirement list.
         let mut p = gpu_pending();
         set_anti_affinity(
             &mut p,
@@ -650,8 +640,43 @@ mod tests {
             )],
         );
         let got = classify(&p, &cfg()).unwrap();
+        assert_eq!(got.anti_affinity_host_selectors.len(), 1);
+        let sel = &got.anti_affinity_host_selectors[0];
+        assert!(sel.iter().any(|r| r.key == "app"
+            && r.operator == "In"
+            && r.values == vec!["trainer".to_string()]));
+        assert!(sel
+            .iter()
+            .any(|r| r.key == "team" && r.operator == "Exists"));
+    }
+
+    #[test]
+    fn matchexpressions_unsupported_operator_not_modeled() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+        let mut p = gpu_pending();
+        // Operator "Gt" is not a valid pod-selector operator => whole term unmodeled.
+        let term = corev1::PodAffinityTerm {
+            topology_key: "kubernetes.io/hostname".to_string(),
+            label_selector: Some(LabelSelector {
+                match_labels: None,
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: "rank".into(),
+                    operator: "Gt".into(),
+                    values: Some(vec!["3".into()]),
+                }]),
+            }),
+            ..Default::default()
+        };
+        set_anti_affinity(&mut p, vec![term]);
+        let got = classify(&p, &cfg()).unwrap();
         assert!(got.anti_affinity_host_selectors.is_empty());
         assert!(got.anti_affinity_topology_selectors.is_empty());
+        // Still disclosed as a caveat.
+        assert!(got
+            .unmodeled_constraints
+            .contains(&"pod anti-affinity".to_string()));
     }
 
     #[test]

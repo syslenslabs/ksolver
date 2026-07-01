@@ -104,14 +104,18 @@ pub fn generate(s: &BenchScenario) -> (NormalizedCluster, Vec<PendingGpuPod>) {
         if s.anti == AntiAffinity::SelfSpread {
             labels.insert("job".to_string(), format!("job{i}"));
         }
-        let selectors: Vec<BTreeMap<String, String>> = match s.anti {
+        // matchLabels-equivalent anti-affinity selector: key In [value].
+        let in_req = |k: &str, v: String| {
+            vec![vec![crate::model::LabelSelectorReq {
+                key: k.to_string(),
+                operator: "In".to_string(),
+                values: vec![v],
+            }]]
+        };
+        let selectors: Vec<Vec<crate::model::LabelSelectorReq>> = match s.anti {
             AntiAffinity::None => Vec::new(),
-            AntiAffinity::SelfSpread => {
-                vec![BTreeMap::from([("job".to_string(), format!("job{i}"))])]
-            }
-            AntiAffinity::GlobalStress => {
-                vec![BTreeMap::from([("app".to_string(), "trainer".to_string())])]
-            }
+            AntiAffinity::SelfSpread => in_req("job", format!("job{i}")),
+            AntiAffinity::GlobalStress => in_req("app", "trainer".to_string()),
         };
         for j in 0..members {
             let name = if members > 1 {
@@ -433,7 +437,7 @@ mod tests {
         assert!(pending.iter().all(|p| p
             .anti_affinity_host_selectors
             .iter()
-            .any(|m| m.contains_key("job"))));
+            .any(|sel| sel.iter().any(|r| r.key == "job"))));
     }
 
     #[test]
