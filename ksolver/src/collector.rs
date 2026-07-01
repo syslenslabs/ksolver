@@ -567,6 +567,7 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
         node_selector,
         required_affinity: to_required_affinity(affinity),
         required_anti: to_required_anti_affinity(affinity),
+        modeled_host_anti_selectors: modeled_host_anti_selectors(affinity),
         required_node_affinity: to_required_node_affinity(affinity),
         topology_spread_constraints: spec
             .as_ref()
@@ -1100,6 +1101,55 @@ fn to_required_affinity(affinity: Option<&corev1::Affinity>) -> Vec<AffinityTerm
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// matchLabels of fully-modeled hostname pod-anti-affinity terms (hostname topology,
+/// non-empty matchLabels, no matchExpressions, no namespace scoping), read from the raw
+/// affinity so lossy conversions cannot broaden the selector. Mirrors the pending-pod
+/// rule in scheduler::pod_filter.
+fn modeled_host_anti_selectors(
+    affinity: Option<&corev1::Affinity>,
+) -> Vec<BTreeMap<String, String>> {
+    let Some(terms) = affinity
+        .and_then(|a| a.pod_anti_affinity.as_ref())
+        .and_then(|pa| {
+            pa.required_during_scheduling_ignored_during_execution
+                .as_ref()
+        })
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for term in terms {
+        if term.topology_key != "kubernetes.io/hostname" {
+            continue;
+        }
+        if term
+            .namespaces
+            .as_ref()
+            .map(|n| !n.is_empty())
+            .unwrap_or(false)
+            || term.namespace_selector.is_some()
+        {
+            continue;
+        }
+        let Some(ls) = term.label_selector.as_ref() else {
+            continue;
+        };
+        if ls
+            .match_expressions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        match ls.match_labels.as_ref() {
+            Some(ml) if !ml.is_empty() => out.push(ml.clone()),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn to_required_anti_affinity(affinity: Option<&corev1::Affinity>) -> Vec<AffinityTerm> {

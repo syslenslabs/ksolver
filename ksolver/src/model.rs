@@ -88,6 +88,11 @@ pub struct Pod {
     pub required_affinity: Vec<AffinityTerm>,
     #[serde(default)]
     pub required_anti: Vec<AffinityTerm>,
+    /// matchLabels of *fully-modeled* hostname pod-anti-affinity terms (no matchExpressions,
+    /// no namespace scoping), computed from the raw affinity by the collector. Used for
+    /// anti-affinity symmetry enforcement in the shadow scheduler.
+    #[serde(default)]
+    pub modeled_host_anti_selectors: Vec<BTreeMap<String, String>>,
     #[serde(default)]
     pub required_node_affinity: Vec<NodeAffinityTerm>,
     #[serde(default)]
