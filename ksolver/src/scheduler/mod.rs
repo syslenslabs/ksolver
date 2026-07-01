@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod decision;
+pub mod pending_input;
 pub mod pod_filter;
 pub mod shadow;
 pub mod trace;
