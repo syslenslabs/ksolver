@@ -1246,8 +1246,10 @@ pub struct OptimizationInput {
 pub struct QuotaGroup {
     #[serde(default)]
     pub workload_ids: Vec<String>,
+    /// Resource names summed toward this quota (e.g. `nvidia.com/gpu` + `nvidia.com/mig-*`
+    /// slices). A workload's contribution is the sum of its totals over these resources.
     #[serde(default)]
-    pub resource: String,
+    pub resources: Vec<String>,
     #[serde(default)]
     pub limit: i64,
 }

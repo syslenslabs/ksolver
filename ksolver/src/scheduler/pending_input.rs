@@ -172,7 +172,9 @@ pub fn build_pending_input(
     pending: &[PendingGpuPod],
     quotas: &BTreeMap<String, i64>,
 ) -> OptimizationInput {
-    build_pending_input_diagnosed(cluster, pending, quotas).0
+    // Default GPU-resource matcher: whole GPUs only (callers wanting MIG-aware quota use the
+    // diagnosed builder with a prefix-aware matcher).
+    build_pending_input_diagnosed(cluster, pending, quotas, &|n| n == GPU_RESOURCE).0
 }
 
 /// Build an optimization input that places ONLY the pending pods, grouping pods that
@@ -184,6 +186,7 @@ pub fn build_pending_input_diagnosed(
     cluster: &NormalizedCluster,
     pending: &[PendingGpuPod],
     quotas: &BTreeMap<String, i64>,
+    is_gpu_resource: &dyn Fn(&str) -> bool,
 ) -> (OptimizationInput, Vec<DropInfo>) {
     // 1. Accumulate running usage per node (running = current_node non-empty). In the same
     //    pass, sum each namespace's running GPU usage so quotas count existing consumption
@@ -194,7 +197,16 @@ pub fn build_pending_input_diagnosed(
     let mut used_pods: BTreeMap<String, i64> = BTreeMap::new();
     let mut used_ext: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     let mut running_gpu_by_ns: BTreeMap<String, i64> = BTreeMap::new();
+    // Set of GPU resource names seen anywhere (whole GPUs + MIG slices), for quota groups.
+    let mut gpu_resource_set: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     for w in &cluster.workloads {
+        // Collect GPU resource names from every workload (running or pending) for quota scope.
+        for res in w.extended_resource_requests.keys() {
+            if is_gpu_resource(res) {
+                gpu_resource_set.insert(res.clone());
+            }
+        }
         if w.current_node.is_empty() {
             continue;
         }
@@ -207,8 +219,15 @@ pub fn build_pending_input_diagnosed(
         for (res, qty) in &w.extended_resource_requests {
             *node_ext.entry(res.clone()).or_default() += *qty;
         }
-        if let Some(gpu) = w.extended_resource_requests.get(GPU_RESOURCE) {
-            *running_gpu_by_ns.entry(w.namespace.clone()).or_default() += *gpu;
+        // MIG-aware quota: sum ALL GPU resources (whole + slices), each unit = 1.
+        let running_gpu: i64 = w
+            .extended_resource_requests
+            .iter()
+            .filter(|(res, _)| is_gpu_resource(res))
+            .map(|(_, qty)| *qty)
+            .sum();
+        if running_gpu > 0 {
+            *running_gpu_by_ns.entry(w.namespace.clone()).or_default() += running_gpu;
         }
     }
 
@@ -545,6 +564,13 @@ pub fn build_pending_input_diagnosed(
     // its admitted pending workloads at (configured cap - already-running GPUs), clamped ≥0.
     // Only emit a group when that namespace actually has pending workloads to constrain.
     let mut quota_groups: Vec<QuotaGroup> = Vec::new();
+    // GPU resource names counted toward every namespace quota (whole GPUs + MIG slices). Always
+    // include the whole-GPU name so a quota is meaningful even if only slices were observed.
+    let mut quota_resources: Vec<String> = gpu_resource_set.iter().cloned().collect();
+    if !quota_resources.iter().any(|r| r == GPU_RESOURCE) {
+        quota_resources.push(GPU_RESOURCE.to_string());
+    }
+    quota_resources.sort();
     for (ns, cap) in quotas {
         let remaining = (cap - running_gpu_by_ns.get(ns).copied().unwrap_or(0)).max(0);
         let workload_ids: Vec<String> = emitted_meta
@@ -557,7 +583,7 @@ pub fn build_pending_input_diagnosed(
         }
         quota_groups.push(QuotaGroup {
             workload_ids,
-            resource: GPU_RESOURCE.to_string(),
+            resources: quota_resources.clone(),
             limit: remaining,
         });
     }
@@ -1250,7 +1276,7 @@ mod tests {
         );
         assert_eq!(input.quota_groups.len(), 1);
         let g = &input.quota_groups[0];
-        assert_eq!(g.resource, "nvidia.com/gpu");
+        assert!(g.resources.contains(&"nvidia.com/gpu".to_string()));
         assert_eq!(g.limit, 1);
         let mut ids = g.workload_ids.clone();
         ids.sort();
@@ -1502,6 +1528,7 @@ mod tests {
                 ppod("team", "m1", Some("job")),
             ],
             &BTreeMap::new(),
+            &|n| n == "nvidia.com/gpu",
         );
         assert_eq!(input.workloads.len(), 0);
         assert_eq!(drops.len(), 1);
@@ -1526,11 +1553,49 @@ mod tests {
             &cluster,
             &[ppod("team", "pending", None)],
             &BTreeMap::new(),
+            &|n| n == "nvidia.com/gpu",
         );
         assert_eq!(input.workloads.len(), 0);
         assert_eq!(drops.len(), 1);
         assert!(drops[0].reason.contains("no feasible node"));
         assert_eq!(drops[0].pod_scopes, vec!["team/pending".to_string()]);
+    }
+
+    #[test]
+    fn quota_group_counts_mig_slices_with_matcher() {
+        // A running MIG-slice pod + a pending MIG-slice pod in `team`; a MIG-aware matcher makes
+        // the quota count the slice — running usage reflects it and the group's resources include
+        // the MIG name.
+        let mut mig_node = node("n1", 16000, 64, 110, 0);
+        mig_node
+            .extended_resources
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 7);
+        let mut running = workload("team", "run", "n1", 1000, 2, 0, &["n1"]);
+        running
+            .extended_resource_requests
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 1);
+        let mut pending_w = workload("team", "pending", "", 1000, 2, 0, &["n1"]);
+        pending_w
+            .extended_resource_requests
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 1);
+        let cluster = NormalizedCluster {
+            nodes: vec![mig_node],
+            workloads: vec![running, pending_w],
+            ..Default::default()
+        };
+        let quotas = BTreeMap::from([("team".to_string(), 3_i64)]);
+        // MIG-aware matcher (whole GPU + mig prefix).
+        let (input, _) = super::build_pending_input_diagnosed(
+            &cluster,
+            &[ppod("team", "pending", None)],
+            &quotas,
+            &|n| n == "nvidia.com/gpu" || n.starts_with("nvidia.com/mig-"),
+        );
+        assert_eq!(input.quota_groups.len(), 1);
+        let g = &input.quota_groups[0];
+        // Group counts the MIG resource; remaining = cap(3) - running slice(1) = 2.
+        assert!(g.resources.contains(&"nvidia.com/mig-1g.5gb".to_string()));
+        assert_eq!(g.limit, 2);
     }
 
     #[test]
@@ -1586,7 +1651,10 @@ mod tests {
             ppod("team", "c", None),
         ];
         let quotas = BTreeMap::from([("team".to_string(), 2_i64)]);
-        let (input, drops) = super::build_pending_input_diagnosed(&cluster, &pending, &quotas);
+        let (input, drops) =
+            super::build_pending_input_diagnosed(&cluster, &pending, &quotas, &|n| {
+                n == "nvidia.com/gpu"
+            });
         assert_eq!(input.workloads.len(), 3); // all fit capacity; quota limits admission, not build
         assert!(drops.is_empty());
 

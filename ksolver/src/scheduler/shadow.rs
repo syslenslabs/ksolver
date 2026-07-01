@@ -193,6 +193,7 @@ async fn run_one_solve(
         &normalized,
         pending,
         &cfg.namespace_gpu_quotas,
+        &|n| cfg.is_gpu_resource(n),
     );
     // Flatten drop diagnostics into a pod-scope -> reason map for the decision trace.
     let mut drop_reasons: std::collections::HashMap<String, String> =

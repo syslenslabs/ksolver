@@ -393,7 +393,7 @@ mod enabled {
             let by_id: HashMap<&str, &crate::model::OptimizationWorkload> =
                 input.workloads.iter().map(|w| (w.id.as_str(), w)).collect();
             for group in &input.quota_groups {
-                if group.limit < 0 || group.resource.is_empty() {
+                if group.limit < 0 || group.resources.is_empty() {
                     continue;
                 }
                 let mut expr = LinearExpr::default();
@@ -402,11 +402,13 @@ mod enabled {
                     else {
                         continue;
                     };
-                    let total = w
-                        .extended_resource_requests
-                        .get(&group.resource)
-                        .copied()
-                        .unwrap_or(0);
+                    // Sum the workload's totals across all quota'd resources (whole GPUs + MIG
+                    // slices); each unit counts as 1 toward the cap.
+                    let total: i64 = group
+                        .resources
+                        .iter()
+                        .map(|r| w.extended_resource_requests.get(r).copied().unwrap_or(0))
+                        .sum();
                     if total > 0 {
                         expr += (total, *placed);
                     }
@@ -1050,7 +1052,7 @@ mod tests {
             ],
             quota_groups: vec![QuotaGroup {
                 workload_ids: vec!["t/a".to_string(), "t/b".to_string()],
-                resource: "nvidia.com/gpu".to_string(),
+                resources: vec!["nvidia.com/gpu".to_string()],
                 limit,
             }],
             ..Default::default()
@@ -1086,7 +1088,7 @@ mod tests {
             workloads: vec![gang_workload(2, 2, &["n1"])],
             quota_groups: vec![QuotaGroup {
                 workload_ids: vec!["gang:t/job".to_string()],
-                resource: "nvidia.com/gpu".to_string(),
+                resources: vec!["nvidia.com/gpu".to_string()],
                 limit: 1,
             }],
             ..Default::default()
@@ -1117,7 +1119,7 @@ mod tests {
             ],
             quota_groups: vec![QuotaGroup {
                 workload_ids: vec!["t/a".to_string(), "t/b".to_string()],
-                resource: "nvidia.com/gpu".to_string(),
+                resources: vec!["nvidia.com/gpu".to_string()],
                 limit: 1,
             }],
             ..Default::default()
@@ -1132,6 +1134,70 @@ mod tests {
             admitted_count(&solution),
             2,
             "quota must be ignored without partial_admission; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn quota_counts_multiple_resources_incl_mig() {
+        use crate::model::{
+            OptimizationNode, OptimizationWorkload, QuotaGroup, ResourceList, ScenarioConfig,
+        };
+        use std::collections::BTreeMap;
+        // A node with a MIG slice resource; one pending pod requesting the slice; a quota group
+        // that sums BOTH nvidia.com/gpu and the MIG slice, limit 0 -> the MIG pod is not admitted
+        // (proves MIG slices count toward the quota).
+        let node = OptimizationNode {
+            name: "n1".to_string(),
+            count: 1,
+            members: vec!["n1".to_string()],
+            effective_capacity: ResourceList {
+                milli_cpu: 8000,
+                memory_bytes: 32 << 30,
+                ephemeral_storage: 0,
+                pods: 110,
+            },
+            extended_resources: BTreeMap::from([("nvidia.com/mig-1g.5gb".to_string(), 7)]),
+            ..Default::default()
+        };
+        let w = OptimizationWorkload {
+            id: "t/slice".to_string(),
+            namespace: "t".to_string(),
+            name: "slice".to_string(),
+            group_size: 1,
+            requests: ResourceList {
+                milli_cpu: 1000,
+                memory_bytes: 1 << 30,
+                ephemeral_storage: 0,
+                pods: 0,
+            },
+            extended_resource_requests: BTreeMap::from([("nvidia.com/mig-1g.5gb".to_string(), 1)]),
+            feasible_nodes: vec!["n1".to_string()],
+            ..Default::default()
+        };
+        let input = OptimizationInput {
+            nodes: vec![node],
+            workloads: vec![w],
+            quota_groups: vec![QuotaGroup {
+                workload_ids: vec!["t/slice".to_string()],
+                resources: vec![
+                    "nvidia.com/gpu".to_string(),
+                    "nvidia.com/mig-1g.5gb".to_string(),
+                ],
+                limit: 0,
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (solution, info) = super::enabled::solve(&input, &scenario).expect("solve");
+        assert_eq!(
+            admitted_count(&solution),
+            0,
+            "MIG slice must count toward the quota (limit 0 -> not admitted); status={}",
             info.status
         );
     }
