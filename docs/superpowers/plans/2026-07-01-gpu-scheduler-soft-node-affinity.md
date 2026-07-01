@@ -69,13 +69,19 @@ slice (no co-placement/running-pod interaction).
 
 ### Task 4: Two-phase solver
 - [ ] Factor the model construction in `cpsat_rust::solve` into a helper that builds the model and
-  returns `(model, x_vars, placed_vars, y_vars, objective_expr)` so Phase 1 and Phase 2 build
-  identically. Phase 1: build + `minimize(objective)` + solve (unchanged output path).
-- [ ] If `scenario.enable_soft_affinity` AND status == Optimal AND any `soft_scores` non-empty: read
-  `phase1_obj = response.objective_value().round() as i64` and each placed var's value; rebuild the
-  model; `add_le(objective_expr, phase1_obj)`; for each placed var `add_eq(placed, v)`; build
-  `soft_expr = Σ soft_scores[n]·x[w,n]`; `minimize(-soft_expr)` (i.e. maximize soft); solve Phase 2;
-  extract assignment from the Phase-2 response. Else keep Phase 1.
+  returns the var maps + the **objective as a term list** `Vec<ObjTerm>` where
+  `ObjTerm { coeff: i64, var: ObjVar }` and `ObjVar` is `Int(IntVar) | Bool(BoolVar)` with a
+  `value(&response) -> i64` method. The caller builds the `LinearExpr` for `minimize` from the terms
+  AND can recompute the exact objective value from them. Phase 1: build + minimize + solve (unchanged).
+- [ ] **Objective value must be recomputed as exact i64 (codex — the admission weight ~1e15 exceeds
+  f64 integer precision at 2^53, so `response.objective_value()` is NOT reliable):**
+  `phase1_obj: i128 = Σ term.coeff as i128 * term.var.value(&response) as i128`; guard it fits i64
+  (bail if not, mirroring the existing admission-weight overflow guard); use that i64.
+- [ ] If `scenario.enable_soft_affinity` AND status == Optimal AND any `soft_scores` non-empty:
+  rebuild the model via the helper; `add_le(objective_expr, phase1_obj)`; for each placed var
+  `add_eq(placed, phase1_value)`; build `soft_expr = Σ soft_scores[n]·x[w,n]`; `minimize(-soft_expr)`;
+  solve Phase 2 (the Phase-1 assignment is always a feasible witness, so Phase 2 is feasible); extract
+  from the Phase-2 response. Else keep Phase 1.
 - [ ] Feature-gated tests: (a) **invariant** — two cost-equal 1-node-each options, a singleton with a
   preferred term matching only node B; soft-off ⇒ some node; soft-on ⇒ node B; admitted count and
   (recomputed) cost identical both ways. (b) soft never over-admits: a quota/capacity-limited case
