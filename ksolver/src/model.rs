@@ -92,12 +92,11 @@ pub struct Pod {
     /// namespace scoping), computed from the raw affinity by the collector. Each inner Vec is
     /// one labelSelector's requirements (ANDed). Used for anti-affinity symmetry enforcement.
     #[serde(default)]
-    pub modeled_host_anti_selectors: Vec<Vec<LabelSelectorReq>>,
-    /// `(topologyKey, selector-requirements)` of *fully-modeled* NON-hostname pod-anti-affinity
-    /// terms (e.g. zone/rack). Same strict rules. Enforced best-effort by topology-domain
-    /// exclusion in the shadow scheduler (Phase 12).
+    pub modeled_host_anti_selectors: Vec<AntiAffinitySelector>,
+    /// `(topologyKey, selector)` of *fully-modeled* NON-hostname pod-anti-affinity terms (e.g.
+    /// zone/rack). Same strict rules. Enforced best-effort by topology-domain exclusion (Phase 12).
     #[serde(default)]
-    pub anti_affinity_topology_selectors: Vec<(String, Vec<LabelSelectorReq>)>,
+    pub anti_affinity_topology_selectors: Vec<(String, AntiAffinitySelector)>,
     /// Required node affinity as OR-of-terms: the outer Vec is OR (nodeSelectorTerms), each
     /// `NodeAffinityGroup` is one term (its matchExpressions ANDed against labels, matchFields
     /// ANDed against node fields). No required affinity ⇒ unconstrained; required affinity whose
@@ -315,6 +314,18 @@ pub struct LabelSelectorReq {
     pub operator: String,
     #[serde(default)]
     pub values: Vec<String>,
+}
+
+/// A modeled pod-anti-affinity selector: label-selector requirements (ANDed) plus a namespace
+/// scope. `namespaces` empty ⇒ the pod's own namespace (Kubernetes default); non-empty ⇒ that
+/// explicit list (own namespace NOT auto-included unless listed). `namespaceSelector`-scoped
+/// terms are not modeled (left to the "pod anti-affinity" caveat).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AntiAffinitySelector {
+    #[serde(default)]
+    pub reqs: Vec<LabelSelectorReq>,
+    #[serde(default)]
+    pub namespaces: Vec<String>,
 }
 
 /// One `nodeSelectorTerm`: `match_expressions` are evaluated against node LABELS, `match_fields`
@@ -582,14 +593,14 @@ pub struct NormalizedWorkload {
     pub name: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// Fully-modeled hostname pod-anti-affinity selectors (each inner Vec = one labelSelector's
-    /// requirements, ANDed) for symmetry enforcement in the shadow scheduler.
+    /// Fully-modeled hostname pod-anti-affinity selectors (reqs + namespace scope) for symmetry
+    /// enforcement in the shadow scheduler.
     #[serde(default)]
-    pub anti_affinity_host_selectors: Vec<Vec<LabelSelectorReq>>,
-    /// `(topologyKey, selector-requirements)` of this workload's fully-modeled NON-hostname
-    /// pod-anti-affinity terms (zone/rack), for topology-domain exclusion (Phase 12).
+    pub anti_affinity_host_selectors: Vec<AntiAffinitySelector>,
+    /// `(topologyKey, selector)` of this workload's fully-modeled NON-hostname pod-anti-affinity
+    /// terms (zone/rack), for topology-domain exclusion (Phase 12).
     #[serde(default)]
-    pub anti_affinity_topology_selectors: Vec<(String, Vec<LabelSelectorReq>)>,
+    pub anti_affinity_topology_selectors: Vec<(String, AntiAffinitySelector)>,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]

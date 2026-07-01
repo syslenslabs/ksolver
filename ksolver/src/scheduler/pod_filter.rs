@@ -15,13 +15,13 @@ pub struct PendingGpuPod {
     /// (e.g. "pod affinity", "pod anti-affinity", "topology spread"); surfaced as
     /// per-decision caveats so recommendations are not silently misleading.
     pub unmodeled_constraints: Vec<String>,
-    /// *Modeled* hostname pod-anti-affinity selectors (each inner Vec = one labelSelector's
-    /// requirements: In/NotIn/Exists/DoesNotExist) for best-effort node exclusion against
-    /// running pods. Empty when none/unmodeled. (The "pod anti-affinity" caveat is still raised.)
-    pub anti_affinity_host_selectors: Vec<Vec<crate::model::LabelSelectorReq>>,
-    /// `(topologyKey, selector-requirements)` of *modeled* NON-hostname pod-anti-affinity terms
-    /// (zone/rack) for best-effort topology-domain exclusion (Phase 12).
-    pub anti_affinity_topology_selectors: Vec<(String, Vec<crate::model::LabelSelectorReq>)>,
+    /// *Modeled* hostname pod-anti-affinity selectors (reqs + namespace scope) for best-effort node
+    /// exclusion against running pods. Empty when none/unmodeled. (The "pod anti-affinity" caveat is
+    /// still raised.)
+    pub anti_affinity_host_selectors: Vec<crate::model::AntiAffinitySelector>,
+    /// `(topologyKey, selector)` of *modeled* NON-hostname pod-anti-affinity terms (zone/rack) for
+    /// best-effort topology-domain exclusion (Phase 12).
+    pub anti_affinity_topology_selectors: Vec<(String, crate::model::AntiAffinitySelector)>,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -124,7 +124,7 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     let anti_affinity_host_selectors = all
         .iter()
         .filter(|(k, _)| k == "kubernetes.io/hostname")
-        .map(|(_, reqs)| reqs.clone())
+        .map(|(_, sel)| sel.clone())
         .collect();
     let anti_affinity_topology_selectors = all
         .into_iter()
@@ -143,14 +143,14 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     })
 }
 
-/// `(topologyKey, selector-requirements)` of required pod-anti-affinity terms we can fully model
-/// for best-effort exclusion: a modelable labelSelector (In/NotIn/Exists/DoesNotExist, non-empty)
-/// with no cross-namespace scoping (namespaces / namespaceSelector). Callers split hostname vs
-/// non-hostname. Anything else is left unmodeled (and still caveated). Selector lowering is
-/// shared with the collector via `label_selector_to_reqs`.
+/// `(topologyKey, selector)` of required pod-anti-affinity terms we can fully model for best-effort
+/// exclusion: a modelable labelSelector (In/NotIn/Exists/DoesNotExist, non-empty). An explicit
+/// `namespaces` list is captured (F-CNS-1; empty ⇒ own namespace); `namespaceSelector` is not
+/// modeled (F-CNS-2) and stays caveated. Callers split hostname vs non-hostname. Selector lowering
+/// is shared with the collector via `label_selector_to_reqs`.
 fn modeled_anti_affinity_selectors(
     spec: &corev1::PodSpec,
-) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
+) -> Vec<(String, crate::model::AntiAffinitySelector)> {
     let mut out = Vec::new();
     let Some(terms) = spec
         .affinity
@@ -164,21 +164,19 @@ fn modeled_anti_affinity_selectors(
         return out;
     };
     for term in terms {
-        // Reject cross-namespace scoping (we only model same-namespace).
-        if term
-            .namespaces
-            .as_ref()
-            .map(|n| !n.is_empty())
-            .unwrap_or(false)
-            || term.namespace_selector.is_some()
-        {
+        // namespaceSelector is not modeled (F-CNS-2); an explicit `namespaces` list is (F-CNS-1).
+        if term.namespace_selector.is_some() {
             continue;
         }
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
         if let Some(reqs) = crate::collector::label_selector_to_reqs(ls) {
-            out.push((term.topology_key.clone(), reqs));
+            let namespaces = term.namespaces.clone().unwrap_or_default();
+            out.push((
+                term.topology_key.clone(),
+                crate::model::AntiAffinitySelector { reqs, namespaces },
+            ));
         }
     }
     out
@@ -622,7 +620,7 @@ mod tests {
         let got = classify(&p, &cfg()).unwrap();
         assert_eq!(got.anti_affinity_host_selectors.len(), 1);
         assert!(got.anti_affinity_topology_selectors.is_empty());
-        let req = &got.anti_affinity_host_selectors[0][0];
+        let req = &got.anti_affinity_host_selectors[0].reqs[0];
         assert_eq!(req.key, "app");
         assert_eq!(req.operator, "In");
         assert_eq!(req.values, vec!["trainer".to_string()]);
@@ -652,7 +650,7 @@ mod tests {
             got.anti_affinity_topology_selectors[0].0,
             "topology.kubernetes.io/zone"
         );
-        let treq = &got.anti_affinity_topology_selectors[0].1[0];
+        let treq = &got.anti_affinity_topology_selectors[0].1.reqs[0];
         assert_eq!(treq.key, "app");
         assert_eq!(treq.operator, "In");
         assert_eq!(treq.values, vec!["trainer".to_string()]);
@@ -678,10 +676,11 @@ mod tests {
         let got = classify(&p, &cfg()).unwrap();
         assert_eq!(got.anti_affinity_host_selectors.len(), 1);
         let sel = &got.anti_affinity_host_selectors[0];
-        assert!(sel.iter().any(|r| r.key == "app"
+        assert!(sel.reqs.iter().any(|r| r.key == "app"
             && r.operator == "In"
             && r.values == vec!["trainer".to_string()]));
         assert!(sel
+            .reqs
             .iter()
             .any(|r| r.key == "team" && r.operator == "Exists"));
     }
@@ -716,7 +715,8 @@ mod tests {
     }
 
     #[test]
-    fn cross_namespace_term_is_not_modeled() {
+    fn cross_namespace_explicit_list_is_modeled() {
+        // F-CNS-1: an explicit `namespaces` list IS now modeled (captured into the selector scope).
         let mut p = gpu_pending();
         set_anti_affinity(
             &mut p,
@@ -728,8 +728,44 @@ mod tests {
             )],
         );
         let got = classify(&p, &cfg()).unwrap();
+        assert_eq!(got.anti_affinity_host_selectors.len(), 1);
+        assert_eq!(
+            got.anti_affinity_host_selectors[0].namespaces,
+            vec!["other".to_string()]
+        );
+    }
+
+    #[test]
+    fn namespace_selector_term_is_not_modeled() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+        let mut p = gpu_pending();
+        // A term with a namespaceSelector is NOT modeled (F-CNS-2), only caveated.
+        let mut ml = std::collections::BTreeMap::new();
+        ml.insert("app".to_string(), "trainer".to_string());
+        let term = corev1::PodAffinityTerm {
+            topology_key: "kubernetes.io/hostname".to_string(),
+            label_selector: Some(LabelSelector {
+                match_labels: Some(ml),
+                match_expressions: None,
+            }),
+            namespace_selector: Some(LabelSelector {
+                match_labels: None,
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: "team".into(),
+                    operator: "Exists".into(),
+                    values: None,
+                }]),
+            }),
+            ..Default::default()
+        };
+        set_anti_affinity(&mut p, vec![term]);
+        let got = classify(&p, &cfg()).unwrap();
         assert!(got.anti_affinity_host_selectors.is_empty());
-        assert!(got.anti_affinity_topology_selectors.is_empty());
+        assert!(got
+            .unmodeled_constraints
+            .contains(&"pod anti-affinity".to_string()));
     }
 
     #[test]

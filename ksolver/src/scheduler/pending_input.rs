@@ -1,12 +1,24 @@
 use crate::model::{
-    LabelSelectorReq, NormalizedCluster, NormalizedWorkload, OptimizationInput, OptimizationNode,
-    OptimizationWorkload, OptimizationWorkloadMember, QuotaGroup, ResourceList,
+    AntiAffinitySelector, LabelSelectorReq, NormalizedCluster, NormalizedWorkload,
+    OptimizationInput, OptimizationNode, OptimizationWorkload, OptimizationWorkloadMember,
+    QuotaGroup, ResourceList,
 };
 use crate::scheduler::pod_filter::PendingGpuPod;
 use std::collections::BTreeMap;
 
 /// Resource name used for per-namespace quotas (MVP: GPUs only).
 const GPU_RESOURCE: &str = "nvidia.com/gpu";
+
+/// Whether an anti-affinity selector scoped to `sel_ns` applies to a pod in `other_ns`, given the
+/// selector owner's namespace `own_ns`. Empty `sel_ns` ⇒ own namespace (Kubernetes default);
+/// non-empty ⇒ the explicit list (own namespace not auto-included unless listed).
+fn scope_matches(sel_ns: &[String], own_ns: &str, other_ns: &str) -> bool {
+    if sel_ns.is_empty() {
+        other_ns == own_ns
+    } else {
+        sel_ns.iter().any(|n| n == other_ns)
+    }
+}
 
 fn workload_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
@@ -75,36 +87,31 @@ fn canonical_req(r: &LabelSelectorReq) -> (String, String, Vec<String>) {
     (r.key.clone(), r.operator.clone(), vals)
 }
 
-/// Canonical form of a selector set (list of selectors) for order-insensitive comparison.
-#[allow(clippy::type_complexity)]
-fn canonical_selectors(sels: &[Vec<LabelSelectorReq>]) -> Vec<Vec<(String, String, Vec<String>)>> {
-    let mut out: Vec<Vec<(String, String, Vec<String>)>> = sels
-        .iter()
-        .map(|sel| {
-            let mut reqs: Vec<(String, String, Vec<String>)> =
-                sel.iter().map(canonical_req).collect();
-            reqs.sort();
-            reqs
-        })
-        .collect();
+/// Canonical form of one selector (sorted reqs + sorted namespace scope) for order-insensitive
+/// gang-member agreement comparison.
+type CanonicalSelector = (Vec<(String, String, Vec<String>)>, Vec<String>);
+fn canonical_selector(sel: &AntiAffinitySelector) -> CanonicalSelector {
+    let mut reqs: Vec<(String, String, Vec<String>)> = sel.reqs.iter().map(canonical_req).collect();
+    reqs.sort();
+    let mut ns = sel.namespaces.clone();
+    ns.sort();
+    (reqs, ns)
+}
+
+/// Canonical form of a selector set for order-insensitive comparison.
+fn canonical_selectors(sels: &[AntiAffinitySelector]) -> Vec<CanonicalSelector> {
+    let mut out: Vec<CanonicalSelector> = sels.iter().map(canonical_selector).collect();
     out.sort();
     out
 }
 
-/// Canonical form of a `(topologyKey, selector)` set for order-insensitive gang-member
-/// agreement comparison (Phase 12).
-#[allow(clippy::type_complexity)]
+/// Canonical form of a `(topologyKey, selector)` set for gang-member agreement (Phase 12).
 fn canonical_topology_selectors(
-    sels: &[(String, Vec<LabelSelectorReq>)],
-) -> Vec<(String, Vec<(String, String, Vec<String>)>)> {
-    let mut out: Vec<(String, Vec<(String, String, Vec<String>)>)> = sels
+    sels: &[(String, AntiAffinitySelector)],
+) -> Vec<(String, CanonicalSelector)> {
+    let mut out: Vec<(String, CanonicalSelector)> = sels
         .iter()
-        .map(|(k, sel)| {
-            let mut reqs: Vec<(String, String, Vec<String>)> =
-                sel.iter().map(canonical_req).collect();
-            reqs.sort();
-            (k.clone(), reqs)
-        })
+        .map(|(k, sel)| (k.clone(), canonical_selector(sel)))
         .collect();
     out.sort();
     out
@@ -331,7 +338,7 @@ pub fn build_pending_input_diagnosed(
     type EmittedMeta = (
         String,
         String,
-        Vec<Vec<LabelSelectorReq>>,
+        Vec<AntiAffinitySelector>,
         Vec<BTreeMap<String, String>>,
     );
     let mut emitted_meta: Vec<EmittedMeta> = Vec::new();
@@ -405,11 +412,14 @@ pub fn build_pending_input_diagnosed(
         // gang's replicas must spread (<=1 per node). Requires >1 member. Matching all
         // members (not just the representative) is required because gang homogeneity does
         // not include labels.
+        // A self-anti-affine selector must also APPLY to the gang's own namespace (all members
+        // share rep.namespace); a selector scoped only to other namespaces does not self-spread.
         let self_anti = members.len() > 1
             && aa_selectors.iter().any(|s| {
-                member_workloads
-                    .iter()
-                    .all(|w| selector_matches(s, &w.labels))
+                scope_matches(&s.namespaces, &rep.namespace, &rep.namespace)
+                    && member_workloads
+                        .iter()
+                        .all(|w| selector_matches(&s.reqs, &w.labels))
             });
         // Co-location (one node) and self-spread (<=1 per node) are contradictory.
         if colocate && self_anti {
@@ -450,14 +460,20 @@ pub fn build_pending_input_diagnosed(
                     None => return true,
                 };
                 let violates = running.iter().any(|w| {
-                    if w.namespace != rep.namespace {
-                        return false;
-                    }
-                    let forward = aa_selectors.iter().any(|s| selector_matches(s, &w.labels));
-                    let symmetric = w
-                        .anti_affinity_host_selectors
-                        .iter()
-                        .any(|rs| member_labels.iter().all(|ml| selector_matches(rs, ml)));
+                    // Forward: the pending pod's selector (owned by rep.namespace) applies to the
+                    // running pod's namespace AND its reqs match the running pod's labels.
+                    let forward = aa_selectors.iter().any(|s| {
+                        scope_matches(&s.namespaces, &rep.namespace, &w.namespace)
+                            && selector_matches(&s.reqs, &w.labels)
+                    });
+                    // Symmetric: the running pod's selector (owned by w.namespace) applies to the
+                    // pending pod's namespace AND its reqs match EVERY pending member's labels.
+                    let symmetric = w.anti_affinity_host_selectors.iter().any(|rs| {
+                        scope_matches(&rs.namespaces, &w.namespace, &rep.namespace)
+                            && member_labels
+                                .iter()
+                                .all(|ml| selector_matches(&rs.reqs, ml))
+                    });
                     forward || symmetric
                 });
                 !violates
@@ -469,26 +485,31 @@ pub fn build_pending_input_diagnosed(
             // is a singleton domain (domain == None) and is never excluded by equality.
             .filter(|cn| {
                 if aa_topo_selectors.is_empty()
-                    && !running_by_node.values().flatten().any(|w| {
-                        w.namespace == rep.namespace
-                            && !w.anti_affinity_topology_selectors.is_empty()
-                    })
+                    && !running_by_node
+                        .values()
+                        .flatten()
+                        .any(|w| !w.anti_affinity_topology_selectors.is_empty())
                 {
                     return true;
                 }
                 let violates = running_by_node.iter().any(|(rn, pods)| {
                     pods.iter().any(|w| {
-                        if w.namespace != rep.namespace {
-                            return false;
-                        }
+                        // Forward: pending topology selector (owned by rep.namespace) applies to
+                        // the running pod's namespace, matches its labels, same domain.
                         let forward = aa_topo_selectors.iter().any(|(key, s)| {
-                            selector_matches(s, &w.labels)
+                            scope_matches(&s.namespaces, &rep.namespace, &w.namespace)
+                                && selector_matches(&s.reqs, &w.labels)
                                 && domain(cn, key).is_some()
                                 && domain(cn, key) == domain(rn, key)
                         });
+                        // Symmetric: running pod's topology selector (owned by w.namespace) applies
+                        // to the pending pod's namespace, matches ALL members, same domain.
                         let symmetric =
                             w.anti_affinity_topology_selectors.iter().any(|(key, rs)| {
-                                member_labels.iter().all(|ml| selector_matches(rs, ml))
+                                scope_matches(&rs.namespaces, &w.namespace, &rep.namespace)
+                                    && member_labels
+                                        .iter()
+                                        .all(|ml| selector_matches(&rs.reqs, ml))
                                     && domain(cn, key).is_some()
                                     && domain(cn, key) == domain(rn, key)
                             });
@@ -540,20 +561,20 @@ pub fn build_pending_input_diagnosed(
         ));
     }
 
-    // Cross-workload same-batch anti-affinity: at most one of two distinct workloads per
-    // node when one's selector matches ALL the other's member labels (same namespace).
+    // Cross-workload same-batch anti-affinity: at most one of two distinct workloads per node when
+    // one's selector applies to the other's namespace and matches ALL its member labels. The
+    // namespace scope (empty = own ns) generalizes the former same-namespace-only guard.
     for i in 0..emitted_meta.len() {
         for j in (i + 1)..emitted_meta.len() {
             let (a, b) = (&emitted_meta[i], &emitted_meta[j]);
-            if a.1 != b.1 {
-                continue;
-            }
-            let a_forbids_b =
-                a.2.iter()
-                    .any(|s| b.3.iter().all(|l| selector_matches(s, l)));
-            let b_forbids_a =
-                b.2.iter()
-                    .any(|s| a.3.iter().all(|l| selector_matches(s, l)));
+            let a_forbids_b = a.2.iter().any(|s| {
+                scope_matches(&s.namespaces, &a.1, &b.1)
+                    && b.3.iter().all(|l| selector_matches(&s.reqs, l))
+            });
+            let b_forbids_a = b.2.iter().any(|s| {
+                scope_matches(&s.namespaces, &b.1, &a.1)
+                    && a.3.iter().all(|l| selector_matches(&s.reqs, l))
+            });
             if a_forbids_b || b_forbids_a {
                 anti_affinity_pairs.push((a.0.clone(), b.0.clone()));
             }
@@ -923,9 +944,16 @@ mod tests {
             })
             .collect()
     }
-    /// A list of matchLabels selectors -> modeled selector list.
-    fn sel_list(selectors: &[&[(&str, &str)]]) -> Vec<Vec<LabelSelectorReq>> {
-        selectors.iter().map(|s| reqs(s)).collect()
+    /// A matchLabels selector with own-namespace scope.
+    fn sel(pairs: &[(&str, &str)]) -> AntiAffinitySelector {
+        AntiAffinitySelector {
+            reqs: reqs(pairs),
+            namespaces: Vec::new(),
+        }
+    }
+    /// A list of matchLabels selectors -> modeled selector list (own-namespace scope).
+    fn sel_list(selectors: &[&[(&str, &str)]]) -> Vec<AntiAffinitySelector> {
+        selectors.iter().map(|s| sel(s)).collect()
     }
 
     fn ppod_aa(ns: &str, name: &str, selectors: &[&[(&str, &str)]]) -> PendingGpuPod {
@@ -1250,7 +1278,7 @@ mod tests {
             ..Default::default()
         };
         let mut m0 = ppod("team", "m0", Some("job"));
-        m0.anti_affinity_host_selectors = vec![reqs(&[("app", "x")])];
+        m0.anti_affinity_host_selectors = vec![sel(&[("app", "x")])];
         let m1 = ppod("team", "m1", Some("job")); // no selectors -> disagreement
         let input = build_pending_input(&cluster, &[m0, m1]);
         assert_eq!(input.workloads.len(), 0);
@@ -1349,7 +1377,7 @@ mod tests {
 
     fn ppod_topo(ns: &str, name: &str, key: &str, labels: &[(&str, &str)]) -> PendingGpuPod {
         let mut p = ppod(ns, name, None);
-        p.anti_affinity_topology_selectors = vec![(key.to_string(), reqs(labels))];
+        p.anti_affinity_topology_selectors = vec![(key.to_string(), sel(labels))];
         p
     }
 
@@ -1407,7 +1435,7 @@ mod tests {
         // A pending app=trainer pod with NO own selector must still avoid all of za (n2 too).
         let mut peer = running_labeled("team", "peer", "n1", &[]);
         peer.anti_affinity_topology_selectors =
-            vec![(ZONE.to_string(), reqs(&[("app", "trainer")]))];
+            vec![(ZONE.to_string(), sel(&[("app", "trainer")]))];
         let cluster = NormalizedCluster {
             nodes: vec![
                 zoned_node("n1", 8, Some("za")),
@@ -1448,12 +1476,15 @@ mod tests {
 
     // ---- matchExpressions in anti-affinity ----
 
-    fn one_req(key: &str, op: &str, values: &[&str]) -> Vec<Vec<LabelSelectorReq>> {
-        vec![vec![LabelSelectorReq {
-            key: key.to_string(),
-            operator: op.to_string(),
-            values: values.iter().map(|v| v.to_string()).collect(),
-        }]]
+    fn one_req(key: &str, op: &str, values: &[&str]) -> Vec<AntiAffinitySelector> {
+        vec![AntiAffinitySelector {
+            reqs: vec![LabelSelectorReq {
+                key: key.to_string(),
+                operator: op.to_string(),
+                values: values.iter().map(|v| v.to_string()).collect(),
+            }],
+            namespaces: Vec::new(),
+        }]
     }
 
     #[test]
@@ -1702,5 +1733,81 @@ mod tests {
         // Quota of 2 GPUs => exactly 2 of the 3 singletons admitted end-to-end.
         assert_eq!(placed, 2, "status={}", info.status);
         assert_eq!(unplaced, 1);
+    }
+
+    // ---- F-CNS-1: cross-namespace anti-affinity (explicit namespaces list) ----
+
+    #[test]
+    fn cross_namespace_explicit_list_excludes_only_scoped_ns() {
+        // Pending pod in `team` with hostname anti-affinity scoped to namespaces=[other], app=x.
+        // A matching running pod in `other` (n1) excludes n1; a matching pod in `third` (n2) does
+        // NOT (not in scope); n3 stays free.
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 16000, 64, 110, 8),
+                node("n2", 16000, 64, 110, 8),
+                node("n3", 16000, 64, 110, 8),
+            ],
+            workloads: vec![
+                running_labeled("other", "peer", "n1", &[("app", "x")]),
+                running_labeled("third", "peer2", "n2", &[("app", "x")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2", "n3"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.anti_affinity_host_selectors = vec![AntiAffinitySelector {
+            reqs: reqs(&[("app", "x")]),
+            namespaces: vec!["other".to_string()],
+        }];
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        let f = &input.workloads[0].feasible_nodes;
+        assert!(
+            !f.contains(&"n1".to_string()),
+            "n1 (other) should be excluded"
+        );
+        assert!(f.contains(&"n2".to_string()), "n2 (third) not in scope");
+        assert!(f.contains(&"n3".to_string()));
+    }
+
+    #[test]
+    fn own_namespace_selector_does_not_apply_cross_namespace() {
+        // Empty namespaces = own namespace only: a `team` pod's selector must NOT be triggered by
+        // a matching pod in `other` (byte-identical to pre-F-CNS-1 behavior).
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_labeled("other", "peer", "n1", &[("app", "x")]),
+                workload("team", "pending", "", 1000, 2, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "pending", None);
+        p.anti_affinity_host_selectors = vec![sel(&[("app", "x")])]; // own-ns scope
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        // other/peer is NOT in the own-namespace scope ⇒ n1 not excluded.
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+    }
+
+    #[test]
+    fn cross_namespace_symmetry_running_selector_scopes_to_pending_ns() {
+        // A running pod in `other` (n1) carries a hostname anti-affinity scoped to
+        // namespaces=[team] on app=trainer; a pending `team` pod labelled app=trainer must avoid n1.
+        let mut peer = running_labeled("other", "peer", "n1", &[]);
+        peer.anti_affinity_host_selectors = vec![AntiAffinitySelector {
+            reqs: reqs(&[("app", "trainer")]),
+            namespaces: vec!["team".to_string()],
+        }];
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                peer,
+                labeled_pending("team", "p", &["n1", "n2"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let input =
+            super::build_pending_input(&cluster, &[ppod("team", "p", None)], &BTreeMap::new());
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
     }
 }

@@ -1157,7 +1157,7 @@ pub(crate) fn label_selector_to_reqs(
 
 fn modeled_anti_selectors_all(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
+) -> Vec<(String, crate::model::AntiAffinitySelector)> {
     let Some(terms) = affinity
         .and_then(|a| a.pod_anti_affinity.as_ref())
         .and_then(|pa| {
@@ -1169,20 +1169,20 @@ fn modeled_anti_selectors_all(
     };
     let mut out = Vec::new();
     for term in terms {
-        if term
-            .namespaces
-            .as_ref()
-            .map(|n| !n.is_empty())
-            .unwrap_or(false)
-            || term.namespace_selector.is_some()
-        {
+        // `namespaceSelector` is not modeled (F-CNS-2); an explicit `namespaces` list IS
+        // (F-CNS-1). Empty/absent list ⇒ own namespace.
+        if term.namespace_selector.is_some() {
             continue;
         }
         let Some(ls) = term.label_selector.as_ref() else {
             continue;
         };
         if let Some(reqs) = label_selector_to_reqs(ls) {
-            out.push((term.topology_key.clone(), reqs));
+            let namespaces = term.namespaces.clone().unwrap_or_default();
+            out.push((
+                term.topology_key.clone(),
+                crate::model::AntiAffinitySelector { reqs, namespaces },
+            ));
         }
     }
     out
@@ -1191,18 +1191,18 @@ fn modeled_anti_selectors_all(
 /// Fully-modeled *hostname* anti-affinity selectors (Phase 5e–5h path).
 fn modeled_host_anti_selectors(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<Vec<crate::model::LabelSelectorReq>> {
+) -> Vec<crate::model::AntiAffinitySelector> {
     modeled_anti_selectors_all(affinity)
         .into_iter()
         .filter(|(k, _)| k == "kubernetes.io/hostname")
-        .map(|(_, reqs)| reqs)
+        .map(|(_, sel)| sel)
         .collect()
 }
 
-/// `(topologyKey, selector-requirements)` of fully-modeled *non-hostname* terms (Phase 12).
+/// `(topologyKey, selector)` of fully-modeled *non-hostname* terms (Phase 12).
 fn modeled_topology_anti_selectors(
     affinity: Option<&corev1::Affinity>,
-) -> Vec<(String, Vec<crate::model::LabelSelectorReq>)> {
+) -> Vec<(String, crate::model::AntiAffinitySelector)> {
     modeled_anti_selectors_all(affinity)
         .into_iter()
         .filter(|(k, _)| k != "kubernetes.io/hostname")
