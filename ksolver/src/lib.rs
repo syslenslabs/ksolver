@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod conformance;
 pub mod cpsat_rust;
 pub mod explainability;
 pub mod historical_usage;

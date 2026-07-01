@@ -1112,6 +1112,20 @@ fn feasible_on_node(
     reasons
 }
 
+/// Public wrapper over `feasible_on_node` for the conformance harness: returns the
+/// infeasibility reasons (empty ⇒ we consider the pod feasible on the node). Kept as a
+/// thin delegate so the predicate logic stays in one place. Wired by the `conform`
+/// subcommand (Phase 2 Task 4); allow dead_code until then.
+#[allow(dead_code)]
+pub(crate) fn node_feasibility_reasons(
+    pod: &Pod,
+    node: &NormalizedNode,
+    volumes_by_claim: &BTreeMap<String, VolumeAttachment>,
+    options: &Options,
+) -> Vec<String> {
+    feasible_on_node(pod, node, volumes_by_claim, options)
+}
+
 fn matches_required_node_affinity(
     node_labels: &BTreeMap<String, String>,
     terms: &[crate::model::NodeAffinityTerm],
