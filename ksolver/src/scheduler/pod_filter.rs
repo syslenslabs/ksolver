@@ -9,6 +9,8 @@ pub struct PendingGpuPod {
     pub gpu_request: i64,
     /// `Some("{namespace}/{label-value}")` when the configured gang label is present.
     pub gang_key: Option<String>,
+    /// True when the configured co-location label is set to "true" (gang wants one node).
+    pub colocate: bool,
 }
 
 /// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
@@ -102,12 +104,21 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
             .filter(|v| !v.is_empty())
             .map(|v| format!("{namespace}/{v}"))
     };
+    let colocate = !cfg.gang_colocate_label.is_empty()
+        && pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(&cfg.gang_colocate_label))
+            .map(|v| v == "true")
+            .unwrap_or(false);
     Some(PendingGpuPod {
         uid,
         namespace,
         name,
         gpu_request: gpu,
         gang_key,
+        colocate,
     })
 }
 
@@ -131,6 +142,7 @@ mod tests {
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
+            gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
         }
     }
 
@@ -318,6 +330,30 @@ mod tests {
             vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
             vec![],
         );
-        assert_eq!(classify(&p, &cfg()).unwrap().gang_key, None);
+        let got = classify(&p, &cfg()).unwrap();
+        assert_eq!(got.gang_key, None);
+        assert!(!got.colocate);
+    }
+
+    #[test]
+    fn colocate_label_true_sets_colocate() {
+        let mut p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("main", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![],
+        );
+        p.metadata.labels = Some(BTreeMap::from([
+            (
+                "scheduling.x-k8s.io/pod-group".to_string(),
+                "job".to_string(),
+            ),
+            (
+                "scheduling.x-k8s.io/gang-colocate".to_string(),
+                "true".to_string(),
+            ),
+        ]));
+        assert!(classify(&p, &cfg()).unwrap().colocate);
     }
 }

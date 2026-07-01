@@ -309,6 +309,7 @@ mod tests {
             name: name.into(),
             gpu_request: 1,
             gang_key: gang.map(|g| format!("{ns}/{g}")),
+            colocate: false,
         }
     }
 

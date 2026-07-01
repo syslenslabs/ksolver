@@ -102,6 +102,7 @@ mod tests {
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
+            gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
         }
     }
 

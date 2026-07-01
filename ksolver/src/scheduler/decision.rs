@@ -123,6 +123,7 @@ mod tests {
             name: name.into(),
             gpu_request: 1,
             gang_key: Some(format!("{ns}/job")),
+            colocate: false,
         }
     }
 

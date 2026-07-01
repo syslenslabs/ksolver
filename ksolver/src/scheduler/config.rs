@@ -13,6 +13,8 @@ pub struct ShadowConfig {
     pub http_addr: String,
     /// Pod label whose value groups pods into a gang (all-or-nothing). Empty disables grouping.
     pub gang_label_key: String,
+    /// Pod label whose value "true" marks a gang as requiring single-node co-location.
+    pub gang_colocate_label: String,
 }
 
 fn csv_env(key: &str) -> Vec<String> {
@@ -51,6 +53,8 @@ impl ShadowConfig {
                 .unwrap_or_else(|_| "127.0.0.1:8090".to_string()),
             gang_label_key: std::env::var("KSOLVER_SHADOW_GANG_LABEL")
                 .unwrap_or_else(|_| "scheduling.x-k8s.io/pod-group".to_string()),
+            gang_colocate_label: std::env::var("KSOLVER_SHADOW_COLOCATE_LABEL")
+                .unwrap_or_else(|_| "scheduling.x-k8s.io/gang-colocate".to_string()),
         }
     }
 
@@ -73,6 +77,7 @@ mod tests {
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
+            gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
         }
     }
 
