@@ -1,7 +1,8 @@
 use crate::model::SolveRequest;
 use lazy_static::lazy_static;
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 const SOLVE_LABELS: &[&str] = &[
@@ -55,18 +56,78 @@ lazy_static! {
         SOLVE_LABELS
     )
     .expect("metric can be created");
+    pub static ref SHADOW_POD_OBSERVATIONS: IntCounter = IntCounter::new(
+        "ksolver_shadow_pod_observations_total",
+        "Pending GPU pod observations across shadow solve windows (not unique pods)"
+    )
+    .expect("metric can be created");
+    pub static ref SHADOW_PENDING: IntGauge = IntGauge::new(
+        "ksolver_shadow_pending_pods",
+        "Current count of in-scope pending GPU pods observed"
+    )
+    .expect("metric can be created");
+    pub static ref SHADOW_SOLVES: IntCounter =
+        IntCounter::new("ksolver_shadow_solves_total", "Shadow solves started")
+            .expect("metric can be created");
+    pub static ref SHADOW_SOLVE_ERRORS: IntCounter = IntCounter::new(
+        "ksolver_shadow_solve_errors_total",
+        "Shadow solves that errored"
+    )
+    .expect("metric can be created");
+    pub static ref SHADOW_SOLVE_SECONDS: Histogram = Histogram::with_opts(HistogramOpts::new(
+        "ksolver_shadow_solve_seconds",
+        "Shadow solve wall-clock seconds"
+    ))
+    .expect("metric can be created");
+    pub static ref SHADOW_UNPLACED: IntCounter = IntCounter::new(
+        "ksolver_shadow_unplaced_total",
+        "Pending GPU pods with no placement in a solve"
+    )
+    .expect("metric can be created");
+}
+
+fn register_ignoring_dup(c: Box<dyn prometheus::core::Collector>) {
+    match REGISTRY.register(c) {
+        Ok(()) => {}
+        Err(prometheus::Error::AlreadyReg) => {}
+        Err(e) => panic!("failed to register metric: {e}"),
+    }
 }
 
 pub fn register_metrics() {
-    REGISTRY
-        .register(Box::new(SOLVE_DURATION_SECONDS.clone()))
-        .expect("solver metric can be registered");
-    REGISTRY
-        .register(Box::new(SOLVES_TOTAL.clone()))
-        .expect("solver metric can be registered");
-    REGISTRY
-        .register(Box::new(SOLVES_IN_FLIGHT.clone()))
-        .expect("solver metric can be registered");
+    register_ignoring_dup(Box::new(SOLVE_DURATION_SECONDS.clone()));
+    register_ignoring_dup(Box::new(SOLVES_TOTAL.clone()));
+    register_ignoring_dup(Box::new(SOLVES_IN_FLIGHT.clone()));
+    register_ignoring_dup(Box::new(SHADOW_POD_OBSERVATIONS.clone()));
+    register_ignoring_dup(Box::new(SHADOW_PENDING.clone()));
+    register_ignoring_dup(Box::new(SHADOW_SOLVES.clone()));
+    register_ignoring_dup(Box::new(SHADOW_SOLVE_ERRORS.clone()));
+    register_ignoring_dup(Box::new(SHADOW_SOLVE_SECONDS.clone()));
+    register_ignoring_dup(Box::new(SHADOW_UNPLACED.clone()));
+}
+
+pub fn inc_shadow_pod_observations(n: u64) {
+    SHADOW_POD_OBSERVATIONS.inc_by(n);
+}
+
+pub fn set_shadow_pending(n: i64) {
+    SHADOW_PENDING.set(n);
+}
+
+pub fn inc_shadow_solves() {
+    SHADOW_SOLVES.inc();
+}
+
+pub fn inc_shadow_solve_errors() {
+    SHADOW_SOLVE_ERRORS.inc();
+}
+
+pub fn observe_shadow_solve_seconds(secs: f64) {
+    SHADOW_SOLVE_SECONDS.observe(secs);
+}
+
+pub fn inc_shadow_unplaced(n: u64) {
+    SHADOW_UNPLACED.inc_by(n);
 }
 
 pub fn render_metrics() -> String {
@@ -165,4 +226,28 @@ pub fn solve_finished(labels: &SolveMetricLabels, status: &str, elapsed_seconds:
 
 fn bool_label(value: bool) -> String {
     if value { "true" } else { "false" }.to_string()
+}
+
+#[cfg(test)]
+mod shadow_metric_tests {
+    use super::*;
+
+    #[test]
+    fn register_is_idempotent_and_shadow_metrics_render() {
+        register_metrics();
+        register_metrics(); // must not panic
+        inc_shadow_pod_observations(3);
+        set_shadow_pending(2);
+        inc_shadow_solves();
+        inc_shadow_solve_errors();
+        observe_shadow_solve_seconds(0.05);
+        inc_shadow_unplaced(1);
+        let out = render_metrics();
+        assert!(out.contains("ksolver_shadow_pod_observations_total"));
+        assert!(out.contains("ksolver_shadow_pending_pods"));
+        assert!(out.contains("ksolver_shadow_solves_total"));
+        assert!(out.contains("ksolver_shadow_solve_errors_total"));
+        assert!(out.contains("ksolver_shadow_solve_seconds"));
+        assert!(out.contains("ksolver_shadow_unplaced_total"));
+    }
 }
