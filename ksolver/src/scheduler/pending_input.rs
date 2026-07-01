@@ -283,6 +283,8 @@ pub fn build_pending_input(
         } else {
             (rep.requests.clone(), rep.extended_resource_requests.clone())
         };
+        let member_labels: Vec<&BTreeMap<String, String>> =
+            member_workloads.iter().map(|w| &w.labels).collect();
         let feasible_nodes: Vec<String> = rep
             .feasible_node_names
             .iter()
@@ -292,20 +294,26 @@ pub fn build_pending_input(
                     .map(|r| r.fits(&fit_req, &fit_ext))
                     .unwrap_or(false)
             })
-            // Best-effort anti-affinity: drop nodes hosting a matching same-namespace
-            // running pod (hostname topology). Same-batch/symmetry remain caveated.
+            // Best-effort hostname anti-affinity node exclusion, both directions:
+            //  (5e) the pending pod's own anti-affinity vs a running pod's labels, and
+            //  (5h) a running pod's anti-affinity vs EVERY pending member's labels (symmetry).
             .filter(|node| {
-                if aa_selectors.is_empty() {
-                    return true;
-                }
                 let running = match running_by_node.get(*node) {
                     Some(r) => r,
                     None => return true,
                 };
-                !running.iter().any(|w| {
-                    w.namespace == rep.namespace
-                        && aa_selectors.iter().any(|s| selector_matches(s, &w.labels))
-                })
+                let violates = running.iter().any(|w| {
+                    if w.namespace != rep.namespace {
+                        return false;
+                    }
+                    let forward = aa_selectors.iter().any(|s| selector_matches(s, &w.labels));
+                    let symmetric = w
+                        .anti_affinity_host_selectors
+                        .iter()
+                        .any(|rs| member_labels.iter().all(|ml| selector_matches(rs, ml)));
+                    forward || symmetric
+                });
+                !violates
             })
             .cloned()
             .collect();
@@ -846,6 +854,96 @@ mod tests {
             ],
         );
         assert_eq!(input.workloads.len(), 0);
+    }
+
+    fn running_anti(
+        ns: &str,
+        name: &str,
+        node: &str,
+        selectors: &[&[(&str, &str)]],
+    ) -> NormalizedWorkload {
+        let mut w = workload(ns, name, node, 1000, 2, 1, &[node]);
+        w.anti_affinity_host_selectors = selectors
+            .iter()
+            .map(|s| {
+                s.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            })
+            .collect();
+        w
+    }
+
+    #[test]
+    fn symmetry_excludes_node_even_without_pending_selectors() {
+        // running pod on n1 forbids app=trainer; pending pod is app=trainer with NO own
+        // anti-affinity -> symmetry must still exclude n1.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8), node("n2", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_anti("team", "peer", "n1", &[&[("app", "trainer")]]),
+                labeled_pending("team", "p", &["n1", "n2"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "p", None)]);
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n2".to_string()]);
+    }
+
+    #[test]
+    fn symmetry_not_excluded_on_partial_gang_match() {
+        // running forbids app=trainer; gang has one member app=trainer, one without -> not all.
+        let mut m0 = workload("team", "m0", "", 1000, 2, 1, &["n1"]);
+        m0.labels = [("app".to_string(), "trainer".to_string())].into();
+        let m1 = workload("team", "m1", "", 1000, 2, 1, &["n1"]); // no labels
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_anti("team", "peer", "n1", &[&[("app", "trainer")]]),
+                m0,
+                m1,
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
+        );
+        // not excluded -> gang stays feasible on n1
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
+    }
+
+    #[test]
+    fn symmetry_ignores_other_namespace() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_anti("other", "peer", "n1", &[&[("app", "trainer")]]),
+                labeled_pending("team", "p", &["n1"], &[("app", "trainer")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "p", None)]);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
+    }
+
+    #[test]
+    fn symmetry_no_exclusion_when_labels_dont_match() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                running_anti("team", "peer", "n1", &[&[("app", "trainer")]]),
+                labeled_pending("team", "p", &["n1"], &[("app", "other")]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "p", None)]);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
     }
 
     #[test]
