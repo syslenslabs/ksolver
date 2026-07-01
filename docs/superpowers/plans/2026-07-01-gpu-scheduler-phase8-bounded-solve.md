@@ -6,7 +6,7 @@
 
 **Why:** Phase-7 sped structured cases dramatically, but `baseline-50j/500j` still burn 60s proving optimality; in real shadow mode the cap is 600s. The scheduling *decision* (which pods placed where, constraints satisfied) is done in ms; the rest is optimality proof the scheduler doesn't need. Bounding the solve makes shadow responsive and matches the batch-window cadence.
 
-**Architecture:** `ShadowConfig` gains `solve_time_limit_secs` (env `KSOLVER_SHADOW_SOLVE_SECS`, default 10). `run_one_solve` passes it into `ScenarioConfig.solve_time_limit_secs` (Phase-6 knob), so CP-SAT returns the best incumbent (usually `Feasible` full-admission) within the limit. The decision trace already surfaces `solver_status` (Feasible vs Optimal) so operators can see when the limit truncated the search. No solver-behavior change beyond honoring the existing time-limit field; offline planner untouched (still 0 → 600s → proves optimal).
+**Architecture:** `ShadowConfig` gains `solve_time_limit_secs` (env `KSOLVER_SHADOW_SOLVE_SECS`, default 10, parsed via a pure testable helper). `run_one_solve` passes it into `ScenarioConfig.solve_time_limit_secs` (Phase-6 knob). Because the existing `solve_millis` is end-to-end (starts before collect/normalize — codex #1), add a **solver-only** `solve_core_millis` to `DecisionTrace`, timed strictly around `cpsat_rust::solve`, so operators can verify the cap. The trace surfaces `solver_status` (Feasible vs Optimal). No solver-behavior change beyond honoring the existing time-limit field; offline planner untouched (still 0 → 600s → proves optimal).
 
 **Tech Stack:** Rust; existing `scheduler::{config, shadow}`, `model::ScenarioConfig` (Phase-6 field).
 
@@ -16,27 +16,29 @@
 - `run_one_solve` currently: `ScenarioConfig { solver: "cp-sat-rust", partial_admission: true, ..Default::default() }` → `solve_time_limit_secs = 0` → 600s. Change to pass the shadow config's limit.
 - CP-SAT returns `Feasible` incumbents within the limit; `solve` only errors on no-incumbent (`UNKNOWN`)/infeasible. Under a short limit a very hard batch could return no incumbent → current code already catches the error and records `status="error"` with all pods unplaced (graceful — no crash). Keep that; optionally clarify the recorded status string. Do NOT change the solver's bail behavior (shared with planner).
 - Accepting `Feasible` (not `Optimal`) is correct for a scheduler: placement validity + full admission is what matters; cost/packing optimality is best-effort within the budget. The trace's `solver_status` discloses which was achieved.
-- Default 10s is ≤ the default batch window (10s) so a solve fits the cadence; fully configurable.
+- Cadence (codex #2): the loop sleeps `batch_window` then collects+builds+solves sequentially (no overlap), so effective cadence ≈ `batch_window + collect + solve`. Default solve 10s does NOT "fit within" the 10s window — document actual cadence honestly; the point is bounding the solve, not window-fitting.
 - Unit tests without the `rust-cp-sat` feature (config parsing + wiring). `cargo fmt` + clean clippy. Still binds nothing.
 
 ## File Structure
 
-- Modify `ksolver/src/scheduler/config.rs` — add `solve_time_limit_secs: i64` (env `KSOLVER_SHADOW_SOLVE_SECS`, default 10).
-- Modify `ksolver/src/scheduler/shadow.rs` — pass it into the scenario in `run_one_solve`.
-- Modify `README.md` — document the env var.
+- Modify `ksolver/src/scheduler/config.rs` — add `solve_time_limit_secs: i64` (env `KSOLVER_SHADOW_SOLVE_SECS`, default 10) via a pure `parse_solve_secs(Option<String>) -> i64` helper (testable).
+- Modify `ksolver/src/scheduler/trace.rs` — add `solve_core_millis: u64` (serde default) to `DecisionTrace`.
+- Modify `ksolver/src/scheduler/decision.rs` — thread `solve_core_millis` through `build_decision_trace`.
+- Modify `ksolver/src/scheduler/shadow.rs` — time `cpsat_rust::solve` separately; pass limit + solve_core_millis.
+- Modify `README.md` — document the env var + cadence note.
 
 ## Tasks
 
-### Task 1: ShadowConfig field
-- [ ] **Step 1:** Add `pub solve_time_limit_secs: i64,` to `ShadowConfig`. In `from_env`:
+### Task 1: ShadowConfig field + pure parse helper
+- [ ] **Step 1:** Add a pure helper + use it in `from_env`:
 ```rust
-            solve_time_limit_secs: std::env::var("KSOLVER_SHADOW_SOLVE_SECS")
-                .ok()
-                .and_then(|v| v.parse::<i64>().ok())
-                .filter(|v| *v > 0)
-                .unwrap_or(10),
+fn parse_solve_secs(v: Option<String>) -> i64 {
+    v.and_then(|s| s.parse::<i64>().ok()).filter(|n| *n > 0).unwrap_or(10)
+}
+// from_env: solve_time_limit_secs: parse_solve_secs(std::env::var("KSOLVER_SHADOW_SOLVE_SECS").ok()),
 ```
-- [ ] **Step 2: Failing test** in `config.rs`: a `ShadowConfig` literal test already exists — add a small test asserting `from_env` default is 10 when the env is unset (guard against other env by constructing via `from_env` in a cleared-env context is fragile; instead just assert the base test literal compiles and add a unit test on a helper if needed). Simpler: add `solve_time_limit_secs` to the existing test literals and assert a constructed value round-trips. Update ALL `ShadowConfig { .. }` literals (config.rs, pod_filter.rs, watch_state.rs tests) to include `solve_time_limit_secs: 10,`.
+Add `pub solve_time_limit_secs: i64,` to `ShadowConfig`.
+- [ ] **Step 2: Failing tests** (codex #4) on `parse_solve_secs`: `None -> 10`, `Some("5") -> 5`, `Some("0") -> 10`, `Some("x") -> 10`, `Some("-3") -> 10`. Update ALL `ShadowConfig { .. }` test literals (config.rs, pod_filter.rs, watch_state.rs) to include `solve_time_limit_secs: 10,`.
 - [ ] **Step 3: Build + tests.** `cargo test -p ksolver scheduler::` → green.
 - [ ] **Step 4: Commit.**
 ```bash
@@ -45,8 +47,9 @@ git add ksolver/src/scheduler/config.rs ksolver/src/scheduler/pod_filter.rs ksol
 git commit -m "feat(scheduler): configurable shadow solve time limit (default 10s)"
 ```
 
-### Task 2: Wire into run_one_solve
-- [ ] **Step 1:** In `shadow.rs run_one_solve`, change the scenario to:
+### Task 2: solver-only timer + wire limit
+- [ ] **Step 1: `solve_core_millis`.** Add `#[serde(default)] pub solve_core_millis: u64,` to `DecisionTrace` (trace.rs); add a param to `build_decision_trace` (decision.rs) and set the field; update the `DecisionTrace` literal in trace.rs tests + the `build_decision_trace` calls in decision.rs tests.
+- [ ] **Step 2:** In `shadow.rs run_one_solve`: set the scenario limit and time the solve alone:
 ```rust
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
@@ -54,8 +57,12 @@ git commit -m "feat(scheduler): configurable shadow solve time limit (default 10
         solve_time_limit_secs: cfg.solve_time_limit_secs,
         ..Default::default()
     };
+    let solve_start = Instant::now();
+    let (solution, status) = match cpsat_rust::solve(&input, &scenario) { ... };
+    let solve_core_millis = solve_start.elapsed().as_millis() as u64;
 ```
-- [ ] **Step 2: Build (feature) + full tests + clippy** → green.
+Pass `solve_core_millis` into `build_decision_trace`. Keep the existing end-to-end `solve_millis`.
+- [ ] **Step 3: Build (feature) + full tests + clippy** → green.
 - [ ] **Step 3: README** — add `KSOLVER_SHADOW_SOLVE_SECS` (default 10) to the shadow env var list, noting shadow accepts the best incumbent within this budget (status Feasible vs Optimal shown in traces).
 - [ ] **Step 4: Commit.**
 ```bash
@@ -65,8 +72,8 @@ git commit -m "feat(scheduler): shadow bounds solve to configurable limit, accep
 ```
 
 ### Task 3: Verify (cluster)
-- [ ] **Step 1:** On `kind-solver-lab`, run `KSOLVER_SHADOW_SOLVE_SECS=5 ... shadow` with a handful of pending GPU pods; confirm each trace's `solve_millis` is bounded near the limit (or less) and decisions are produced (placed/unplaced), nothing bound.
-- [ ] **Step 2:** Confirm default (unset) is ~10s via a trace `solve_millis` upper bound on a non-trivial pending set.
+- [ ] **Step 1:** On `kind-solver-lab`, run `KSOLVER_SHADOW_SOLVE_SECS=5 ... shadow` with a handful of pending GPU pods; confirm each trace's `solve_core_millis` ≤ ~5s (bounded), decisions produced, nothing bound.
+- [ ] **Step 2:** Confirm default (unset) bounds `solve_core_millis` near ~10s on a non-trivial pending set (vs the pre-Phase-8 600s default).
 
 ## Self-Review Notes
 - Reuses the Phase-6 `solve_time_limit_secs` knob; no solver change; planner untouched (its path leaves it 0 → 600s).
