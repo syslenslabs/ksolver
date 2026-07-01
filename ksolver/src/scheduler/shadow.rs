@@ -169,8 +169,12 @@ async fn run_one_solve(
     let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
     let normalized = normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
         .normalize(&snapshot);
-    // strict + keep-unschedulable(false = do not drop) so pending pods still appear as workloads.
-    let input = optimizer_input::build_input_strict(&normalized, false);
+    // Strict (ungrouped) so workload ids are "{ns}/{name}" and node names are real.
+    // ignore_unschedulable = true: drop infeasible workloads so an unrelated
+    // unschedulable pod cannot make the whole CP-SAT solve bail (it errors on any
+    // workload with no feasible nodes). Dropped ksolver pods are still reported
+    // honestly by the decision builder as "not submitted (filtered as unschedulable)".
+    let input = optimizer_input::build_input_strict(&normalized, true);
 
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
