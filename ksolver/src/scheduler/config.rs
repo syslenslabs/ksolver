@@ -15,6 +15,16 @@ pub struct ShadowConfig {
     pub gang_label_key: String,
     /// Pod label whose value "true" marks a gang as requiring single-node co-location.
     pub gang_colocate_label: String,
+    /// CP-SAT solve time limit (seconds) for shadow solves — accept the best incumbent
+    /// within this budget rather than proving optimality. Default 10.
+    pub solve_time_limit_secs: i64,
+}
+
+/// Parse `KSOLVER_SHADOW_SOLVE_SECS` (pure/testable): positive int or default 10.
+fn parse_solve_secs(v: Option<String>) -> i64 {
+    v.and_then(|s| s.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10)
 }
 
 fn csv_env(key: &str) -> Vec<String> {
@@ -55,6 +65,9 @@ impl ShadowConfig {
                 .unwrap_or_else(|_| "scheduling.x-k8s.io/pod-group".to_string()),
             gang_colocate_label: std::env::var("KSOLVER_SHADOW_COLOCATE_LABEL")
                 .unwrap_or_else(|_| "scheduling.x-k8s.io/gang-colocate".to_string()),
+            solve_time_limit_secs: parse_solve_secs(
+                std::env::var("KSOLVER_SHADOW_SOLVE_SECS").ok(),
+            ),
         }
     }
 
@@ -78,7 +91,17 @@ mod tests {
             http_addr: "127.0.0.1:8090".to_string(),
             gang_label_key: "scheduling.x-k8s.io/pod-group".to_string(),
             gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
+            solve_time_limit_secs: 10,
         }
+    }
+
+    #[test]
+    fn parse_solve_secs_defaults_and_overrides() {
+        assert_eq!(parse_solve_secs(None), 10);
+        assert_eq!(parse_solve_secs(Some("5".to_string())), 5);
+        assert_eq!(parse_solve_secs(Some("0".to_string())), 10);
+        assert_eq!(parse_solve_secs(Some("x".to_string())), 10);
+        assert_eq!(parse_solve_secs(Some("-3".to_string())), 10);
     }
 
     #[test]
