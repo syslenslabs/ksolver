@@ -317,6 +317,9 @@ mod tests {
             gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
             solve_time_limit_secs: 10,
             namespace_gpu_quotas: std::collections::BTreeMap::new(),
+            enable_real_binding: false,
+            real_binding_dry_run: false,
+            max_binds_per_pass: 10,
         }
     }
 

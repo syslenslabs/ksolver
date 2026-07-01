@@ -25,6 +25,14 @@ pub struct ShadowConfig {
     /// Per-namespace GPU quotas (namespace -> max GPUs). Namespaces absent from the map
     /// are unconstrained. Enforced as a hard cap on admitted pods in that namespace.
     pub namespace_gpu_quotas: BTreeMap<String, i64>,
+    /// PHASE 3 (real binding): when true, the scheduler ACTUALLY POSTs pod→node bindings for
+    /// `readiness: ready` decisions (mutates the cluster). Default FALSE — shadow stays read-only.
+    pub enable_real_binding: bool,
+    /// When real binding is enabled, send the binding with server-side `dryRun=All` (the apiserver
+    /// validates but does NOT persist). A safe intermediate before live binding. Default false.
+    pub real_binding_dry_run: bool,
+    /// Upper bound on bindings applied per solve pass (throttle). Default 10.
+    pub max_binds_per_pass: usize,
 }
 
 /// Parse `KSOLVER_SHADOW_QUOTAS="ns=cap,ns2=cap2"` (pure/testable). Entries with a
@@ -49,6 +57,21 @@ fn parse_quotas(v: Option<String>) -> BTreeMap<String, i64> {
 /// Parse `KSOLVER_SHADOW_SOLVE_SECS` (pure/testable): positive int or default 10.
 fn parse_solve_secs(v: Option<String>) -> i64 {
     v.and_then(|s| s.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10)
+}
+
+/// Parse a boolean env value (pure/testable): only "true"/"1" (case-insensitive) ⇒ true.
+fn parse_bool(v: Option<String>) -> bool {
+    matches!(
+        v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("true") | Some("1")
+    )
+}
+
+/// Parse `max_binds_per_pass` (pure/testable): positive int or default 10.
+fn parse_max_binds(v: Option<String>) -> usize {
+    v.and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(10)
 }
@@ -100,6 +123,9 @@ impl ShadowConfig {
                 std::env::var("KSOLVER_SHADOW_SOLVE_SECS").ok(),
             ),
             namespace_gpu_quotas: parse_quotas(std::env::var("KSOLVER_SHADOW_QUOTAS").ok()),
+            enable_real_binding: parse_bool(std::env::var("KSOLVER_ENABLE_REAL_BINDING").ok()),
+            real_binding_dry_run: parse_bool(std::env::var("KSOLVER_REAL_BINDING_DRY_RUN").ok()),
+            max_binds_per_pass: parse_max_binds(std::env::var("KSOLVER_MAX_BINDS_PER_PASS").ok()),
         }
     }
 
@@ -136,7 +162,28 @@ mod tests {
             gang_colocate_label: "scheduling.x-k8s.io/gang-colocate".to_string(),
             solve_time_limit_secs: 10,
             namespace_gpu_quotas: BTreeMap::new(),
+            enable_real_binding: false,
+            real_binding_dry_run: false,
+            max_binds_per_pass: 10,
         }
+    }
+
+    #[test]
+    fn parse_bool_only_true_or_one() {
+        assert!(parse_bool(Some("true".to_string())));
+        assert!(parse_bool(Some("TRUE".to_string())));
+        assert!(parse_bool(Some("1".to_string())));
+        assert!(!parse_bool(Some("false".to_string())));
+        assert!(!parse_bool(Some("yes".to_string())));
+        assert!(!parse_bool(None));
+    }
+
+    #[test]
+    fn parse_max_binds_defaults_and_overrides() {
+        assert_eq!(parse_max_binds(None), 10);
+        assert_eq!(parse_max_binds(Some("0".to_string())), 10);
+        assert_eq!(parse_max_binds(Some("3".to_string())), 3);
+        assert_eq!(parse_max_binds(Some("nope".to_string())), 10);
     }
 
     #[test]
