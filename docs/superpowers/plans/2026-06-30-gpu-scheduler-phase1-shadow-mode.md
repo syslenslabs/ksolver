@@ -1,147 +1,144 @@
-# GPU Scheduler — Phase 1: Shadow Mode — Implementation Plan
+# GPU Scheduler — Phase 1: Shadow Mode — Implementation Plan (v2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a shadow-mode GPU scheduler that watches pending `schedulerName: ksolver` GPU pods, computes where they *would* be placed via the existing CP-SAT call path, records explainable decision traces, and **binds nothing** — zero production risk.
+**Goal:** Ship a shadow-mode GPU scheduler that watches pending `schedulerName: ksolver` GPU pods, computes where they *would* be placed via the existing CP-SAT call path, records explainable decision traces (with reasons), and **binds nothing** — zero production risk.
 
-**Architecture:** A new `scheduler` module in the existing `ksolver` crate. Logic is split into pure, unit-testable units (pod classification, decision-trace construction, config) and thin I/O wrappers (a kube watch loop + snapshot collection that reuse the existing `collector`/`normalizer`/`optimizer_input`/`cpsat_rust` pipeline). A new `shadow` subcommand runs the loop and serves traces + metrics over HTTP so the existing simulator/UI can display them.
+**Architecture:** A new `scheduler` module in the existing `ksolver` crate. All correctness-bearing logic is in pure, unit-testable functions (pod classification, watch-event reduction, decision-trace construction, config). Thin I/O wrappers (a self-healing kube watch + snapshot collection) reuse the existing `collector`/`normalizer`/`optimizer_input`/`cpsat_rust` pipeline. A `shadow` subcommand runs the loop and serves traces + metrics + health over HTTP for the simulator/UI.
 
 **Tech Stack:** Rust, tokio, kube-rs 0.97 (`kube::runtime::watcher`), k8s-openapi v1_31 (`corev1::Pod`), axum 0.7, prometheus, OR-Tools CP-SAT via the `cp_sat` crate (behind the `rust-cp-sat` feature).
 
 ## Global Constraints
 
 - Crate: `ksolver` (single crate; add a `scheduler` module, do not create a new crate).
-- Kubernetes client: reuse `kube::Client` construction — mirror `collector::build_client` / `KubeCollector::new(cluster_name, kubeconfig)`; do not hand-roll a new client builder.
+- Kubernetes client: call the existing `collector::build_client(&kubeconfig)` (it is `pub(crate)`, so the same-crate `scheduler` module may call it). Do NOT add a client accessor or hand-roll a builder.
 - k8s API version pin: `k8s-openapi` feature `v1_31`. Use `k8s_openapi::api::core::v1 as corev1`.
-- The CP-SAT solver (`cpsat_rust::solve`) requires the `rust-cp-sat` cargo feature (`--features rust-cp-sat`) and OR-Tools at build time. **All unit tests in this plan must NOT depend on that feature** — they test pure functions only. The watch loop calls `cpsat_rust::solve` exactly as `service::Analyzer` does today.
-- Shadow mode MUST NOT call the Binding API or Eviction API. No mutation of cluster state whatsoever.
-- Existing style: `tracing` for logs (`info!`/`warn!`/`debug!`), `anyhow::Result` for fallible I/O, `serde` derive on data types. Match surrounding code.
-- Solver name string used by the existing pipeline: `"cp-sat-rust"` (see `main.rs` / `ScenarioConfig.solver`).
-- Run `cargo fmt` before every commit; run `cargo clippy --all-targets` and keep it clean.
+- The CP-SAT solver (`cpsat_rust::solve`) requires the `rust-cp-sat` cargo feature and OR-Tools at build time. **Every unit test in this plan must pass WITHOUT that feature** (they test pure functions only). The watch loop calls `cpsat_rust::solve(&input, &scenario)` exactly as `service::Analyzer` does.
+- **Shadow mode MUST NOT mutate the cluster.** No Binding API, no Eviction API, no `create`/`replace`/`patch`/`delete`/`evict`. Task 9 adds a source-level guard test enforcing this.
+- Verified API facts (do not re-guess these):
+  - Pricing: `pricing::load_pricing_catalog(path: &str) -> anyhow::Result<PricingCatalog>`; `PricingCatalog` derives `Default`. Use `load_pricing_catalog("").unwrap_or_default()`.
+  - Normalizer: `normalizer::Normalizer::new(pricing, normalizer::Options::default()).normalize(&snapshot)`.
+  - Input: `optimizer_input::build_input_strict(&normalized, false)` — **strict (ungrouped)** so workload ids are `"{namespace}/{name}"` and node names are real; `false` = do NOT drop unschedulable workloads (we must still emit a trace decision for them).
+  - Solve: `cpsat_rust::solve(&input, &scenario) -> anyhow::Result<(OptimizationSolution, SolverInfo)>`.
+  - `OptimizationSolution.assignments: HashMap<String,String>` (workload id → node name). `SolverInfo.status: String` (use directly, do not `{:?}` it).
+  - `OptimizationInput.workloads: Vec<OptimizationWorkload>` where `OptimizationWorkload.id: String == "{namespace}/{name}"` in strict mode.
+  - Metrics: crate registry is `metrics::REGISTRY` (a `prometheus::Registry`). `register_metrics()` currently uses `.expect(...)` and is **not idempotent** — Task 4 fixes this.
+  - Watcher: `kube::runtime::watcher::Event` variants are `Init`, `InitApply(K)`, `InitDone`, `Apply(K)`, `Delete(K)`. Objects seen via `Apply` but absent by `InitDone` must be treated as deleted.
+- Run `cargo fmt` before every commit; keep `cargo clippy` clean.
+- Scenario solver string: `"cp-sat-rust"`.
 
 ---
 
 ## File Structure
 
-- Create `ksolver/src/scheduler/mod.rs` — module root; re-exports `config`, `pod_filter`, `trace`, `shadow`.
+- Create `ksolver/src/scheduler/mod.rs` — module root + source-boundary guard test.
 - Create `ksolver/src/scheduler/config.rs` — `ShadowConfig` + env parsing.
-- Create `ksolver/src/scheduler/pod_filter.rs` — pure pod classification + GPU request extraction.
-- Create `ksolver/src/scheduler/trace.rs` — `DecisionTrace`/`PodDecision` types + in-memory `TraceStore`.
-- Create `ksolver/src/scheduler/shadow.rs` — watch loop, batch window, snapshot→solve call path, pure `build_decision_trace`, metrics, HTTP router.
+- Create `ksolver/src/scheduler/pod_filter.rs` — pure pod classification + effective GPU request.
+- Create `ksolver/src/scheduler/watch_state.rs` — pure watch-event reducer over the observed-pod map.
+- Create `ksolver/src/scheduler/trace.rs` — trace types (with reasons) + bounded `TraceStore`.
+- Create `ksolver/src/scheduler/decision.rs` — pure `build_decision_trace` mapping solver output → trace.
+- Create `ksolver/src/scheduler/shadow.rs` — I/O: self-healing watch, sequential solve loop, HTTP (traces/metrics/health).
 - Modify `ksolver/src/lib.rs` — add `pub mod scheduler;`.
-- Modify `ksolver/src/metrics.rs` — register shadow metrics.
+- Modify `ksolver/src/metrics.rs` — idempotent registration + shadow metrics.
 - Modify `ksolver/src/main.rs` — add the `shadow` subcommand.
-- Modify `ksolver/README.md` — document the `shadow` subcommand.
+- Modify `ksolver/README.md` — document `shadow` + read-only RBAC.
 
 ---
 
-## Task 1: Scheduler module scaffold + config
+## Task 1: Module scaffold + config
 
 **Files:**
-- Create: `ksolver/src/scheduler/mod.rs`
-- Create: `ksolver/src/scheduler/config.rs`
+- Create: `ksolver/src/scheduler/mod.rs`, `ksolver/src/scheduler/config.rs`
 - Modify: `ksolver/src/lib.rs` (add `pub mod scheduler;` after `pub mod pricing;`)
-- Test: inline `#[cfg(test)]` module in `config.rs`
+- Test: inline `#[cfg(test)]` in `config.rs`
 
 **Interfaces:**
 - Produces:
-  - `scheduler::config::ShadowConfig { scheduler_name: String, batch_window: std::time::Duration, namespace_allowlist: Vec<String>, gpu_resource_prefixes: Vec<String>, cluster_name: String, kubeconfig: String, http_addr: String }`
+  - `config::ShadowConfig { scheduler_name: String, batch_window: Duration, namespace_allowlist: Vec<String>, gpu_resource_names: Vec<String>, cluster_name: String, kubeconfig: String, http_addr: String }`
   - `ShadowConfig::from_env() -> ShadowConfig`
-  - `ShadowConfig::namespace_in_scope(&self, ns: &str) -> bool` (empty allowlist ⇒ all namespaces in scope)
+  - `ShadowConfig::namespace_in_scope(&self, ns: &str) -> bool`
 
-- [ ] **Step 1: Add the module declaration to lib.rs**
-
-Modify `ksolver/src/lib.rs`, adding this line in alphabetical position (after `pub mod pricing;`):
-
+- [ ] **Step 1: Add module declaration.** In `ksolver/src/lib.rs` add (alphabetical, after `pub mod pricing;`):
 ```rust
 pub mod scheduler;
 ```
 
-- [ ] **Step 2: Create the module root**
-
-Create `ksolver/src/scheduler/mod.rs`:
-
+- [ ] **Step 2: Create `ksolver/src/scheduler/mod.rs`** (guard test added in Task 9; declare only files that exist as you go — add each `pub mod` line when its file is created):
 ```rust
-//! Online GPU scheduler components. Phase 1 provides shadow mode only:
-//! it observes and computes placement decisions but never binds pods.
+//! Online GPU scheduler components. Phase 1 = shadow mode only:
+//! observe and compute placement decisions; never bind pods.
 
 pub mod config;
+pub mod decision;
 pub mod pod_filter;
 pub mod shadow;
 pub mod trace;
+pub mod watch_state;
 ```
+If implementing strictly in order, temporarily comment out `pub mod` lines whose files don't exist yet and restore each as its task lands.
 
-Note: `pod_filter`, `shadow`, and `trace` files are created in later tasks. If you are implementing tasks strictly in order, temporarily comment out the three not-yet-created lines and restore them as each file lands. (They are listed here so the module layout is unambiguous.)
-
-- [ ] **Step 3: Write the failing test for config parsing**
-
-Create `ksolver/src/scheduler/config.rs` with only the test first:
-
+- [ ] **Step 3: Write the failing config tests.** Create `ksolver/src/scheduler/config.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn namespace_allowlist_empty_allows_all() {
-        let cfg = ShadowConfig {
+    fn base() -> ShadowConfig {
+        ShadowConfig {
             scheduler_name: "ksolver".to_string(),
             batch_window: std::time::Duration::from_secs(10),
             namespace_allowlist: vec![],
-            gpu_resource_prefixes: vec!["nvidia.com/gpu".to_string()],
+            gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
-        };
-        assert!(cfg.namespace_in_scope("anything"));
+        }
     }
 
     #[test]
-    fn namespace_allowlist_restricts_when_set() {
-        let cfg = ShadowConfig {
-            scheduler_name: "ksolver".to_string(),
-            batch_window: std::time::Duration::from_secs(10),
-            namespace_allowlist: vec!["team-a".to_string(), "team-b".to_string()],
-            gpu_resource_prefixes: vec!["nvidia.com/gpu".to_string()],
-            cluster_name: "default".to_string(),
-            kubeconfig: String::new(),
-            http_addr: "127.0.0.1:8090".to_string(),
-        };
+    fn empty_allowlist_allows_all() {
+        assert!(base().namespace_in_scope("anything"));
+    }
+
+    #[test]
+    fn allowlist_restricts_when_set() {
+        let mut cfg = base();
+        cfg.namespace_allowlist = vec!["team-a".to_string()];
         assert!(cfg.namespace_in_scope("team-a"));
         assert!(!cfg.namespace_in_scope("team-z"));
     }
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it fails to compile**
+- [ ] **Step 4: Run to verify failure.** `cargo test -p ksolver scheduler::config` → FAIL (`ShadowConfig` not found).
 
-Run: `cargo test -p ksolver scheduler::config -- --nocapture`
-Expected: FAIL — `cannot find type ShadowConfig`.
-
-- [ ] **Step 5: Implement the config type above the test module**
-
-Prepend to `ksolver/src/scheduler/config.rs` (before the `#[cfg(test)]` block):
-
+- [ ] **Step 5: Implement above the test module** in `config.rs`:
 ```rust
 use std::time::Duration;
 
-/// Configuration for the shadow-mode scheduler, sourced from environment variables.
+/// Shadow-mode scheduler configuration, sourced from environment variables.
 #[derive(Debug, Clone)]
 pub struct ShadowConfig {
-    /// Only pods with `spec.schedulerName` equal to this are considered in scope.
     pub scheduler_name: String,
-    /// How long to accumulate observed pending pods before running a solve.
     pub batch_window: Duration,
-    /// If non-empty, only these namespaces are in scope.
     pub namespace_allowlist: Vec<String>,
-    /// Resource-name prefixes that mark a container as GPU-consuming.
-    pub gpu_resource_prefixes: Vec<String>,
-    /// Cluster name passed through to the collector.
+    /// Exact resource names counted as GPUs (e.g. "nvidia.com/gpu").
+    pub gpu_resource_names: Vec<String>,
     pub cluster_name: String,
-    /// Path to kubeconfig; empty means in-cluster / default.
     pub kubeconfig: String,
-    /// Address the shadow HTTP server (traces + metrics) binds to.
     pub http_addr: String,
+}
+
+fn csv_env(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl ShadowConfig {
@@ -149,31 +146,18 @@ impl ShadowConfig {
         let batch_secs = std::env::var("KSOLVER_SHADOW_BATCH_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
             .unwrap_or(10);
-        let namespace_allowlist = std::env::var("KSOLVER_SHADOW_NAMESPACES")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let gpu_resource_prefixes = std::env::var("KSOLVER_SHADOW_GPU_PREFIXES")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["nvidia.com/gpu".to_string()]);
+        let mut gpu_resource_names = csv_env("KSOLVER_SHADOW_GPU_RESOURCES");
+        if gpu_resource_names.is_empty() {
+            gpu_resource_names = vec!["nvidia.com/gpu".to_string()];
+        }
         Self {
             scheduler_name: std::env::var("KSOLVER_SHADOW_SCHEDULER_NAME")
                 .unwrap_or_else(|_| "ksolver".to_string()),
             batch_window: Duration::from_secs(batch_secs),
-            namespace_allowlist,
-            gpu_resource_prefixes,
+            namespace_allowlist: csv_env("KSOLVER_SHADOW_NAMESPACES"),
+            gpu_resource_names,
             cluster_name: std::env::var("KSOLVER_CLUSTER_NAME")
                 .unwrap_or_else(|_| "default".to_string()),
             kubeconfig: std::env::var("KUBECONFIG").unwrap_or_default(),
@@ -183,44 +167,34 @@ impl ShadowConfig {
     }
 
     pub fn namespace_in_scope(&self, ns: &str) -> bool {
-        self.namespace_allowlist.is_empty()
-            || self.namespace_allowlist.iter().any(|n| n == ns)
+        self.namespace_allowlist.is_empty() || self.namespace_allowlist.iter().any(|n| n == ns)
     }
 }
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [ ] **Step 6: Run to verify pass.** `cargo test -p ksolver scheduler::config` → PASS (2).
 
-Run: `cargo test -p ksolver scheduler::config`
-Expected: PASS (2 tests).
-
-- [ ] **Step 7: Commit**
-
+- [ ] **Step 7: Commit.**
 ```bash
 cargo fmt
 git add ksolver/src/lib.rs ksolver/src/scheduler/mod.rs ksolver/src/scheduler/config.rs
-git commit -m "feat(scheduler): add shadow module scaffold and config"
+git commit -m "feat(scheduler): shadow module scaffold and config"
 ```
 
 ---
 
-## Task 2: Pure pod classification + GPU request extraction
+## Task 2: Pure pod classification + effective GPU request
 
-**Files:**
-- Create: `ksolver/src/scheduler/pod_filter.rs`
-- Test: inline `#[cfg(test)]` module in `pod_filter.rs`
+**Files:** Create `ksolver/src/scheduler/pod_filter.rs`; inline tests.
 
 **Interfaces:**
-- Consumes: `scheduler::config::ShadowConfig`.
+- Consumes: `config::ShadowConfig`.
 - Produces:
-  - `pub struct PendingGpuPod { pub namespace: String, pub name: String, pub gpu_request: i64 }`
-  - `pub fn gpu_request(pod: &corev1::Pod, gpu_prefixes: &[String]) -> i64`
-  - `pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod>` — returns `Some` iff the pod is: in an in-scope namespace, has `spec.schedulerName == cfg.scheduler_name`, is unbound (`spec.nodeName` empty/none), is Pending (or has no phase yet), not being deleted, and requests ≥1 GPU.
+  - `pub struct PendingGpuPod { pub uid: String, pub namespace: String, pub name: String, pub gpu_request: i64 }`
+  - `pub fn effective_gpu_request(pod: &corev1::Pod, gpu_names: &[String]) -> i64` — Kubernetes effective request: `max(sum over normal containers, max over init containers)`, using `requests` and falling back to `limits` when a container omits requests. Only resource names in `gpu_names` (exact match) count.
+  - `pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod>` — `Some` iff in-scope namespace, `spec.schedulerName == cfg.scheduler_name`, unbound (`spec.nodeName` empty), phase Pending or unset, not deleting, and effective GPU ≥ 1.
 
-- [ ] **Step 1: Write the failing tests**
-
-Create `ksolver/src/scheduler/pod_filter.rs`:
-
+- [ ] **Step 1: Failing tests.** Create `ksolver/src/scheduler/pod_filter.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
@@ -228,6 +202,7 @@ mod tests {
     use crate::scheduler::config::ShadowConfig;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -236,144 +211,160 @@ mod tests {
             scheduler_name: "ksolver".to_string(),
             batch_window: Duration::from_secs(10),
             namespace_allowlist: vec![],
-            gpu_resource_prefixes: vec!["nvidia.com/gpu".to_string()],
+            gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
             cluster_name: "default".to_string(),
             kubeconfig: String::new(),
             http_addr: "127.0.0.1:8090".to_string(),
         }
     }
 
-    fn gpu_pod(scheduler: &str, node: Option<&str>, phase: &str, gpus: &str) -> corev1::Pod {
-        let mut requests = BTreeMap::new();
-        requests.insert("nvidia.com/gpu".to_string(), Quantity(gpus.to_string()));
+    fn q(map: &[(&str, &str)]) -> BTreeMap<String, Quantity> {
+        map.iter()
+            .map(|(k, v)| (k.to_string(), Quantity(v.to_string())))
+            .collect()
+    }
+
+    fn container(name: &str, requests: Option<BTreeMap<String, Quantity>>, limits: Option<BTreeMap<String, Quantity>>) -> corev1::Container {
+        corev1::Container {
+            name: name.to_string(),
+            resources: Some(corev1::ResourceRequirements { requests, limits, ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn pod(scheduler: &str, node: Option<&str>, phase: Option<&str>, containers: Vec<corev1::Container>, init: Vec<corev1::Container>) -> corev1::Pod {
         corev1::Pod {
-            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            metadata: ObjectMeta {
                 name: Some("job-0".to_string()),
                 namespace: Some("team-a".to_string()),
+                uid: Some("uid-123".to_string()),
                 ..Default::default()
             },
             spec: Some(corev1::PodSpec {
                 scheduler_name: Some(scheduler.to_string()),
                 node_name: node.map(|n| n.to_string()),
-                containers: vec![corev1::Container {
-                    name: "main".to_string(),
-                    resources: Some(corev1::ResourceRequirements {
-                        requests: Some(requests),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
+                containers,
+                init_containers: if init.is_empty() { None } else { Some(init) },
                 ..Default::default()
             }),
-            status: Some(corev1::PodStatus {
-                phase: Some(phase.to_string()),
-                ..Default::default()
-            }),
+            status: Some(corev1::PodStatus { phase: phase.map(|p| p.to_string()), ..Default::default() }),
         }
     }
 
     #[test]
-    fn classifies_pending_ksolver_gpu_pod() {
-        let pod = gpu_pod("ksolver", None, "Pending", "4");
-        let got = classify(&pod, &cfg()).expect("should classify");
-        assert_eq!(got.namespace, "team-a");
-        assert_eq!(got.name, "job-0");
+    fn classifies_pending_gpu_pod_with_uid() {
+        let p = pod("ksolver", None, Some("Pending"), vec![container("main", Some(q(&[("nvidia.com/gpu", "4")])), None)], vec![]);
+        let got = classify(&p, &cfg()).expect("classify");
+        assert_eq!(got.uid, "uid-123");
         assert_eq!(got.gpu_request, 4);
     }
 
     #[test]
     fn rejects_other_scheduler() {
-        let pod = gpu_pod("default-scheduler", None, "Pending", "4");
-        assert!(classify(&pod, &cfg()).is_none());
+        let p = pod("default-scheduler", None, Some("Pending"), vec![container("main", Some(q(&[("nvidia.com/gpu", "4")])), None)], vec![]);
+        assert!(classify(&p, &cfg()).is_none());
     }
 
     #[test]
-    fn rejects_already_bound_pod() {
-        let pod = gpu_pod("ksolver", Some("node-1"), "Running", "4");
-        assert!(classify(&pod, &cfg()).is_none());
+    fn rejects_bound_pod() {
+        let p = pod("ksolver", Some("node-1"), Some("Running"), vec![container("main", Some(q(&[("nvidia.com/gpu", "4")])), None)], vec![]);
+        assert!(classify(&p, &cfg()).is_none());
     }
 
     #[test]
-    fn rejects_pod_without_gpu() {
-        let pod = gpu_pod("ksolver", None, "Pending", "0");
-        assert!(classify(&pod, &cfg()).is_none());
+    fn rejects_zero_gpu() {
+        let p = pod("ksolver", None, Some("Pending"), vec![container("main", Some(q(&[("cpu", "2")])), None)], vec![]);
+        assert!(classify(&p, &cfg()).is_none());
     }
 
     #[test]
-    fn sums_gpu_across_containers_and_prefixes() {
-        let mut pod = gpu_pod("ksolver", None, "Pending", "1");
-        let mut req2 = std::collections::BTreeMap::new();
-        req2.insert("nvidia.com/gpu".to_string(), Quantity("2".to_string()));
-        if let Some(spec) = pod.spec.as_mut() {
-            spec.containers.push(corev1::Container {
-                name: "sidecar".to_string(),
-                resources: Some(corev1::ResourceRequirements {
-                    requests: Some(req2),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
-        assert_eq!(gpu_request(&pod, &cfg().gpu_resource_prefixes), 3);
+    fn sums_normal_containers() {
+        let p = pod("ksolver", None, Some("Pending"),
+            vec![container("a", Some(q(&[("nvidia.com/gpu", "1")])), None),
+                 container("b", Some(q(&[("nvidia.com/gpu", "2")])), None)], vec![]);
+        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 3);
+    }
+
+    #[test]
+    fn init_container_is_max_not_added() {
+        // normal sum = 2, init max = 5 -> effective = max(2,5) = 5
+        let p = pod("ksolver", None, Some("Pending"),
+            vec![container("a", Some(q(&[("nvidia.com/gpu", "1")])), None),
+                 container("b", Some(q(&[("nvidia.com/gpu", "1")])), None)],
+            vec![container("init", Some(q(&[("nvidia.com/gpu", "5")])), None)]);
+        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 5);
+    }
+
+    #[test]
+    fn falls_back_to_limits_when_no_requests() {
+        let p = pod("ksolver", None, Some("Pending"),
+            vec![container("a", None, Some(q(&[("nvidia.com/gpu", "2")])))], vec![]);
+        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 2);
+    }
+
+    #[test]
+    fn exact_name_match_ignores_gpu_memory() {
+        let p = pod("ksolver", None, Some("Pending"),
+            vec![container("a", Some(q(&[("nvidia.com/gpu-memory", "8")])), None)], vec![]);
+        assert_eq!(effective_gpu_request(&p, &cfg().gpu_resource_names), 0);
     }
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run to verify failure.** `cargo test -p ksolver scheduler::pod_filter` → FAIL.
 
-Run: `cargo test -p ksolver scheduler::pod_filter`
-Expected: FAIL — `cannot find function classify` / `PendingGpuPod`.
-
-- [ ] **Step 3: Implement the classifier**
-
-Prepend to `ksolver/src/scheduler/pod_filter.rs`:
-
+- [ ] **Step 3: Implement.** Prepend to `pod_filter.rs`:
 ```rust
 use crate::scheduler::config::ShadowConfig;
 use k8s_openapi::api::core::v1 as corev1;
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 
-/// A pending pod that requests GPUs and is in scope for the shadow scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGpuPod {
+    pub uid: String,
     pub namespace: String,
     pub name: String,
     pub gpu_request: i64,
 }
 
-/// Parse a Kubernetes quantity string as an integer GPU count.
-/// GPU counts are always whole numbers; fractional/suffixed values floor to 0 here
-/// (fractional GPUs are a later phase and out of scope for shadow mode).
+/// GPU counts are whole numbers; anything non-integer floors to 0 (fractional GPUs
+/// are a later phase). Suffix forms like "1" only.
 fn parse_gpu_quantity(raw: &str) -> i64 {
     raw.trim().parse::<i64>().unwrap_or(0)
 }
 
-/// Total GPU count requested across all containers, for any resource whose name
-/// starts with one of the configured prefixes (e.g. "nvidia.com/gpu").
-pub fn gpu_request(pod: &corev1::Pod, gpu_prefixes: &[String]) -> i64 {
-    let Some(spec) = pod.spec.as_ref() else {
-        return 0;
-    };
+/// Sum of GPU resources named in `gpu_names` within one container's effective map
+/// (requests, falling back to limits when requests is absent).
+fn container_gpu(container: &corev1::Container, gpu_names: &[String]) -> i64 {
+    let Some(res) = container.resources.as_ref() else { return 0 };
+    let map = res.requests.as_ref().or(res.limits.as_ref());
+    let Some(map) = map else { return 0 };
     let mut total = 0i64;
-    for container in &spec.containers {
-        let Some(resources) = container.resources.as_ref() else {
-            continue;
-        };
-        if let Some(requests) = resources.requests.as_ref() {
-            for (name, qty) in requests {
-                if gpu_prefixes.iter().any(|p| name.starts_with(p)) {
-                    total += parse_gpu_quantity(&qty.0);
-                }
-            }
+    for (name, qty) in map {
+        if gpu_names.iter().any(|g| g == name) {
+            total += parse_gpu_quantity(&qty.0);
         }
     }
     total
 }
 
-/// Return `Some(PendingGpuPod)` iff the pod is an in-scope, pending, GPU-requesting
-/// pod owned by our scheduler. Returns `None` otherwise.
+/// Kubernetes effective resource request: max(sum of normal containers,
+/// max over init containers).
+pub fn effective_gpu_request(pod: &corev1::Pod, gpu_names: &[String]) -> i64 {
+    let Some(spec) = pod.spec.as_ref() else { return 0 };
+    let normal_sum: i64 = spec.containers.iter().map(|c| container_gpu(c, gpu_names)).sum();
+    let init_max: i64 = spec
+        .init_containers
+        .as_ref()
+        .map(|inits| inits.iter().map(|c| container_gpu(c, gpu_names)).max().unwrap_or(0))
+        .unwrap_or(0);
+    normal_sum.max(init_max)
+}
+
 pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> {
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
     let name = pod.metadata.name.clone().unwrap_or_default();
+    let uid = pod.metadata.uid.clone().unwrap_or_default();
     if !cfg.namespace_in_scope(&namespace) {
         return None;
     }
@@ -384,63 +375,325 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     if spec.scheduler_name.as_deref() != Some(cfg.scheduler_name.as_str()) {
         return None;
     }
-    // Unbound: no node assigned yet.
     if spec.node_name.as_deref().map(|n| !n.is_empty()).unwrap_or(false) {
         return None;
     }
-    // Pending or not-yet-phased.
-    if let Some(status) = pod.status.as_ref() {
-        if let Some(phase) = status.phase.as_deref() {
-            if phase != "Pending" {
-                return None;
-            }
+    if let Some(phase) = pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
+        if phase != "Pending" {
+            return None;
         }
     }
-    let gpu = gpu_request(pod, &cfg.gpu_resource_prefixes);
+    let gpu = effective_gpu_request(pod, &cfg.gpu_resource_names);
     if gpu < 1 {
         return None;
     }
-    Some(PendingGpuPod {
-        namespace,
-        name,
-        gpu_request: gpu,
-    })
+    Some(PendingGpuPod { uid, namespace, name, gpu_request: gpu })
 }
+
+// silence unused import when tests aren't compiled
+#[allow(unused_imports)]
+use Quantity as _KeepQuantityInScope;
 ```
+(If clippy flags the `_KeepQuantityInScope` shim as unnecessary, delete it and the `Quantity` import — it's only there in case a future edit needs the type. Remove if unused.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Run to verify pass.** `cargo test -p ksolver scheduler::pod_filter` → PASS (8).
 
-Run: `cargo test -p ksolver scheduler::pod_filter`
-Expected: PASS (5 tests).
-
-- [ ] **Step 5: Restore the `pod_filter` line in `mod.rs` if you commented it out in Task 1, then commit**
-
+- [ ] **Step 5: Commit.**
 ```bash
 cargo fmt
 git add ksolver/src/scheduler/pod_filter.rs ksolver/src/scheduler/mod.rs
-git commit -m "feat(scheduler): pure pod classification and GPU request extraction"
+git commit -m "feat(scheduler): pure pod classification with k8s-accurate GPU request"
 ```
 
 ---
 
-## Task 3: Decision trace types + in-memory trace store
+## Task 3: Watch-event reducer (pure)
 
-**Files:**
-- Create: `ksolver/src/scheduler/trace.rs`
-- Test: inline `#[cfg(test)]` module in `trace.rs`
+Correctly maintains the observed-pod map across the watcher's Init/InitApply/InitDone/Apply/Delete lifecycle, including relist deletion semantics. Pure and fully unit-tested — no Kubernetes needed.
+
+**Files:** Create `ksolver/src/scheduler/watch_state.rs`; inline tests.
 
 **Interfaces:**
-- Consumes: nothing from other tasks.
+- Consumes: `config::ShadowConfig`, `pod_filter::{classify, PendingGpuPod}`, `k8s_openapi::api::core::v1::Pod`, `kube::runtime::watcher::Event`.
 - Produces:
-  - `pub enum PodPlacement { Placed { node: String }, Unplaced }` (serde-tagged)
-  - `pub struct PodDecision { pub namespace: String, pub name: String, pub gpu_request: i64, pub placement: PodPlacement }`
-  - `pub struct DecisionTrace { pub sequence: u64, pub observed_pods: usize, pub decisions: Vec<PodDecision>, pub solver_status: String, pub solve_millis: u64, pub note: String }`
-  - `pub struct TraceStore` with `new(capacity: usize)`, `push(&self, trace: DecisionTrace)`, `recent(&self) -> Vec<DecisionTrace>`, `next_sequence(&self) -> u64`.
+  - `pub struct WatchState { observed: BTreeMap<String, PendingGpuPod>, init_buffer: Option<BTreeMap<String, PendingGpuPod>> }`
+  - `WatchState::new()`, `WatchState::apply(&mut self, event: &Event<corev1::Pod>, cfg: &ShadowConfig)`, `WatchState::snapshot(&self) -> Vec<PendingGpuPod>` (values, sorted by uid for determinism), `WatchState::len(&self) -> usize`.
+  - Key is the pod uid (fallback `namespace/name` if uid empty).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Failing tests.** Create `ksolver/src/scheduler/watch_state.rs`:
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::config::ShadowConfig;
+    use k8s_openapi::api::core::v1 as corev1;
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::runtime::watcher::Event;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
 
-Create `ksolver/src/scheduler/trace.rs`:
+    fn cfg() -> ShadowConfig {
+        ShadowConfig {
+            scheduler_name: "ksolver".to_string(),
+            batch_window: Duration::from_secs(10),
+            namespace_allowlist: vec![],
+            gpu_resource_names: vec!["nvidia.com/gpu".to_string()],
+            cluster_name: "default".to_string(),
+            kubeconfig: String::new(),
+            http_addr: "127.0.0.1:8090".to_string(),
+        }
+    }
 
+    fn gpu_pod(uid: &str, name: &str) -> corev1::Pod {
+        let mut req = BTreeMap::new();
+        req.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+        corev1::Pod {
+            metadata: ObjectMeta { name: Some(name.to_string()), namespace: Some("team-a".to_string()), uid: Some(uid.to_string()), ..Default::default() },
+            spec: Some(corev1::PodSpec {
+                scheduler_name: Some("ksolver".to_string()),
+                containers: vec![corev1::Container { name: "m".to_string(), resources: Some(corev1::ResourceRequirements { requests: Some(req), ..Default::default() }), ..Default::default() }],
+                ..Default::default()
+            }),
+            status: Some(corev1::PodStatus { phase: Some("Pending".to_string()), ..Default::default() }),
+        }
+    }
+
+    #[test]
+    fn apply_adds_matching_pod() {
+        let mut s = WatchState::new();
+        s.apply(&Event::Apply(gpu_pod("u1", "p1")), &cfg());
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn delete_removes_pod() {
+        let mut s = WatchState::new();
+        s.apply(&Event::Apply(gpu_pod("u1", "p1")), &cfg());
+        s.apply(&Event::Delete(gpu_pod("u1", "p1")), &cfg());
+        assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn relist_drops_pods_absent_after_initdone() {
+        let mut s = WatchState::new();
+        s.apply(&Event::Apply(gpu_pod("u1", "p1")), &cfg());
+        s.apply(&Event::Apply(gpu_pod("u2", "p2")), &cfg());
+        // Relist only reports u2 -> u1 must be dropped on InitDone.
+        s.apply(&Event::Init, &cfg());
+        s.apply(&Event::InitApply(gpu_pod("u2", "p2")), &cfg());
+        s.apply(&Event::InitDone, &cfg());
+        let snap = s.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].uid, "u2");
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify failure.** `cargo test -p ksolver scheduler::watch_state` → FAIL.
+
+- [ ] **Step 3: Implement.** Prepend to `watch_state.rs`:
+```rust
+use crate::scheduler::config::ShadowConfig;
+use crate::scheduler::pod_filter::{classify, PendingGpuPod};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::runtime::watcher::Event;
+use std::collections::BTreeMap;
+
+fn key_of(pod: &corev1::Pod) -> String {
+    match pod.metadata.uid.as_deref() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => format!(
+            "{}/{}",
+            pod.metadata.namespace.clone().unwrap_or_default(),
+            pod.metadata.name.clone().unwrap_or_default()
+        ),
+    }
+}
+
+/// Maintains the set of in-scope pending GPU pods across the watcher lifecycle.
+pub struct WatchState {
+    observed: BTreeMap<String, PendingGpuPod>,
+    init_buffer: Option<BTreeMap<String, PendingGpuPod>>,
+}
+
+impl WatchState {
+    pub fn new() -> Self {
+        Self { observed: BTreeMap::new(), init_buffer: None }
+    }
+
+    pub fn apply(&mut self, event: &Event<corev1::Pod>, cfg: &ShadowConfig) {
+        match event {
+            Event::Init => {
+                self.init_buffer = Some(BTreeMap::new());
+            }
+            Event::InitApply(pod) => {
+                if let Some(p) = classify(pod, cfg) {
+                    let buf = self.init_buffer.get_or_insert_with(BTreeMap::new);
+                    buf.insert(key_of(pod), p);
+                }
+            }
+            Event::InitDone => {
+                if let Some(buf) = self.init_buffer.take() {
+                    self.observed = buf;
+                }
+            }
+            Event::Apply(pod) => {
+                let key = key_of(pod);
+                match classify(pod, cfg) {
+                    Some(p) => {
+                        self.observed.insert(key, p);
+                    }
+                    None => {
+                        self.observed.remove(&key);
+                    }
+                }
+            }
+            Event::Delete(pod) => {
+                self.observed.remove(&key_of(pod));
+            }
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<PendingGpuPod> {
+        self.observed.values().cloned().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.observed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.observed.is_empty()
+    }
+}
+
+impl Default for WatchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+```
+
+- [ ] **Step 4: Run to verify pass.** `cargo test -p ksolver scheduler::watch_state` → PASS (3).
+
+- [ ] **Step 5: Commit.**
+```bash
+cargo fmt
+git add ksolver/src/scheduler/watch_state.rs ksolver/src/scheduler/mod.rs
+git commit -m "feat(scheduler): pure watch-event reducer with relist semantics"
+```
+
+---
+
+## Task 4: Idempotent metrics registration + shadow metrics
+
+**Files:** Modify `ksolver/src/metrics.rs`; inline test.
+
+**Interfaces:**
+- Produces: `inc_shadow_pod_observations(n: u64)`, `set_shadow_pending(n: i64)`, `inc_shadow_solves()`, `inc_shadow_solve_errors()`, `observe_shadow_solve_seconds(secs: f64)`, `inc_shadow_unplaced(n: u64)`.
+- Fixes: `register_metrics()` becomes idempotent (safe to call multiple times).
+
+- [ ] **Step 1: Read the current metric/register pattern.** `sed -n '1,72p' ksolver/src/metrics.rs`. Note it uses `REGISTRY: Registry`, `IntCounterVec`/`HistogramVec`, and `register_metrics()` with `.expect(...)`.
+
+- [ ] **Step 2: Failing test.** Add to `ksolver/src/metrics.rs`:
+```rust
+#[cfg(test)]
+mod shadow_metric_tests {
+    use super::*;
+
+    #[test]
+    fn register_is_idempotent_and_shadow_metrics_render() {
+        register_metrics();
+        register_metrics(); // must not panic
+        inc_shadow_pod_observations(3);
+        set_shadow_pending(2);
+        inc_shadow_solves();
+        inc_shadow_solve_errors();
+        observe_shadow_solve_seconds(0.05);
+        inc_shadow_unplaced(1);
+        let out = render_metrics();
+        assert!(out.contains("ksolver_shadow_pod_observations_total"));
+        assert!(out.contains("ksolver_shadow_pending_pods"));
+        assert!(out.contains("ksolver_shadow_solves_total"));
+        assert!(out.contains("ksolver_shadow_solve_errors_total"));
+        assert!(out.contains("ksolver_shadow_solve_seconds"));
+        assert!(out.contains("ksolver_shadow_unplaced_total"));
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify failure.** `cargo test -p ksolver shadow_metric_tests` → FAIL (panics on double register / missing fns).
+
+- [ ] **Step 4: Make registration idempotent.** In `register_metrics()`, replace each `.expect("solver metric can be registered")` with a helper that ignores `AlreadyReg`. Add near the top of `metrics.rs`:
+```rust
+fn register_ignoring_dup(c: Box<dyn prometheus::core::Collector>) {
+    match REGISTRY.register(c) {
+        Ok(()) => {}
+        Err(prometheus::Error::AlreadyReg) => {}
+        Err(e) => panic!("failed to register metric: {e}"),
+    }
+}
+```
+Rewrite the three existing registrations in `register_metrics()` to use it, e.g.:
+```rust
+register_ignoring_dup(Box::new(SOLVE_DURATION_SECONDS.clone()));
+register_ignoring_dup(Box::new(SOLVES_TOTAL.clone()));
+register_ignoring_dup(Box::new(SOLVES_IN_FLIGHT.clone()));
+```
+
+- [ ] **Step 5: Add shadow statics + accessors + registration.** In the `lazy_static! { ... }` block add:
+```rust
+    pub static ref SHADOW_POD_OBSERVATIONS: prometheus::IntCounter =
+        prometheus::IntCounter::new("ksolver_shadow_pod_observations_total",
+            "Pending GPU pod observations across shadow solve windows (not unique pods)").unwrap();
+    pub static ref SHADOW_PENDING: prometheus::IntGauge =
+        prometheus::IntGauge::new("ksolver_shadow_pending_pods",
+            "Current count of in-scope pending GPU pods observed").unwrap();
+    pub static ref SHADOW_SOLVES: prometheus::IntCounter =
+        prometheus::IntCounter::new("ksolver_shadow_solves_total", "Shadow solves started").unwrap();
+    pub static ref SHADOW_SOLVE_ERRORS: prometheus::IntCounter =
+        prometheus::IntCounter::new("ksolver_shadow_solve_errors_total", "Shadow solves that errored").unwrap();
+    pub static ref SHADOW_SOLVE_SECONDS: prometheus::Histogram =
+        prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+            "ksolver_shadow_solve_seconds", "Shadow solve wall-clock seconds")).unwrap();
+    pub static ref SHADOW_UNPLACED: prometheus::IntCounter =
+        prometheus::IntCounter::new("ksolver_shadow_unplaced_total", "Pending GPU pods with no placement in a solve").unwrap();
+```
+In `register_metrics()` also register these six via `register_ignoring_dup(Box::new(<STATIC>.clone()))`. Then add the accessors at module scope:
+```rust
+pub fn inc_shadow_pod_observations(n: u64) { SHADOW_POD_OBSERVATIONS.inc_by(n); }
+pub fn set_shadow_pending(n: i64) { SHADOW_PENDING.set(n); }
+pub fn inc_shadow_solves() { SHADOW_SOLVES.inc(); }
+pub fn inc_shadow_solve_errors() { SHADOW_SOLVE_ERRORS.inc(); }
+pub fn observe_shadow_solve_seconds(secs: f64) { SHADOW_SOLVE_SECONDS.observe(secs); }
+pub fn inc_shadow_unplaced(n: u64) { SHADOW_UNPLACED.inc_by(n); }
+```
+Ensure `IntCounter`, `IntGauge`, `Histogram`, `HistogramOpts` are imported (add to the existing `use prometheus::{...}` line if missing).
+
+- [ ] **Step 6: Run to verify pass.** `cargo test -p ksolver shadow_metric_tests` → PASS. Also run `cargo test -p ksolver` to confirm existing metric tests still pass with idempotent registration.
+
+- [ ] **Step 7: Commit.**
+```bash
+cargo fmt
+git add ksolver/src/metrics.rs
+git commit -m "feat(scheduler): idempotent metric registration and shadow metrics"
+```
+
+---
+
+## Task 5: Trace types with reasons + bounded store
+
+**Files:** Create `ksolver/src/scheduler/trace.rs`; inline tests.
+
+**Interfaces:**
+- Produces:
+  - `pub enum PodPlacement { Placed { node: String }, Unplaced { reason: String } }` (serde tag = "kind", lowercase).
+  - `pub struct PodDecision { pub uid: String, pub namespace: String, pub name: String, pub gpu_request: i64, pub placement: PodPlacement }`
+  - `pub struct DecisionTrace { pub sequence: u64, pub observed_pods: usize, pub decisions: Vec<PodDecision>, pub solver_status: String, pub solve_millis: u64, pub snapshot_age_millis: u64, pub note: String }`
+  - `pub struct TraceStore` with `new(capacity)`, `push`, `recent() -> Vec<DecisionTrace>` (newest first), `next_sequence() -> u64`.
+
+- [ ] **Step 1: Failing tests.** Create `ksolver/src/scheduler/trace.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
@@ -448,88 +701,67 @@ mod tests {
 
     fn trace(seq: u64) -> DecisionTrace {
         DecisionTrace {
-            sequence: seq,
-            observed_pods: 1,
+            sequence: seq, observed_pods: 1,
             decisions: vec![PodDecision {
-                namespace: "team-a".to_string(),
-                name: "job-0".to_string(),
-                gpu_request: 4,
-                placement: PodPlacement::Placed {
-                    node: "node-1".to_string(),
-                },
+                uid: "u1".into(), namespace: "team-a".into(), name: "job-0".into(), gpu_request: 4,
+                placement: PodPlacement::Placed { node: "node-1".into() },
             }],
-            solver_status: "optimal".to_string(),
-            solve_millis: 12,
-            note: String::new(),
+            solver_status: "OPTIMAL".into(), solve_millis: 12, snapshot_age_millis: 3, note: String::new(),
         }
     }
 
     #[test]
-    fn store_returns_recent_newest_first() {
-        let store = TraceStore::new(8);
-        store.push(trace(1));
-        store.push(trace(2));
-        let recent = store.recent();
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].sequence, 2);
-        assert_eq!(recent[1].sequence, 1);
+    fn recent_is_newest_first() {
+        let s = TraceStore::new(8);
+        s.push(trace(1)); s.push(trace(2));
+        let r = s.recent();
+        assert_eq!(r[0].sequence, 2);
+        assert_eq!(r[1].sequence, 1);
     }
 
     #[test]
-    fn store_evicts_oldest_beyond_capacity() {
-        let store = TraceStore::new(2);
-        store.push(trace(1));
-        store.push(trace(2));
-        store.push(trace(3));
-        let recent = store.recent();
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].sequence, 3);
-        assert_eq!(recent[1].sequence, 2);
+    fn evicts_oldest_beyond_capacity() {
+        let s = TraceStore::new(2);
+        s.push(trace(1)); s.push(trace(2)); s.push(trace(3));
+        let r = s.recent();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].sequence, 3);
     }
 
     #[test]
-    fn next_sequence_is_monotonic() {
-        let store = TraceStore::new(4);
-        assert_eq!(store.next_sequence(), 1);
-        assert_eq!(store.next_sequence(), 2);
-        assert_eq!(store.next_sequence(), 3);
+    fn sequence_is_monotonic() {
+        let s = TraceStore::new(4);
+        assert_eq!(s.next_sequence(), 1);
+        assert_eq!(s.next_sequence(), 2);
     }
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run to verify failure.** `cargo test -p ksolver scheduler::trace` → FAIL.
 
-Run: `cargo test -p ksolver scheduler::trace`
-Expected: FAIL — `cannot find type TraceStore`.
-
-- [ ] **Step 3: Implement the trace types and store**
-
-Prepend to `ksolver/src/scheduler/trace.rs`:
-
+- [ ] **Step 3: Implement.** Prepend to `trace.rs`:
 ```rust
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// Where the solver proposed a pod would go (shadow mode — never actually bound).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PodPlacement {
     Placed { node: String },
-    Unplaced,
+    Unplaced { reason: String },
 }
 
-/// The shadow decision for a single pending GPU pod.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PodDecision {
+    pub uid: String,
     pub namespace: String,
     pub name: String,
     pub gpu_request: i64,
     pub placement: PodPlacement,
 }
 
-/// A single shadow-mode solve result, recorded for observation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecisionTrace {
     pub sequence: u64,
@@ -537,10 +769,10 @@ pub struct DecisionTrace {
     pub decisions: Vec<PodDecision>,
     pub solver_status: String,
     pub solve_millis: u64,
+    pub snapshot_age_millis: u64,
     pub note: String,
 }
 
-/// Bounded, thread-safe ring buffer of recent decision traces.
 pub struct TraceStore {
     capacity: usize,
     inner: Mutex<VecDeque<DecisionTrace>>,
@@ -549,261 +781,123 @@ pub struct TraceStore {
 
 impl TraceStore {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            inner: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
-            seq: AtomicU64::new(0),
-        }
+        Self { capacity: capacity.max(1), inner: Mutex::new(VecDeque::new()), seq: AtomicU64::new(0) }
     }
-
-    /// Return the next monotonic sequence number (starts at 1).
     pub fn next_sequence(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }
-
     pub fn push(&self, trace: DecisionTrace) {
-        let mut guard = self.inner.lock().expect("trace store mutex poisoned");
-        if guard.len() == self.capacity {
-            guard.pop_front();
+        let mut g = self.inner.lock().expect("trace store poisoned");
+        if g.len() == self.capacity {
+            g.pop_front();
         }
-        guard.push_back(trace);
+        g.push_back(trace);
     }
-
-    /// Recent traces, newest first.
     pub fn recent(&self) -> Vec<DecisionTrace> {
-        let guard = self.inner.lock().expect("trace store mutex poisoned");
-        guard.iter().rev().cloned().collect()
+        let g = self.inner.lock().expect("trace store poisoned");
+        g.iter().rev().cloned().collect()
     }
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Run to verify pass.** `cargo test -p ksolver scheduler::trace` → PASS (3).
 
-Run: `cargo test -p ksolver scheduler::trace`
-Expected: PASS (3 tests).
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 5: Commit.**
 ```bash
 cargo fmt
 git add ksolver/src/scheduler/trace.rs ksolver/src/scheduler/mod.rs
-git commit -m "feat(scheduler): decision trace types and bounded trace store"
+git commit -m "feat(scheduler): decision trace types with reasons and bounded store"
 ```
 
 ---
 
-## Task 4: Shadow metrics registration
+## Task 6: Pure decision-trace builder (maps solver output → trace with reasons)
 
-**Files:**
-- Modify: `ksolver/src/metrics.rs`
-- Test: inline `#[cfg(test)]` in `metrics.rs` (or extend existing tests if present)
+The builder derives each pod's workload id the same way `build_input_strict` does (`"{namespace}/{name}"`), looks it up in the actual `OptimizationInput.workloads` to distinguish "not submitted to solver" from "submitted but unplaced", then reads `OptimizationSolution.assignments`.
 
-**Interfaces:**
-- Produces (public functions on the `metrics` module):
-  - `pub fn inc_shadow_pods_observed(n: u64)`
-  - `pub fn inc_shadow_solves()`
-  - `pub fn observe_shadow_solve_seconds(secs: f64)`
-  - `pub fn inc_shadow_unplaced(n: u64)`
-- These MUST be registered by the existing `register_metrics()` path so `render_metrics()` includes them.
-
-- [ ] **Step 1: Inspect the existing metrics pattern**
-
-Run: `sed -n '1,60p' ksolver/src/metrics.rs`
-Expected: shows how counters/histograms are declared (likely `lazy_static!` + `prometheus`), and the `register_metrics()` / `render_metrics()` functions. Follow this exact pattern in the next step.
-
-- [ ] **Step 2: Write the failing test**
-
-Add to the `#[cfg(test)]` module in `ksolver/src/metrics.rs` (create the module if none exists):
-
-```rust
-#[cfg(test)]
-mod shadow_metric_tests {
-    use super::*;
-
-    #[test]
-    fn shadow_metrics_render() {
-        register_metrics();
-        inc_shadow_pods_observed(3);
-        inc_shadow_solves();
-        observe_shadow_solve_seconds(0.05);
-        inc_shadow_unplaced(1);
-        let out = render_metrics();
-        assert!(out.contains("ksolver_shadow_pods_observed_total"));
-        assert!(out.contains("ksolver_shadow_solves_total"));
-        assert!(out.contains("ksolver_shadow_solve_seconds"));
-        assert!(out.contains("ksolver_shadow_unplaced_total"));
-    }
-}
-```
-
-- [ ] **Step 3: Run the test to verify it fails**
-
-Run: `cargo test -p ksolver shadow_metric_tests`
-Expected: FAIL — `cannot find function inc_shadow_pods_observed`.
-
-- [ ] **Step 4: Implement the metrics following the existing pattern**
-
-Add these declarations alongside the existing metric statics in `ksolver/src/metrics.rs` (adapt the macro syntax to match what Step 1 revealed — this uses the common `lazy_static!` + `prometheus` shape):
-
-```rust
-lazy_static::lazy_static! {
-    static ref SHADOW_PODS_OBSERVED: prometheus::IntCounter = prometheus::IntCounter::new(
-        "ksolver_shadow_pods_observed_total",
-        "Total pending GPU pods observed by the shadow scheduler"
-    ).expect("create ksolver_shadow_pods_observed_total");
-
-    static ref SHADOW_SOLVES: prometheus::IntCounter = prometheus::IntCounter::new(
-        "ksolver_shadow_solves_total",
-        "Total shadow-mode solves executed"
-    ).expect("create ksolver_shadow_solves_total");
-
-    static ref SHADOW_SOLVE_SECONDS: prometheus::Histogram = prometheus::Histogram::with_opts(
-        prometheus::HistogramOpts::new(
-            "ksolver_shadow_solve_seconds",
-            "Shadow-mode solve wall-clock duration in seconds"
-        )
-    ).expect("create ksolver_shadow_solve_seconds");
-
-    static ref SHADOW_UNPLACED: prometheus::IntCounter = prometheus::IntCounter::new(
-        "ksolver_shadow_unplaced_total",
-        "Total pending GPU pods the shadow solver could not place"
-    ).expect("create ksolver_shadow_unplaced_total");
-}
-
-pub fn inc_shadow_pods_observed(n: u64) {
-    SHADOW_PODS_OBSERVED.inc_by(n);
-}
-
-pub fn inc_shadow_solves() {
-    SHADOW_SOLVES.inc();
-}
-
-pub fn observe_shadow_solve_seconds(secs: f64) {
-    SHADOW_SOLVE_SECONDS.observe(secs);
-}
-
-pub fn inc_shadow_unplaced(n: u64) {
-    SHADOW_UNPLACED.inc_by(n);
-}
-```
-
-In `register_metrics()`, register each new metric with the default registry, matching how existing metrics are registered (use `prometheus::register(Box::new(SHADOW_PODS_OBSERVED.clone()))` or the crate's default-registry helper, mirroring the existing code — and ignore an `AlreadyReg` error the same way existing code does, since `register_metrics()` may be called more than once, e.g. by tests).
-
-- [ ] **Step 5: Run the test to verify it passes**
-
-Run: `cargo test -p ksolver shadow_metric_tests`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-cargo fmt
-git add ksolver/src/metrics.rs
-git commit -m "feat(scheduler): register shadow-mode prometheus metrics"
-```
-
----
-
-## Task 5: Pure decision-trace builder from a solver solution
-
-This is the pure core of the shadow loop: given the observed pending GPU pods and the existing solver's `OptimizationSolution`/`OptimizationInput`, produce a `DecisionTrace`. Kept pure so it is unit-tested without kube or the solver feature.
-
-**Files:**
-- Create: `ksolver/src/scheduler/shadow.rs` (builder + tests only in this task; the loop lands in Task 6)
-- Test: inline `#[cfg(test)]` in `shadow.rs`
+**Files:** Create `ksolver/src/scheduler/decision.rs`; inline tests.
 
 **Interfaces:**
-- Consumes: `scheduler::pod_filter::PendingGpuPod`, `scheduler::trace::{DecisionTrace, PodDecision, PodPlacement}`, and from `crate::model`: `OptimizationSolution` (has `assignments: HashMap<String, String>` mapping workload id → node name, and `assignment_counts: HashMap<String, HashMap<String,i32>>` per the planner's usage).
+- Consumes: `pod_filter::PendingGpuPod`, `trace::{DecisionTrace, PodDecision, PodPlacement}`, `crate::model::{OptimizationInput, OptimizationSolution}`.
 - Produces:
-  - `pub fn build_decision_trace(sequence: u64, pending: &[PendingGpuPod], workload_id_for: &dyn Fn(&PendingGpuPod) -> String, solution: &OptimizationSolution, solver_status: &str, solve_millis: u64) -> DecisionTrace`
+  - `pub fn build_decision_trace(sequence: u64, pending: &[PendingGpuPod], input: &OptimizationInput, solution: &OptimizationSolution, solver_status: &str, solve_millis: u64, snapshot_age_millis: u64) -> DecisionTrace`
 
-**Note on workload id mapping:** the existing pipeline groups pods into workloads keyed by an id (namespace/owner). Shadow mode maps each observed pod to a workload id via the injected `workload_id_for` closure (the loop in Task 6 supplies the real mapping using `namespace/name` as a fallback key). The builder itself is agnostic to how the id is derived, which keeps it testable.
-
-- [ ] **Step 1: Confirm the `OptimizationSolution` shape**
-
-Run: `sed -n '/pub struct OptimizationSolution/,/^}/p' ksolver/src/model.rs`
-Expected: shows fields including `assignments: HashMap<String, String>` and `assignment_counts`. Use `assignments` (workload id → node) for the builder. If the field names differ, adjust the code below to match exactly.
-
-- [ ] **Step 2: Write the failing tests**
-
-Create `ksolver/src/scheduler/shadow.rs`:
-
+- [ ] **Step 1: Failing tests.** Create `ksolver/src/scheduler/decision.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::OptimizationSolution;
+    use crate::model::{OptimizationInput, OptimizationSolution, OptimizationWorkload};
     use crate::scheduler::pod_filter::PendingGpuPod;
     use crate::scheduler::trace::PodPlacement;
     use std::collections::HashMap;
 
-    fn pod(ns: &str, name: &str, gpu: i64) -> PendingGpuPod {
-        PendingGpuPod {
-            namespace: ns.to_string(),
-            name: name.to_string(),
-            gpu_request: gpu,
-        }
+    fn pod(ns: &str, name: &str) -> PendingGpuPod {
+        PendingGpuPod { uid: format!("uid-{name}"), namespace: ns.into(), name: name.into(), gpu_request: 1 }
+    }
+
+    fn workload(ns: &str, name: &str) -> OptimizationWorkload {
+        OptimizationWorkload { id: format!("{ns}/{name}"), namespace: ns.into(), name: name.into(), ..Default::default() }
     }
 
     #[test]
-    fn maps_placed_and_unplaced_pods() {
-        let pending = vec![pod("team-a", "job-0", 4), pod("team-a", "job-1", 8)];
+    fn placed_unplaced_and_not_submitted() {
+        let pending = vec![pod("team-a", "placed"), pod("team-a", "unplaced"), pod("team-a", "ghost")];
+        // Solver saw "placed" and "unplaced"; not "ghost".
+        let input = OptimizationInput { workloads: vec![workload("team-a", "placed"), workload("team-a", "unplaced")], ..Default::default() };
         let mut assignments = HashMap::new();
-        assignments.insert("team-a/job-0".to_string(), "node-1".to_string());
-        let solution = OptimizationSolution {
-            assignments,
-            ..Default::default()
-        };
-        let id_for = |p: &PendingGpuPod| format!("{}/{}", p.namespace, p.name);
-        let trace = build_decision_trace(7, &pending, &id_for, &solution, "optimal", 15);
+        assignments.insert("team-a/placed".to_string(), "node-1".to_string());
+        let solution = OptimizationSolution { assignments, ..Default::default() };
 
-        assert_eq!(trace.sequence, 7);
-        assert_eq!(trace.observed_pods, 2);
-        assert_eq!(trace.solver_status, "optimal");
-        assert_eq!(trace.solve_millis, 15);
-        assert_eq!(trace.decisions.len(), 2);
-        assert_eq!(
-            trace.decisions[0].placement,
-            PodPlacement::Placed { node: "node-1".to_string() }
-        );
-        assert_eq!(trace.decisions[1].placement, PodPlacement::Unplaced);
+        let t = build_decision_trace(5, &pending, &input, &solution, "OPTIMAL", 20, 4);
+        assert_eq!(t.sequence, 5);
+        assert_eq!(t.observed_pods, 3);
+        assert_eq!(t.decisions[0].placement, PodPlacement::Placed { node: "node-1".into() });
+        match &t.decisions[1].placement { PodPlacement::Unplaced { reason } => assert!(reason.contains("no feasible")), _ => panic!("want unplaced") }
+        match &t.decisions[2].placement { PodPlacement::Unplaced { reason } => assert!(reason.contains("not submitted")), _ => panic!("want unplaced") }
     }
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 2: Run to verify failure.** `cargo test -p ksolver scheduler::decision` → FAIL.
 
-Run: `cargo test -p ksolver scheduler::shadow`
-Expected: FAIL — `cannot find function build_decision_trace`.
-
-- [ ] **Step 4: Implement the builder**
-
-Prepend to `ksolver/src/scheduler/shadow.rs`:
-
+- [ ] **Step 3: Implement.** Prepend to `decision.rs`:
 ```rust
-use crate::model::OptimizationSolution;
+use crate::model::{OptimizationInput, OptimizationSolution};
 use crate::scheduler::pod_filter::PendingGpuPod;
 use crate::scheduler::trace::{DecisionTrace, PodDecision, PodPlacement};
+use std::collections::HashSet;
 
-/// Build a shadow decision trace from the existing solver's solution.
-/// `workload_id_for` maps each observed pod to the workload id the solver used,
-/// so we can look up its assigned node in `solution.assignments`.
+/// The strict-mode workload id for a pod ("{namespace}/{name}").
+fn workload_id(p: &PendingGpuPod) -> String {
+    format!("{}/{}", p.namespace, p.name)
+}
+
 pub fn build_decision_trace(
     sequence: u64,
     pending: &[PendingGpuPod],
-    workload_id_for: &dyn Fn(&PendingGpuPod) -> String,
+    input: &OptimizationInput,
     solution: &OptimizationSolution,
     solver_status: &str,
     solve_millis: u64,
+    snapshot_age_millis: u64,
 ) -> DecisionTrace {
+    let submitted: HashSet<&str> = input.workloads.iter().map(|w| w.id.as_str()).collect();
     let mut decisions = Vec::with_capacity(pending.len());
     for p in pending {
-        let id = workload_id_for(p);
-        let placement = match solution.assignments.get(&id) {
-            Some(node) if !node.is_empty() => PodPlacement::Placed { node: node.clone() },
-            _ => PodPlacement::Unplaced,
+        let id = workload_id(p);
+        let placement = if !submitted.contains(id.as_str()) {
+            PodPlacement::Unplaced {
+                reason: "not submitted to solver (filtered as unschedulable during input build)".to_string(),
+            }
+        } else {
+            match solution.assignments.get(&id) {
+                Some(node) if !node.is_empty() => PodPlacement::Placed { node: node.clone() },
+                _ => PodPlacement::Unplaced { reason: "no feasible placement found".to_string() },
+            }
         };
         decisions.push(PodDecision {
+            uid: p.uid.clone(),
             namespace: p.namespace.clone(),
             name: p.name.clone(),
             gpu_request: p.gpu_request,
@@ -816,53 +910,43 @@ pub fn build_decision_trace(
         decisions,
         solver_status: solver_status.to_string(),
         solve_millis,
+        snapshot_age_millis,
         note: String::new(),
     }
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4: Run to verify pass.** `cargo test -p ksolver scheduler::decision` → PASS.
 
-Run: `cargo test -p ksolver scheduler::shadow`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
+- [ ] **Step 5: Commit.**
 ```bash
 cargo fmt
-git add ksolver/src/scheduler/shadow.rs
-git commit -m "feat(scheduler): pure shadow decision-trace builder"
+git add ksolver/src/scheduler/decision.rs ksolver/src/scheduler/mod.rs
+git commit -m "feat(scheduler): pure decision-trace builder with placement reasons"
 ```
 
 ---
 
-## Task 6: Shadow watch loop + HTTP server (I/O wiring)
+## Task 7: Shadow I/O — self-healing watch, sequential solve loop, HTTP
 
-Wires the pure pieces to kube-rs and the existing solve pipeline. This task has no new unit tests (it is thin I/O over already-tested units); it is verified by compilation, clippy, and the manual run in Task 8.
+Wires pure pieces to kube + the existing solve pipeline. No new unit tests (all logic here is already tested; this is I/O). Verified by feature build + clippy + Task 10 manual run.
 
-**Files:**
-- Modify: `ksolver/src/scheduler/shadow.rs` (append the loop + server; keep the tested builder untouched)
+**Files:** Create `ksolver/src/scheduler/shadow.rs`.
 
 **Interfaces:**
-- Consumes: `ShadowConfig`, `pod_filter::classify`, `build_decision_trace`, `TraceStore`, `metrics::*`, `collector::KubeCollector`, `normalizer::Normalizer`, `optimizer_input::build_input`, `cpsat_rust`, and `crate::model::ScenarioConfig`.
-- Produces:
-  - `pub async fn run_shadow(cfg: ShadowConfig) -> anyhow::Result<()>`
+- Consumes: everything above + `collector::{build_client, KubeCollector}`, `normalizer`, `optimizer_input::build_input_strict`, `cpsat_rust`, `crate::model::ScenarioConfig`, `pricing::load_pricing_catalog`.
+- Produces: `pub async fn run_shadow(cfg: ShadowConfig) -> anyhow::Result<()>`.
 
-- [ ] **Step 1: Confirm the collect→normalize→build_input→solve call shape**
+- [ ] **Step 1: Confirm analyzer call shapes.** `sed -n '300,345p' ksolver/src/service.rs` and `sed -n '360,445p' ksolver/src/service.rs`. Mirror `Normalizer::new(...).normalize(&snapshot)`, `build_input_*`, and `cpsat_rust::solve` calls exactly.
 
-Run: `sed -n '279,340p' ksolver/src/service.rs` and `sed -n '360,460p' ksolver/src/service.rs`
-Expected: shows exact constructor/method calls for `Normalizer::new(pricing_catalog, options).normalize(&snapshot)`, `build_input(&normalized, ignore_unschedulable)`, and `cpsat_rust::solve(&input, &scenario)`. Mirror these calls exactly in Step 3, including how `pricing_catalog` and `NormalizerOptions` are obtained (use defaults where the analyzer uses defaults). If pricing is required, load with the same helper the analyzer uses (`crate::pricing`), passing an empty pricing file to get defaults.
-
-- [ ] **Step 2: Append the watch loop and HTTP server to `shadow.rs`**
-
-Append to `ksolver/src/scheduler/shadow.rs` (after the builder, before the `#[cfg(test)]` module):
-
+- [ ] **Step 2: Implement `shadow.rs`.**
 ```rust
 use crate::model::ScenarioConfig;
 use crate::scheduler::config::ShadowConfig;
-use crate::scheduler::pod_filter::classify;
-use crate::scheduler::trace::TraceStore;
-use crate::{cpsat_rust, metrics};
+use crate::scheduler::decision::build_decision_trace;
+use crate::scheduler::trace::{DecisionTrace, PodPlacement, TraceStore};
+use crate::scheduler::watch_state::WatchState;
+use crate::{collector, cpsat_rust, metrics, normalizer, optimizer_input, pricing};
 use anyhow::Result;
 use axum::extract::State;
 use axum::routing::get;
@@ -870,173 +954,144 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1 as corev1;
 use kube::runtime::watcher;
-use kube::{Api, Client};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use kube::Api;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::Mutex;
-use tokio::time::interval;
 use tracing::{error, info, warn};
 
 #[derive(Clone)]
-struct ShadowState {
+struct ShadowHttpState {
     traces: Arc<TraceStore>,
+    watch_healthy: Arc<AtomicBool>,
 }
 
-async fn traces_handler(State(state): State<ShadowState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "traces": state.traces.recent() }))
+async fn traces_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "traces": s.traces.recent() }))
 }
 
 async fn metrics_handler() -> (axum::http::StatusCode, [(&'static str, &'static str); 1], String) {
-    (
-        axum::http::StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        metrics::render_metrics(),
-    )
+    (axum::http::StatusCode::OK,
+     [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+     metrics::render_metrics())
 }
 
-/// Run the shadow-mode scheduler: observe pending GPU pods, periodically solve,
-/// record decision traces, and serve them over HTTP. NEVER binds pods.
+async fn healthz() -> &'static str { "ok" }
+
+async fn readyz(State(s): State<ShadowHttpState>) -> (axum::http::StatusCode, &'static str) {
+    if s.watch_healthy.load(Ordering::SeqCst) {
+        (axum::http::StatusCode::OK, "ready")
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "watch not healthy")
+    }
+}
+
+/// Shadow-mode scheduler: observe pending GPU pods, periodically solve, record
+/// decision traces, serve them. NEVER binds or mutates cluster state.
 pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     metrics::register_metrics();
     let traces = Arc::new(TraceStore::new(64));
+    let observed: Arc<Mutex<WatchState>> = Arc::new(Mutex::new(WatchState::new()));
+    let watch_healthy = Arc::new(AtomicBool::new(false));
 
-    // Shared, observed set of pending GPU pods keyed by "namespace/name".
-    let observed: Arc<Mutex<BTreeMap<String, crate::scheduler::pod_filter::PendingGpuPod>>> =
-        Arc::new(Mutex::new(BTreeMap::new()));
-
-    // HTTP server for traces + metrics (for the simulator/UI).
-    let http_state = ShadowState { traces: traces.clone() };
+    // HTTP server (traces / metrics / health).
+    let http_state = ShadowHttpState { traces: traces.clone(), watch_healthy: watch_healthy.clone() };
     let app = Router::new()
         .route("/api/scheduler/traces", get(traces_handler))
         .route("/metrics", get(metrics_handler))
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .with_state(http_state);
     let http_addr = cfg.http_addr.clone();
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(&http_addr).await {
-            Ok(listener) => {
-                info!(addr = %http_addr, "shadow scheduler HTTP server listening");
-                if let Err(err) = axum::serve(listener, app).await {
-                    error!(error = %err, "shadow HTTP server failed");
-                }
+            Ok(l) => {
+                info!(addr = %http_addr, "shadow HTTP server listening");
+                if let Err(e) = axum::serve(l, app).await { error!(error = %e, "shadow HTTP failed"); }
             }
-            Err(err) => error!(error = %err, addr = %http_addr, "failed to bind shadow HTTP addr"),
+            Err(e) => error!(error = %e, addr = %http_addr, "failed to bind shadow HTTP addr"),
         }
     });
 
-    // Watch pending pods and maintain the observed set.
-    let client = build_shadow_client(&cfg).await?;
+    // Self-healing watch task: recreate the watcher if the stream ends.
+    let client = collector::build_client(&cfg.kubeconfig).await?;
     let pods_api: Api<corev1::Pod> = Api::all(client);
     let watch_cfg = cfg.clone();
     let watch_observed = observed.clone();
+    let watch_flag = watch_healthy.clone();
     tokio::spawn(async move {
-        let wc = watcher::Config::default();
-        let mut stream = watcher(pods_api, wc).boxed();
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(watcher::Event::Apply(pod)) | Ok(watcher::Event::InitApply(pod)) => {
-                    let key = format!(
-                        "{}/{}",
-                        pod.metadata.namespace.clone().unwrap_or_default(),
-                        pod.metadata.name.clone().unwrap_or_default()
-                    );
-                    match classify(&pod, &watch_cfg) {
-                        Some(p) => {
-                            watch_observed.lock().await.insert(key, p);
+        loop {
+            watch_flag.store(false, Ordering::SeqCst);
+            let mut stream = watcher(pods_api.clone(), watcher::Config::default()).boxed();
+            info!("pod watch (re)started");
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(ev) => {
+                        if matches!(ev, watcher::Event::InitDone) {
+                            watch_flag.store(true, Ordering::SeqCst);
                         }
-                        None => {
-                            watch_observed.lock().await.remove(&key);
-                        }
+                        let mut st = watch_observed.lock().expect("watch state poisoned");
+                        st.apply(&ev, &watch_cfg);
+                        metrics::set_shadow_pending(st.len() as i64);
                     }
+                    Err(e) => warn!(error = %e, "watch error; will resync"),
                 }
-                Ok(watcher::Event::Delete(pod)) => {
-                    let key = format!(
-                        "{}/{}",
-                        pod.metadata.namespace.clone().unwrap_or_default(),
-                        pod.metadata.name.clone().unwrap_or_default()
-                    );
-                    watch_observed.lock().await.remove(&key);
-                }
-                Ok(_) => {}
-                Err(err) => warn!(error = %err, "pod watch error; continuing"),
             }
+            watch_flag.store(false, Ordering::SeqCst);
+            warn!("watch stream ended; restarting after backoff");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        warn!("pod watch stream ended");
     });
 
-    // Batch window: periodically snapshot, solve, and record a trace.
-    let mut ticker = interval(cfg.batch_window);
+    // Sequential solve loop: sleep AFTER each solve so a slow solve never overlaps itself.
     loop {
-        ticker.tick().await;
-        let pending: Vec<_> = observed.lock().await.values().cloned().collect();
+        tokio::time::sleep(cfg.batch_window).await;
+        let pending = { observed.lock().expect("watch state poisoned").snapshot() };
         if pending.is_empty() {
             continue;
         }
-        metrics::inc_shadow_pods_observed(pending.len() as u64);
+        metrics::inc_shadow_pod_observations(pending.len() as u64);
         let seq = traces.next_sequence();
         match run_one_solve(&cfg, seq, &pending).await {
             Ok(trace) => {
-                let unplaced = trace
-                    .decisions
-                    .iter()
-                    .filter(|d| matches!(d.placement, crate::scheduler::trace::PodPlacement::Unplaced))
-                    .count() as u64;
+                let unplaced = trace.decisions.iter()
+                    .filter(|d| matches!(d.placement, PodPlacement::Unplaced { .. })).count() as u64;
                 metrics::inc_shadow_unplaced(unplaced);
-                info!(
-                    sequence = trace.sequence,
-                    observed = trace.observed_pods,
-                    unplaced,
-                    status = %trace.solver_status,
-                    solve_millis = trace.solve_millis,
-                    "shadow decision recorded (bound nothing)"
-                );
+                info!(sequence = trace.sequence, observed = trace.observed_pods, unplaced,
+                    status = %trace.solver_status, solve_millis = trace.solve_millis,
+                    "shadow decision recorded (bound nothing)");
                 traces.push(trace);
             }
-            Err(err) => error!(error = %err, "shadow solve failed"),
+            Err(e) => { metrics::inc_shadow_solve_errors(); error!(error = %e, "shadow solve failed"); }
         }
     }
-}
-
-async fn build_shadow_client(cfg: &ShadowConfig) -> Result<Client> {
-    // Reuse the collector's client so kubeconfig/in-cluster handling is identical.
-    let collector =
-        crate::collector::KubeCollector::new(cfg.cluster_name.clone(), cfg.kubeconfig.clone())
-            .await?;
-    Ok(collector.client())
 }
 
 async fn run_one_solve(
     cfg: &ShadowConfig,
     sequence: u64,
     pending: &[crate::scheduler::pod_filter::PendingGpuPod],
-) -> Result<crate::scheduler::trace::DecisionTrace> {
+) -> Result<DecisionTrace> {
     metrics::inc_shadow_solves();
     let started = Instant::now();
 
-    // 1. Snapshot the cluster via the existing collector.
-    let collector =
-        crate::collector::KubeCollector::new(cfg.cluster_name.clone(), cfg.kubeconfig.clone())
-            .await?;
-    let snapshot = collector.collect().await?;
+    // 1. Snapshot the cluster (read-only) via the existing collector.
+    let coll = collector::KubeCollector::new(cfg.cluster_name.clone(), cfg.kubeconfig.clone()).await?;
+    let snapshot = coll.collect().await?;
+    let snapshot_age_millis = started.elapsed().as_millis() as u64;
 
-    // 2. Normalize + build input + solve, mirroring service::Analyzer.
-    //    Use default pricing and default normalizer options (see Step 1 findings).
-    let pricing_catalog = crate::pricing::load_catalog("").unwrap_or_default();
-    let normalizer_options = crate::normalizer::Options::default();
-    let normalized = crate::normalizer::Normalizer::new(pricing_catalog, normalizer_options)
+    // 2. Normalize + build strict (ungrouped) input + solve, mirroring service::Analyzer.
+    let pricing_catalog = pricing::load_pricing_catalog("").unwrap_or_default();
+    let normalized = normalizer::Normalizer::new(pricing_catalog, normalizer::Options::default())
         .normalize(&snapshot);
-    let input = crate::optimizer_input::build_input(&normalized, true);
+    // strict + keep-unschedulable(false=do not drop) so pending pods still appear as workloads.
+    let input = optimizer_input::build_input_strict(&normalized, false);
 
-    let scenario = ScenarioConfig {
-        solver: "cp-sat-rust".to_string(),
-        ignore_unschedulable_workloads: true,
-        ..Default::default()
-    };
-
+    let scenario = ScenarioConfig { solver: "cp-sat-rust".to_string(), ..Default::default() };
     let (solution, status) = match cpsat_rust::solve(&input, &scenario) {
-        Ok((sol, info)) => (sol, format!("{:?}", info.status)),
-        Err(err) => {
-            warn!(error = %err, "solver returned error; recording as infeasible");
+        Ok((sol, info)) => (sol, info.status),
+        Err(e) => {
+            warn!(error = %e, "solver error; recording infeasible");
             (Default::default(), "error".to_string())
         }
     };
@@ -1044,182 +1099,162 @@ async fn run_one_solve(
     let solve_millis = started.elapsed().as_millis() as u64;
     metrics::observe_shadow_solve_seconds(started.elapsed().as_secs_f64());
 
-    let id_for = |p: &crate::scheduler::pod_filter::PendingGpuPod| {
-        format!("{}/{}", p.namespace, p.name)
-    };
-    Ok(build_decision_trace(
-        sequence,
-        pending,
-        &id_for,
-        &solution,
-        &status,
-        solve_millis,
-    ))
+    Ok(build_decision_trace(sequence, pending, &input, &solution, &status, solve_millis, snapshot_age_millis))
 }
 ```
 
-Notes for the implementer:
-- `KubeCollector` currently holds a private `client` field. Add a public accessor to `collector.rs`: `pub fn client(&self) -> Client { self.client.clone() }`. This is a one-line addition; include it in this task's commit.
-- `SolverInfo.status` may not implement `Debug`/exist under that name — check `sed -n '/pub struct SolverInfo/,/^}/p' ksolver/src/model.rs` and format whatever status/objective field exists (fall back to `"solved"` if there is no status field). Keep the string human-readable.
-- `crate::pricing::load_catalog` / `crate::normalizer::Options` names must match the real API surfaced in Step 1 of this task and Task 5 Step 1; adjust the calls to the actual signatures (the analyzer is the source of truth).
+- [ ] **Step 3: Feature build.** `cargo build -p ksolver --features rust-cp-sat`. Fix any signature mismatches against the real analyzer API the compiler points to (do NOT touch the already-tested pure modules).
 
-- [ ] **Step 2b: Add the client accessor to the collector**
+- [ ] **Step 4: Full unit tests (no feature).** `cargo test -p ksolver` → all prior tests green.
 
-Modify `ksolver/src/collector.rs` — inside `impl KubeCollector`, add:
+- [ ] **Step 5: Clippy.** `cargo clippy -p ksolver --features rust-cp-sat --all-targets` → clean.
 
-```rust
-    /// Clone of the underlying Kubernetes client (used by the shadow scheduler).
-    pub fn client(&self) -> Client {
-        self.client.clone()
-    }
-```
-
-- [ ] **Step 3: Build with the solver feature to typecheck the full path**
-
-Run: `cargo build -p ksolver --features rust-cp-sat`
-Expected: compiles. Fix any signature mismatches against the real analyzer API (the compiler errors will point to the exact call to correct). Do not change the tested builder or pure units.
-
-- [ ] **Step 4: Run all existing unit tests (no feature) to confirm nothing broke**
-
-Run: `cargo test -p ksolver`
-Expected: PASS (all prior tasks' tests still green).
-
-- [ ] **Step 5: Clippy**
-
-Run: `cargo clippy -p ksolver --features rust-cp-sat --all-targets`
-Expected: no errors.
-
-- [ ] **Step 6: Commit**
-
+- [ ] **Step 6: Commit.**
 ```bash
 cargo fmt
-git add ksolver/src/scheduler/shadow.rs ksolver/src/collector.rs
-git commit -m "feat(scheduler): shadow watch loop, solve call path, and HTTP traces"
+git add ksolver/src/scheduler/shadow.rs
+git commit -m "feat(scheduler): self-healing watch, sequential solve loop, HTTP endpoints"
 ```
 
 ---
 
-## Task 7: `shadow` subcommand + docs
+## Task 8: `shadow` subcommand + docs + read-only RBAC
 
-**Files:**
-- Modify: `ksolver/src/main.rs` (add a `shadow` arm)
-- Modify: `ksolver/README.md`
+**Files:** Modify `ksolver/src/main.rs`, `ksolver/README.md`.
 
-**Interfaces:**
-- Consumes: `scheduler::config::ShadowConfig::from_env`, `scheduler::shadow::run_shadow`.
-
-- [ ] **Step 1: Add the subcommand**
-
-In `ksolver/src/main.rs`, add a new match arm before the `_ =>` fallback:
-
+- [ ] **Step 1: Add subcommand.** In `ksolver/src/main.rs`, add before the `_ =>` arm:
 ```rust
         Some("shadow") => {
             metrics::register_metrics();
             let cfg = ksolver::scheduler::config::ShadowConfig::from_env();
-            info!(
-                scheduler_name = %cfg.scheduler_name,
-                batch_seconds = cfg.batch_window.as_secs(),
-                http_addr = %cfg.http_addr,
-                namespaces = ?cfg.namespace_allowlist,
-                "starting shadow-mode GPU scheduler (binds nothing)"
-            );
+            info!(scheduler_name = %cfg.scheduler_name, batch_seconds = cfg.batch_window.as_secs(),
+                  http_addr = %cfg.http_addr, namespaces = ?cfg.namespace_allowlist,
+                  "starting shadow-mode GPU scheduler (binds nothing)");
             ksolver::scheduler::shadow::run_shadow(cfg).await?;
         }
 ```
+Extend the usage string to include `  ksolver shadow`.
 
-Also extend the usage string in the `_ =>` arm to include:
+- [ ] **Step 2: Build.** `cargo build -p ksolver --features rust-cp-sat` → compiles.
 
-```
-  syslens-solver shadow
-```
-
-- [ ] **Step 2: Build to confirm wiring**
-
-Run: `cargo build -p ksolver --features rust-cp-sat`
-Expected: compiles.
-
-- [ ] **Step 3: Document in README**
-
-Add a section to `ksolver/README.md`:
-
-```markdown
+- [ ] **Step 3: README.** Add to `ksolver/README.md`:
+````markdown
 ## Shadow-mode GPU scheduler
 
-Run the scheduler in shadow mode — it observes pending pods with
-`schedulerName: ksolver` that request GPUs, computes where they *would* be
-placed, records decision traces, and **binds nothing**:
+Observes pending pods with `schedulerName: ksolver` that request GPUs, computes
+where they *would* be placed, records decision traces, and **binds nothing**:
 
-    KUBECONFIG=~/.kube/config \
-    KSOLVER_SHADOW_SCHEDULER_NAME=ksolver \
-    KSOLVER_SHADOW_BATCH_SECONDS=10 \
-    cargo run --features rust-cp-sat -- shadow
+    KUBECONFIG=~/.kube/config KSOLVER_SHADOW_BATCH_SECONDS=10 \
+      cargo run --features rust-cp-sat -- shadow
 
-Environment variables:
+Env vars: `KSOLVER_SHADOW_SCHEDULER_NAME` (default `ksolver`),
+`KSOLVER_SHADOW_BATCH_SECONDS` (default `10`), `KSOLVER_SHADOW_NAMESPACES`
+(comma-separated allowlist; empty = all), `KSOLVER_SHADOW_GPU_RESOURCES`
+(default `nvidia.com/gpu`), `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`;
+serves `/api/scheduler/traces`, `/metrics`, `/healthz`, `/readyz`).
 
-- `KSOLVER_SHADOW_SCHEDULER_NAME` (default `ksolver`) — pods whose `spec.schedulerName` matches are in scope.
-- `KSOLVER_SHADOW_BATCH_SECONDS` (default `10`) — batch window between solves.
-- `KSOLVER_SHADOW_NAMESPACES` — comma-separated namespace allowlist (empty = all).
-- `KSOLVER_SHADOW_GPU_PREFIXES` (default `nvidia.com/gpu`) — resource-name prefixes counted as GPUs.
-- `KSOLVER_SHADOW_ADDR` (default `127.0.0.1:8090`) — serves `GET /api/scheduler/traces` and `/metrics`.
+Shadow mode issues only read/watch/list. Minimal RBAC (read-only):
 
-Shadow mode never calls the Binding or Eviction APIs.
-```
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: ksolver-shadow-readonly
+    rules:
+      - apiGroups: [""]
+        resources: [pods, nodes, persistentvolumeclaims, persistentvolumes]
+        verbs: [get, list, watch]
+      - apiGroups: ["apps"]
+        resources: [daemonsets, deployments]
+        verbs: [get, list, watch]
+      - apiGroups: ["storage.k8s.io"]
+        resources: [storageclasses]
+        verbs: [get, list, watch]
+      - apiGroups: ["policy"]
+        resources: [poddisruptionbudgets]
+        verbs: [get, list, watch]
 
-- [ ] **Step 4: Commit**
+It grants NO `create`/`update`/`patch`/`delete` and no `pods/binding` — shadow
+mode cannot mutate the cluster even if a bug tried to.
+````
 
+- [ ] **Step 4: Commit.**
 ```bash
 cargo fmt
 git add ksolver/src/main.rs ksolver/README.md
-git commit -m "feat(scheduler): add shadow subcommand and docs"
+git commit -m "feat(scheduler): shadow subcommand, docs, and read-only RBAC"
 ```
 
 ---
 
-## Task 8: Manual verification against a cluster
+## Task 9: Source-level no-mutation guard test
 
-No code — a verification checklist proving shadow mode works end to end and binds nothing.
+A cheap compile-time-ish guard proving shadow code never references cluster-mutating APIs. Uses `include_str!` on the scheduler sources.
 
-- [ ] **Step 1: Full test + lint gate**
+**Files:** Modify `ksolver/src/scheduler/mod.rs` (append a test module).
 
-Run: `cargo test -p ksolver && cargo clippy -p ksolver --features rust-cp-sat --all-targets`
-Expected: all tests pass; clippy clean.
+- [ ] **Step 1: Failing test.** Append to `ksolver/src/scheduler/mod.rs`:
+```rust
+#[cfg(test)]
+mod no_mutation_guard {
+    // These sources must never call cluster-mutating APIs in Phase 1.
+    const SHADOW: &str = include_str!("shadow.rs");
 
-- [ ] **Step 2: Start shadow mode against a test cluster (kind/minikube with a fake GPU resource, or a real dev cluster)**
+    #[test]
+    fn shadow_has_no_binding_or_mutation_calls() {
+        for needle in ["Binding", ".evict(", ".create(", ".replace(", ".patch(", ".delete("] {
+            assert!(!SHADOW.contains(needle), "shadow.rs must not contain `{needle}` in Phase 1");
+        }
+    }
+}
+```
 
-Run:
+- [ ] **Step 2: Run.** `cargo test -p ksolver no_mutation_guard` → PASS (the Task 7 code uses none of these; if it fails, a mutation call slipped in — remove it).
+
+- [ ] **Step 3: Commit.**
+```bash
+cargo fmt
+git add ksolver/src/scheduler/mod.rs
+git commit -m "test(scheduler): guard that shadow mode issues no cluster mutations"
+```
+
+---
+
+## Task 10: Manual verification against a cluster
+
+- [ ] **Step 1: Gate.** `cargo test -p ksolver && cargo clippy -p ksolver --features rust-cp-sat --all-targets` → all green.
+
+- [ ] **Step 2: Run shadow mode** (kind/minikube or dev cluster):
 ```bash
 KUBECONFIG=$HOME/.kube/config KSOLVER_SHADOW_BATCH_SECONDS=5 \
   cargo run --features rust-cp-sat -- shadow
 ```
-Expected logs: `starting shadow-mode GPU scheduler (binds nothing)` and `shadow scheduler HTTP server listening`.
+Expect: `starting shadow-mode GPU scheduler (binds nothing)`, `shadow HTTP server listening`, `pod watch (re)started`.
 
-- [ ] **Step 3: Create a pending GPU pod that opts into ksolver**
+- [ ] **Step 3: Create a pending GPU pod** with `spec.schedulerName: ksolver` and `nvidia.com/gpu: "1"` (on a cluster without GPUs it stays Pending — exactly what shadow observes). Within a window: `shadow decision recorded (bound nothing)`.
 
-Apply a pod with `spec.schedulerName: ksolver` and a `nvidia.com/gpu` request (on kind without GPUs it will stay Pending, which is exactly what shadow mode observes). Expected: within one batch window, a log line `shadow decision recorded (bound nothing)`.
+- [ ] **Step 4: Trace served.** `curl -s localhost:8090/api/scheduler/traces | jq '.traces[0]'` → a `DecisionTrace` with `observed_pods >= 1` and a `decisions[]` entry with `placement.kind` `placed` or `unplaced` (with a `reason`).
 
-- [ ] **Step 4: Confirm a trace is served**
+- [ ] **Step 5: Nothing bound (core safety).** `kubectl get pod <pod> -o jsonpath='{.spec.nodeName}'` → empty.
 
-Run: `curl -s localhost:8090/api/scheduler/traces | jq '.traces[0]'`
-Expected: a JSON `DecisionTrace` with `observed_pods >= 1` and a `decisions` array containing the pod with a `placement` of `placed` or `unplaced`.
+- [ ] **Step 6: Delete/relist.** `kubectl delete pod <pod>`; within a window+watch cycle the pod disappears from `/api/scheduler/traces` decisions and `ksolver_shadow_pending_pods` drops.
 
-- [ ] **Step 5: Confirm NOTHING was bound**
+- [ ] **Step 7: Metrics.** `curl -s localhost:8090/metrics | grep ksolver_shadow_` → all six shadow metrics present.
 
-Run: `kubectl get pod <pod> -o jsonpath='{.spec.nodeName}'`
-Expected: empty (pod still unbound). This is the core safety guarantee of shadow mode.
-
-- [ ] **Step 6: Confirm metrics**
-
-Run: `curl -s localhost:8090/metrics | grep ksolver_shadow_`
-Expected: `ksolver_shadow_pods_observed_total`, `ksolver_shadow_solves_total`, `ksolver_shadow_solve_seconds`, `ksolver_shadow_unplaced_total` present with non-zero values.
+- [ ] **Step 8: Readiness reflects watch health.** `curl -s -o /dev/null -w '%{http_code}' localhost:8090/readyz` → `200` once the initial relist completes.
 
 ---
 
-## Self-Review Notes (coverage vs Phase 1 of the spec)
+## Self-Review Notes (coverage vs spec Phase 1 + review fixes)
 
-- Spec §9 phase 1 "translate live state, compute decisions, bind nothing, emit traces" → Tasks 2 (classify), 5/6 (translate+solve), 3/6 (traces), 8 (bind-nothing proof). ✅
-- Spec §3 "simulator displays what the scheduler is doing" → Task 6 `/api/scheduler/traces` endpoint (basic traces; rich replay deferred per spec §11). ✅
-- Spec §10 safety "dry-run / never mutate" → shadow mode is dry-run by construction; verified in Task 8 Step 5. ✅
-- Spec §2 "NVIDIA-first GPU detection" → Task 2 `gpu_request` prefix match, configurable. ✅
-- Deferred correctly (NOT in this plan): reservation ledger, feasibility conformance suite, real L1 formulation, gang atomicity, preemption, topology, fractional, fair-share — these are Phases 2–10 and get their own plans.
-- Out-of-scope note surfaced: this phase reuses the existing whole-cluster cost solve as the "call path" scaffolding; the dedicated place-these-pending-pods L1 formulation (spec §4) lands in Phase 4 and will replace `run_one_solve`'s solve step.
+- Spec §9 phase 1 (translate state, compute, bind nothing, emit traces) → Tasks 2/3 (observe), 6/7 (translate+solve+map), 5/7 (traces), 9/10 (bind-nothing proof). ✅
+- Review fix: watcher Init/InitApply/InitDone relist semantics → Task 3 reducer, tested. ✅
+- Review fix: idempotent `register_metrics` + crate `REGISTRY` → Task 4. ✅
+- Review fix: strict ungrouped input + real workload-id mapping + `ignore_unschedulable=false` + explicit unplaced/not-submitted reasons → Task 6. ✅
+- Review fix: sequential loop (no interval bursting / overlap) → Task 7 (`sleep` after solve). ✅
+- Review fix: honest metric names (observations vs unique pending gauge), solve-error counter → Task 4/7. ✅
+- Review fix: k8s-accurate GPU request (init max, limits fallback, exact name) → Task 2. ✅
+- Review fix: pod UID identity, snapshot-age in trace → Tasks 2/5/6. ✅
+- Review fix: self-healing watch + readiness → Task 7; RBAC read-only + no-mutation guard → Tasks 8/9. ✅
+- Correct scaffolding caveat (still recorded): Phase 1 solves the whole cluster via the existing pipeline and reads back the pending pods' assignments; the dedicated "place these pending pods against fixed running context" L1 formulation (spec §4) replaces `run_one_solve`'s solve step in **Phase 4**. Traces label pods honestly (placed / no-feasible / not-submitted) so this scaffolding is not misrepresented.
+- Deferred to later phases (NOT here): reservation ledger, feasibility conformance suite, gang atomicity, preemption, topology, fractional, fair-share.
 ```
