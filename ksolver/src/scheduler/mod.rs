@@ -3,4 +3,5 @@
 
 pub mod config;
 pub mod pod_filter;
+pub mod trace;
 pub mod watch_state;
