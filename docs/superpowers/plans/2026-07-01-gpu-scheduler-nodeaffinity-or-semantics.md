@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **No regression to single-term or matchFields behavior:** a single `nodeSelectorTerm` with multiple `matchExpressions` still ANDs them (now one group); `matchFields`-only terms remain feasible-everywhere (empty group is vacuously true), identical to today.
+- **No regression to single-term or matchFields behavior:** a single `nodeSelectorTerm` with multiple `matchExpressions` still ANDs them (now one group). Empty modeled groups (e.g. a `matchFields`-only term) are SKIPPED, never a match-all OR branch; a pod whose ONLY terms are empty/matchFields-only has no modeled groups and falls back to unconstrained (`true`) — identical to today's all-ignored behavior.
 - **Only OR grouping changes:** multi-term pods now match if ANY term matches. All other predicates untouched.
 - **Empty `required_node_affinity` ⇒ unconstrained** (true), as today.
 - `cargo fmt` + clean clippy; update the two existing node-affinity unit tests to the grouped shape; add an OR-semantics test proving the bug is fixed. Binds nothing.
@@ -26,7 +26,7 @@
 ## Tasks
 
 ### Task 1: Model field shape
-- [ ] In `model.rs`, change `pub required_node_affinity: Vec<NodeAffinityTerm>` to `pub required_node_affinity: Vec<Vec<NodeAffinityTerm>>` with a doc comment: "OR-of-terms: outer Vec is OR (nodeSelectorTerms), inner Vec is AND (a term's matchExpressions). Empty ⇒ unconstrained. matchFields are not modeled (a matchFields-only term is an empty inner Vec ⇒ vacuously matches)." Build; fix literals (compiler lists them). Commit.
+- [ ] In `model.rs`, change `pub required_node_affinity: Vec<NodeAffinityTerm>` to `pub required_node_affinity: Vec<Vec<NodeAffinityTerm>>` with a doc comment: "OR-of-terms: outer Vec is OR (nodeSelectorTerms), inner Vec is AND (a term's matchExpressions). matchFields are not modeled, so a matchFields-only term is an empty inner Vec; matching SKIPS empty inner Vecs (they are not match-all branches), and if no non-empty group remains the pod is unconstrained." Build; fix literals (compiler lists them). Commit.
 
 ### Task 2: Collector grouping
 - [ ] In `collector.rs`, rewrite `to_required_node_affinity` to return `Vec<Vec<crate::model::NodeAffinityTerm>>`: for each `selector_term` in `node_selector_terms`, build ONE inner Vec from that term's `match_expressions` (map each expr to `NodeAffinityTerm`), and push it (even if empty — a matchFields-only or empty term becomes an empty group). Do NOT flatten across terms.
