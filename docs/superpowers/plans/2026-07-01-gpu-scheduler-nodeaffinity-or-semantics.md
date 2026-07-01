@@ -6,7 +6,7 @@
 
 **Why:** Surfaced by the Phase 2 conformance design review. `collector::to_required_node_affinity` flattens every term's expressions into one list and `normalizer::matches_required_node_affinity` requires ALL to match. kube-scheduler treats `nodeSelectorTerms` as OR. So a pod with 2+ terms (e.g. "zone=a OR zone=b") is under-admitted: we mark nodes infeasible the real scheduler accepts. This affects both the offline planner (over-conservative consolidation) and shadow feasibility.
 
-**Architecture:** Preserve the term grouping through the model. Change `Pod.required_node_affinity` from `Vec<NodeAffinityTerm>` (flat, ANDed) to `Vec<Vec<NodeAffinityTerm>>` — the outer Vec is OR-of-terms, each inner Vec is one term's `matchExpressions` (ANDed). Matching: no groups ⇒ no constraint (true); otherwise the pod matches a node iff ANY group matches, where a group matches iff ALL its expressions match (an empty group — a term with no modeled expressions — is vacuously true, matching today's behavior). **`matchFields` stays ignored exactly as today** (rare; explicitly bucketed as expected divergence in Phase 2), so a term carrying only `matchFields` becomes an empty group → still feasible-everywhere, i.e. NO regression versus current behavior. This is the minimal fix: it only corrects the OR grouping for `matchExpressions` and changes nothing else.
+**Architecture:** Preserve the term grouping through the model. Change `Pod.required_node_affinity` from `Vec<NodeAffinityTerm>` (flat, ANDed) to `Vec<Vec<NodeAffinityTerm>>` — the outer Vec is OR-of-terms, each inner Vec is one term's `matchExpressions` (ANDed). Matching (codex-corrected): **skip empty modeled groups** (a term whose modeled expressions are empty — e.g. a `matchFields`-only term); if NO modeled groups remain, the pod is unconstrained (true) — exactly today's all-ignored behavior. Otherwise the pod matches a node iff ANY non-empty group matches (all its expressions match). Crucially, an empty group is NOT a match-all OR branch: for `(zone=a) OR (matchFields name=x)` → `[[zone=a],[]]`, we evaluate only `zone=a` (the `matchFields` branch is skipped, yielding a conservative false-negative for name=x-only nodes rather than an incorrect match-all). **`matchFields` stays ignored exactly as today** (rare; explicitly bucketed as expected divergence in Phase 2). This is the minimal fix: it corrects OR grouping for `matchExpressions` and never becomes more permissive than today.
 
 **Tech Stack:** Rust; `model.rs`, `collector.rs`, `normalizer.rs`. Contained — no other consumers of `required_node_affinity`.
 
@@ -39,22 +39,26 @@ fn matches_required_node_affinity(
     node_labels: &BTreeMap<String, String>,
     groups: &[Vec<crate::model::NodeAffinityTerm>],
 ) -> bool {
-    if groups.is_empty() {
-        return true; // no required node affinity ⇒ unconstrained
+    // Skip empty modeled groups (e.g. matchFields-only terms): they are NOT match-all
+    // OR branches. If nothing modeled remains, the pod is unconstrained (today's behavior).
+    let mut modeled = groups.iter().filter(|g| !g.is_empty()).peekable();
+    if modeled.peek().is_none() {
+        return true;
     }
-    // OR across terms; AND across a term's expressions (empty group ⇒ vacuously true).
-    groups
-        .iter()
-        .any(|exprs| exprs.iter().all(|t| node_affinity_expr_matches(node_labels, t)))
+    // OR across terms; AND across a term's expressions.
+    modeled.any(|exprs| exprs.iter().all(|t| node_affinity_expr_matches(node_labels, t)))
 }
 ```
 - [ ] Update the two existing tests (`required_node_affinity_filters_infeasible_nodes`, `node_affinity_exists_operator`) to wrap their term lists in an outer group (`vec![vec![term...]]`).
-- [ ] Add `node_affinity_or_of_terms_matches_either`: two SEPARATE groups `vec![vec![In zone=a]], vec![In zone=b]]` → a node with zone=a matches, zone=b matches, zone=c does NOT. This is the regression test for the bug (pre-fix it would require BOTH and fail zone=a).
+- [ ] Add `node_affinity_or_of_terms_matches_either`: two SEPARATE groups `vec![vec![In zone=a], vec![In zone=b]]` → a node with zone=a matches, zone=b matches, zone=c does NOT. This is the regression test for the bug (pre-fix it would require BOTH and fail zone=a).
 - [ ] Add `single_term_ands_expressions`: one group `vec![vec![In zone=a, Exists gpu]]` → matches only a node with BOTH; missing gpu ⇒ no match (proves intra-term AND preserved).
+- [ ] Add `empty_group_is_not_match_all`: groups `vec![vec![In zone=a], vec![]]` (a modeled term OR a matchFields-only/empty term) → a node with zone=b does NOT match (the empty group must not make it match-all); a node with zone=a DOES match. And `vec![vec![]]` alone (all-empty) → matches any node (unconstrained fallback, no regression).
 - [ ] Run `cargo test --features rust-cp-sat --lib node_affinity` → pass. fmt + clippy. Commit.
 
 ## Self-Review Notes
 - OR-of-terms / AND-of-expressions now matches Kubernetes.
-- Single-term and matchFields-only behavior unchanged (no regression); only multi-term pods change (correctly).
+- Empty modeled groups are SKIPPED, not treated as match-all (codex fix): `(zone=a) OR (matchFields x)` evaluates only `zone=a` — never more permissive than today, no false-positive match-all.
+- All-empty/matchFields-only ⇒ unconstrained fallback = today's behavior (no regression).
+- Single-term AND preserved; only multi-term matchExpressions pods change (correctly).
 - Contained to 3 files; no other consumers.
-- Regression test (`or_of_terms`) fails pre-fix, passes post-fix.
+- Regression tests: `or_of_terms` fails pre-fix; `empty_group_is_not_match_all` guards the codex edge.
