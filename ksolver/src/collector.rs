@@ -564,6 +564,7 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
     Pod {
         namespace: namespace.clone(),
         name: name.clone(),
+        uid: pod.metadata.uid.clone().unwrap_or_default(),
         node_name: spec
             .as_ref()
             .and_then(|s| s.node_name.clone())

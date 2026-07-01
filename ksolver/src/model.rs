@@ -70,6 +70,10 @@ pub struct Node {
 pub struct Pod {
     pub namespace: String,
     pub name: String,
+    /// Kubernetes `metadata.uid` — stable pod identity (distinguishes a recreated pod that reuses
+    /// the same namespace/name). Empty if unavailable.
+    #[serde(default)]
+    pub uid: String,
     #[serde(default)]
     pub node_name: String,
     #[serde(default)]
@@ -641,6 +645,10 @@ pub struct NormalizedNode {
 pub struct NormalizedWorkload {
     pub namespace: String,
     pub name: String,
+    /// Kubernetes `metadata.uid` (stable pod identity; empty if unavailable). Used to detect a pod
+    /// recreated under the same namespace/name when validating a rendered binding.
+    #[serde(default)]
+    pub uid: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     /// Fully-modeled hostname pod-anti-affinity selectors (reqs + namespace scope) for symmetry
