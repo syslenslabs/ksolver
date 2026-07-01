@@ -162,19 +162,21 @@ mod enabled {
         }
 
         if !scenario.relax_required_anti_affinity {
-            let anti_affinity_ids: HashSet<&str> = input
+            // Self-pairs (a == a): spread this workload's own replicas <=1 per node.
+            let self_ids: HashSet<&str> = input
                 .anti_affinity_pairs
                 .iter()
-                .map(|(id, _)| id.as_str())
+                .filter(|(a, b)| a == b)
+                .map(|(a, _)| a.as_str())
                 .collect();
             for workload in &input.workloads {
                 if workload.group_size <= 1 {
                     continue;
                 }
-                let has_anti = anti_affinity_ids.contains(workload.id.as_str())
+                let has_anti = self_ids.contains(workload.id.as_str())
                     || workload.members.iter().any(|m| {
                         let key = format!("{}/{}", m.namespace, m.name);
-                        anti_affinity_ids.contains(key.as_str())
+                        self_ids.contains(key.as_str())
                     });
                 if !has_anti {
                     continue;
@@ -182,6 +184,60 @@ mod enabled {
                 for node_name in &workload.feasible_nodes {
                     let x = x_vars[&(workload.id.clone(), node_name.clone())];
                     model.add_le(x, 1_i64);
+                }
+            }
+
+            // Cross-pairs (a != b): at most one of workloads {a,b} may be PRESENT on a node.
+            // Presence bool per (workload,node): x_w[n] <= group_size_w * present_w_n, then
+            // present_a + present_b <= 1. (Using counts here would wrongly forbid gangs.)
+            let meta: HashMap<&str, (&Vec<String>, i64)> = input
+                .workloads
+                .iter()
+                .map(|w| (w.id.as_str(), (&w.feasible_nodes, i64::from(w.group_size))))
+                .collect();
+            let mut presence: HashMap<(String, String), BoolVar> = HashMap::new();
+            for (a, b) in &input.anti_affinity_pairs {
+                if a == b {
+                    continue;
+                }
+                let (Some((fa, ga)), Some((fb, gb))) = (meta.get(a.as_str()), meta.get(b.as_str()))
+                else {
+                    continue;
+                };
+                let bset: HashSet<&str> = fb.iter().map(|s| s.as_str()).collect();
+                for node_name in fa.iter().filter(|n| bset.contains(n.as_str())) {
+                    let ga = *ga;
+                    let gb = *gb;
+                    let key_a = (a.clone(), node_name.clone());
+                    let pa = match presence.get(&key_a) {
+                        Some(p) => *p,
+                        None => {
+                            let p = model.new_bool_var_with_name(format!(
+                                "present_{}__{}",
+                                sanitize(a),
+                                sanitize(node_name)
+                            ));
+                            model.add_le(x_vars[&key_a], (ga, p));
+                            presence.insert(key_a, p);
+                            p
+                        }
+                    };
+                    let key_b = (b.clone(), node_name.clone());
+                    let pb = match presence.get(&key_b) {
+                        Some(p) => *p,
+                        None => {
+                            let p = model.new_bool_var_with_name(format!(
+                                "present_{}__{}",
+                                sanitize(b),
+                                sanitize(node_name)
+                            ));
+                            model.add_le(x_vars[&key_b], (gb, p));
+                            presence.insert(key_b, p);
+                            p
+                        }
+                    };
+                    let expr: LinearExpr = [pa, pb].into_iter().collect();
+                    model.add_le(expr, 1_i64);
                 }
             }
         }
@@ -892,6 +948,134 @@ mod tests {
             !sol.assignment_counts.contains_key("gang:t/job"),
             "3-replica spread cannot fit <=1/node on 2 nodes"
         );
+    }
+
+    #[test]
+    fn cross_pair_forbids_shared_node() {
+        use crate::model::{
+            OptimizationWorkload, OptimizationWorkloadMember, ResourceList, ScenarioConfig,
+        };
+        use std::collections::BTreeMap;
+        let mk = |name: &str, feas: &[&str]| {
+            let mut ext = BTreeMap::new();
+            ext.insert("nvidia.com/gpu".to_string(), 1);
+            OptimizationWorkload {
+                id: format!("t/{name}"),
+                namespace: "t".into(),
+                name: name.into(),
+                group_size: 1,
+                members: vec![OptimizationWorkloadMember {
+                    namespace: "t".into(),
+                    name: name.into(),
+                    current_node: String::new(),
+                }],
+                requests: ResourceList {
+                    milli_cpu: 1000,
+                    memory_bytes: 1 << 30,
+                    ephemeral_storage: 0,
+                    pods: 1,
+                },
+                extended_resource_requests: ext,
+                feasible_nodes: feas.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            }
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".into(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let input1 = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![mk("a", &["n1"]), mk("b", &["n1"])],
+            anti_affinity_pairs: vec![("t/a".into(), "t/b".into())],
+        };
+        let (s1, _) = super::enabled::solve(&input1, &scenario).expect("solve");
+        let admitted1 = s1
+            .assignment_counts
+            .values()
+            .filter(|c| c.values().any(|v| *v > 0))
+            .count();
+        assert_eq!(admitted1, 1, "cross-pair on one node admits only one");
+        let input2 = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![mk("a", &["n1", "n2"]), mk("b", &["n1", "n2"])],
+            anti_affinity_pairs: vec![("t/a".into(), "t/b".into())],
+        };
+        let (s2, _) = super::enabled::solve(&input2, &scenario).expect("solve");
+        let admitted2 = s2
+            .assignment_counts
+            .values()
+            .filter(|c| c.values().any(|v| *v > 0))
+            .count();
+        assert_eq!(admitted2, 2, "cross-pair with two nodes admits both");
+    }
+
+    #[test]
+    fn cross_pair_presence_allows_colocated_gang_alone() {
+        use crate::model::ScenarioConfig;
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".into(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        // A: colocated gang gs=2 (2 GPU); B: singleton 1 GPU; both on n1 (4 GPU).
+        let mut a = gang_workload(2, 2, &["n1"]);
+        a.colocate = true;
+        a.id = "gang:t/a".into();
+        let mut b = gang_workload(1, 1, &["n1"]);
+        b.id = "gang:t/b".into();
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![a, b],
+            anti_affinity_pairs: vec![("gang:t/a".into(), "gang:t/b".into())],
+        };
+        let (sol, _i) = super::enabled::solve(&input, &scenario).expect("solve");
+        let admitted = sol
+            .assignment_counts
+            .values()
+            .filter(|c| c.values().any(|v| *v > 0))
+            .count();
+        assert!(
+            admitted <= 1,
+            "cross-paired workloads must not share the single node"
+        );
+        // A alone must be admissible (presence model does not forbid the colocated gang).
+        let mut a2 = gang_workload(2, 2, &["n1"]);
+        a2.colocate = true;
+        a2.id = "gang:t/a".into();
+        let solo = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![a2],
+            anti_affinity_pairs: vec![],
+        };
+        let (s3, _i) = super::enabled::solve(&solo, &scenario).expect("solve");
+        assert_eq!(
+            s3.assignment_counts
+                .get("gang:t/a")
+                .map(|c| c.values().sum::<i32>())
+                .unwrap_or(0),
+            2,
+            "colocated gang admissible alone"
+        );
+        // two-node: A on n1, B on n2 -> both admitted.
+        let mut a3 = gang_workload(2, 2, &["n1", "n2"]);
+        a3.colocate = true;
+        a3.id = "gang:t/a".into();
+        let mut b3 = gang_workload(1, 1, &["n1", "n2"]);
+        b3.id = "gang:t/b".into();
+        let two = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4), gpu_node("n2", 4)],
+            workloads: vec![a3, b3],
+            anti_affinity_pairs: vec![("gang:t/a".into(), "gang:t/b".into())],
+        };
+        let (s4, _i) = super::enabled::solve(&two, &scenario).expect("solve");
+        let admitted4 = s4
+            .assignment_counts
+            .values()
+            .filter(|c| c.values().any(|v| *v > 0))
+            .count();
+        assert_eq!(admitted4, 2, "two nodes admit both cross-paired workloads");
     }
 
     #[test]
