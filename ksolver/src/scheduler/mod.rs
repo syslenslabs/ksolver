@@ -2,3 +2,4 @@
 //! observe and compute placement decisions; never bind pods.
 
 pub mod config;
+pub mod pod_filter;
