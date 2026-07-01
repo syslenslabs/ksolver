@@ -99,10 +99,13 @@ git commit -m "feat(scheduler): configurable gang label, classify extracts gang 
 
 **Interfaces:**
 - Change signature to `pub fn build_pending_input(cluster: &NormalizedCluster, pending: &[PendingGpuPod]) -> OptimizationInput`.
-- Grouping: `gang_id = pod.gang_key.clone().unwrap_or_else(|| "{ns}/{name}")`. Pods sharing a `gang_id` form one gang. For each gang, sort members by `name` for determinism; representative = first.
-- Per gang emit one `OptimizationWorkload` iff its representative has ≥1 residual-feasible node: `id = gang_id`, `group_size = members.len()`, `members = [OptimizationWorkloadMember{ns,name,current_node:""} ..]`, `requests`/`extended_resource_requests` = representative member's `NormalizedWorkload`, `feasible_nodes` = representative's `feasible_node_names` filtered by residual `fits(requests, ext)`.
+- **Prefixed keys (codex fix #6):** `gang_id = match pod.gang_key { Some(v) => "gang:{v}", None => "pod:{ns}/{name}" }` (`gang_key` is already `"{ns}/{value}"`). This prevents a singleton named `job` colliding with a gang labelled `job`.
+- **CRITICAL — scale requests by group_size (codex fix #2).** The solver divides `workload.requests`/`extended_resource_requests` by `group_size` (`per_replica_requests`/`per_replica_scalar_requests`, integer division). Existing grouped input scales by member count (`optimizer_input::scale_requests`/`scale_extended_requests`, which also sets `pods = group_size`). The gang workload MUST store the **total**: `requests = scale_requests(representative.requests, N)`, `extended_resource_requests = scale_extended_requests(representative.ext, N)`, `recommended_requests = scale_requests(representative.recommended_requests, N)`. Storing per-replica would make a 5×1-GPU gang compute `1/5 = 0` GPU/replica and wrongly admit onto a 4-GPU node.
+- **Enforce homogeneity (codex fix #3).** A gang is modeled as one `group_size = N` workload ONLY if all members share an identical signature: same `requests`, same `extended_resource_requests`, and same `feasible_node_names` (sorted). If members are heterogeneous, exclude the whole gang (do not silently mis-model) — its members are reported unplaced downstream. (A shared-admission multi-workload model is deferred.)
+- **Check EVERY member (codex fix #4).** Exclude the whole gang unless: every member's `NormalizedWorkload` is found by `{ns}/{name}`, the members are homogeneous, and the representative has ≥1 residual-feasible node (which, given homogeneity, equals every member's). Determinism: sort members by `name`; representative = first.
+- Per included gang emit one `OptimizationWorkload`: `id = gang_id`, `group_size = members.len()`, `members = [OptimizationWorkloadMember{ns,name,current_node:""} ..]` (all members), scaled requests as above, `feasible_nodes` = representative's `feasible_node_names` filtered by residual `fits(per-replica requests, ext)` — filter with the **per-replica** (unscaled representative) requests, since `fits` checks one replica.
 - Running-usage subtraction (Phase 4) unchanged: running = `current_node != ""`.
-- A pending pod whose `NormalizedWorkload` is missing (not found by `{ns}/{name}`) or has empty residual-feasible set → its gang is excluded (reported "not submitted" downstream). If ANY member of a gang is infeasible/missing, exclude the whole gang (all-or-nothing) so the solver never sees a partial gang.
+- Singletons (`gang_key == None`) → `group_size = 1`, unscaled requests (scale-by-1 is identity) — preserves Phase-4 behavior.
 
 - [ ] **Step 1: Failing tests.** Rewrite `pending_input.rs` tests to pass `&[PendingGpuPod]`. Add a `pod(ns,name,gang)` helper building `PendingGpuPod { uid, namespace, name, gpu_request:1, gang_key }`. Cases:
   - two pods same gang label → one workload, `group_size == 2`, `members.len() == 2`.
@@ -118,7 +121,7 @@ git commit -m "feat(scheduler): configurable gang label, classify extracts gang 
     }
 
     #[test]
-    fn groups_same_gang_into_one_workload() {
+    fn groups_same_gang_and_scales_requests() {
         let cluster = NormalizedCluster {
             nodes: vec![node("n1", 16000, 64, 110, 8)],
             workloads: vec![
@@ -129,8 +132,29 @@ git commit -m "feat(scheduler): configurable gang label, classify extracts gang 
         };
         let input = build_pending_input(&cluster, &[ppod("team","m0",Some("job")), ppod("team","m1",Some("job"))]);
         assert_eq!(input.workloads.len(), 1);
-        assert_eq!(input.workloads[0].group_size, 2);
-        assert_eq!(input.workloads[0].members.len(), 2);
+        let w = &input.workloads[0];
+        assert_eq!(w.id, "gang:team/job");
+        assert_eq!(w.group_size, 2);
+        assert_eq!(w.members.len(), 2);
+        // requests are TOTAL (scaled by group_size) — solver divides back per replica.
+        assert_eq!(w.requests.milli_cpu, 2000); // 1000 * 2
+        assert_eq!(*w.extended_resource_requests.get("nvidia.com/gpu").unwrap(), 2); // 1 * 2
+        assert_eq!(w.requests.pods, 2);
+    }
+
+    #[test]
+    fn heterogeneous_gang_is_excluded() {
+        // members differ in cpu request -> cannot be modeled as one group_size workload.
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 4000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team","m0",Some("job")), ppod("team","m1",Some("job"))]);
+        assert_eq!(input.workloads.len(), 0);
     }
 
     #[test]
@@ -169,11 +193,13 @@ git commit -m "feat(scheduler): configurable gang label, classify extracts gang 
 
 - [ ] **Step 4: Run → pass.** `cargo test -p ksolver scheduler::pending_input` → PASS.
 
+- [ ] **Step 4b: Feature-gated solver test proving the scaling contract (codex must-fix).** In `cpsat_rust.rs`'s `#[cfg(all(test, feature = "rust-cp-sat"))]` tests, add: a 4-GPU node and one `group_size=5` workload whose `extended_resource_requests["nvidia.com/gpu"] = 5` (total, i.e. 1/replica) with `partial_admission=true`; assert the solve succeeds and produces **no** `assignment_counts` entry for it (5 replicas cannot fit in 4 GPUs — gang not admitted). Then a sibling with a 5-GPU node asserts it **is** admitted with `sum == 5`. This catches the divide-by-group_size bug directly.
+
 - [ ] **Step 5: Commit.**
 ```bash
 cargo fmt
-git add ksolver/src/scheduler/pending_input.rs
-git commit -m "feat(scheduler): group pending pods into gangs (group_size, all-or-nothing)"
+git add ksolver/src/scheduler/pending_input.rs ksolver/src/cpsat_rust.rs
+git commit -m "feat(scheduler): group pending pods into gangs (scaled requests, all-or-nothing)"
 ```
 
 ---
@@ -182,7 +208,10 @@ git commit -m "feat(scheduler): group pending pods into gangs (group_size, all-o
 
 **Files:** Modify `decision.rs`; extend tests.
 
-**Interfaces:** `build_decision_trace` signature unchanged. New logic: build a map `pod_key ("{ns}/{name}") -> (gang_id, admitted, node)` from `input.workloads` (iterating each workload's `members`), where `admitted = assignment_counts[id]` sums to `> 0` (latch ⇒ full group_size) and `node = assignments[id]` (best node, may be one of several for a spread gang). For each observed pod: if in the map → placed (with node) or unplaced ("gang not admitted (insufficient capacity for all replicas)"); else → unplaced ("not submitted (filtered as unschedulable during input build)").
+**Interfaces:** `build_decision_trace` signature unchanged. New logic:
+- For each workload in `input.workloads`, read `assignment_counts[id]`. **Admitted iff `sum(counts) == group_size`** (the latch guarantees 0 or group_size; a nonzero partial is anomalous — treat as NOT admitted, do not report partial gangs as placed) (codex fix #5).
+- **Per-member node from `assignment_counts`, not `assignments[id]`** (codex fix #5 — `assignments` is a single best node and misreports a spread gang). Distribute deterministically: sort the workload's `members` by `name`, sort `counts` node keys by name, and fill members into nodes according to each node's count. This gives every member a concrete node consistent with the spread.
+- Build `pod_key ("{ns}/{name}") -> placement` from all workloads' members. For each observed pod: if present → its computed `Placed { node }` (admitted) or `Unplaced { reason: "gang not admitted (insufficient capacity for all replicas)" }` (not admitted); else → `Unplaced { reason: "not submitted (filtered as unschedulable during input build)" }`.
 
 - [ ] **Step 1: Failing test.** Add a gang case: input has one gang workload `id="team/job"`, `group_size=2`, `members=[m0,m1]`; `assignment_counts["team/job"] = {n1:2}`. Observed pods m0,m1 → both `Placed { node: n1 }`. A second gang `team/job2` with members present in input but NO assignment_counts → both members `Unplaced` with a "gang not admitted" reason. A pod not in any workload's members → "not submitted".
 ```rust
@@ -245,13 +274,15 @@ git commit -m "feat(scheduler): shadow groups pending pods into gangs"
 
 ---
 
-## Self-Review Notes
+## Self-Review Notes (incl. codex review fixes)
 
-- Gang all-or-nothing relies on the Phase-5a latch (`sum = group_size * placed`) — a gang that can't fully fit is admitted=0, never partially placed.
-- Homogeneous-gang approximation documented (representative requests, deterministic by sorted member name).
-- Whole-gang exclusion when any member is infeasible/missing prevents the solver seeing a partial gang.
-- Singletons (no label) preserve Phase-4 behavior (`group_size = 1`).
-- Decision mapping is member-based (via `OptimizationWorkload.members`), distinguishing "not submitted", "gang not admitted", and "placed".
-- Still binds nothing; no-mutation guard unaffected.
-- Deferred: gang co-location/topology (all replicas on NVLink-connected GPUs / same node) — a later topology phase; this phase only guarantees all-or-nothing admission across the fleet.
+- **Scaled requests (codex #2):** gang requests/extended stored as TOTAL (`× group_size`) matching `optimizer_input` + the solver's per-replica division; feature-gated 5-on-4 solver test proves a 5×1-GPU gang is rejected on 4 GPUs (Task 2 Step 4b).
+- **Homogeneity enforced (codex #3), not just documented:** heterogeneous gangs (differing requests/ext/feasible sets) are excluded, not mis-modeled; test in Task 2.
+- **Every member checked (codex #4):** whole-gang exclusion requires all members found + homogeneous + representative residual-feasible.
+- **Prefixed keys (codex #6):** `gang:{ns}/{value}` vs `pod:{ns}/{name}` — no singleton/gang collision; asserted in Task 2 test.
+- **Admission = `sum == group_size` (codex #5):** partial counts never reported as placed; per-member nodes distributed deterministically from `assignment_counts` (not the single-best `assignments`), so a spread gang reports honest per-member nodes.
+- Gang all-or-nothing relies on the Phase-5a latch — a gang that can't fully fit is admitted=0, never partial (verified by constraint analysis: `x ∈ [0,group_size]`, `sum == group_size * placed`).
+- Singletons (no label) preserve Phase-4 behavior (`group_size = 1`, identity scaling).
+- Still binds nothing; no-mutation guard unaffected. Offline planner untouched (partial_admission off there; gang builder is shadow-only).
+- Deferred: gang co-location/topology (all replicas on NVLink-connected GPUs / same node) — a later topology phase; this phase only guarantees all-or-nothing admission across the fleet. Shared-admission modeling of heterogeneous gangs also deferred.
 ```
