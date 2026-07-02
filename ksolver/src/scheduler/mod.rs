@@ -9,6 +9,7 @@ pub mod binder;
 pub mod binding;
 pub mod config;
 pub mod decision;
+pub mod gpu_scenarios;
 pub mod pending_input;
 pub mod pod_filter;
 pub mod shadow;

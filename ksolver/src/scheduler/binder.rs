@@ -14,6 +14,10 @@ pub struct LivePodView {
     pub node_name: String,
     pub deleting: bool,
     pub scheduler_name: String,
+    /// True if the pod requests devices via `spec.resourceClaims` (DRA). ksolver models DRA only as
+    /// a scalar shadow approximation and does NOT allocate ResourceClaims, so it must NOT real-bind
+    /// such pods — a bound-but-unallocated DRA pod would hang (kubelet waits for claim allocation).
+    pub uses_dra: bool,
 }
 
 /// Whether to apply a rendered binding, decided against the freshest live pod state.
@@ -57,9 +61,20 @@ pub fn should_apply(
             reason: "pod is terminating".into(),
         };
     }
+    if live.uses_dra {
+        // ksolver does not allocate ResourceClaims; binding a DRA pod would leave it stuck waiting
+        // for device allocation. Refuse (its shadow placement is advisory only).
+        return ApplyDecision::Skip {
+            reason: "DRA pod: ksolver does not allocate ResourceClaims (real binding unsafe)"
+                .into(),
+        };
+    }
     if !expected_scheduler.is_empty() && live.scheduler_name != expected_scheduler {
         return ApplyDecision::Skip {
-            reason: format!("pod scheduler is {}, not {}", live.scheduler_name, expected_scheduler),
+            reason: format!(
+                "pod scheduler is {}, not {}",
+                live.scheduler_name, expected_scheduler
+            ),
         };
     }
     if !live.node_name.is_empty() {
@@ -129,7 +144,10 @@ pub async fn apply_bindings(
     let mut applied = 0usize;
     for (entry, readiness) in plan {
         if applied >= cfg.max_binds_per_pass {
-            outcomes.push(BindOutcome::skip(entry, "max binds per pass reached".into()));
+            outcomes.push(BindOutcome::skip(
+                entry,
+                "max binds per pass reached".into(),
+            ));
             continue;
         }
         let pods: Api<corev1::Pod> = Api::namespaced(client.clone(), &entry.namespace);
@@ -153,6 +171,12 @@ pub async fn apply_bindings(
                     .as_ref()
                     .and_then(|s| s.scheduler_name.clone())
                     .unwrap_or_default(),
+                uses_dra: p
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.resource_claims.as_ref())
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(false),
             }),
             Ok(None) => None,
             Err(e) => {
@@ -222,7 +246,12 @@ pub async fn apply_bindings(
                                     .as_ref()
                                     .and_then(|s| s.node_name.clone())
                                     .unwrap_or_default();
-                                if bound_to == entry.node_name {
+                                // Only claim success if it's still OUR pod (uid match) bound to the
+                                // target — a same-name recreated/other pod must not be counted Bound.
+                                let same_pod = p.metadata.uid.clone().unwrap_or_default()
+                                    == entry.pod_uid
+                                    && !entry.pod_uid.is_empty();
+                                if same_pod && bound_to == entry.node_name {
                                     applied += 1;
                                     tracing::info!(
                                         ns = %entry.namespace, pod = %entry.pod_name,
@@ -279,6 +308,18 @@ mod tests {
             node_name: node.into(),
             deleting: false,
             scheduler_name: "ksolver".into(),
+            uses_dra: false,
+        }
+    }
+
+    #[test]
+    fn skips_dra_pod_never_real_binds() {
+        let mut lv = live("u", "Pending", "");
+        lv.uses_dra = true;
+        let d = should_apply(&entry("u"), &BindReadiness::Ready, Some(&lv), "ksolver");
+        match d {
+            ApplyDecision::Skip { reason } => assert!(reason.contains("DRA")),
+            _ => panic!("DRA pod must never be real-bound"),
         }
     }
 

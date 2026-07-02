@@ -340,17 +340,37 @@ impl KubeCollector {
         let (slices, classes, claims) = match (slices, classes, claims) {
             (Ok(s), Ok(c), Ok(cl)) => (s.items, c.items, cl.items),
             _ => {
-                debug!("DRA API not available (resource.k8s.io/v1alpha3); skipping DRA augmentation");
+                debug!(
+                    "DRA API not available (resource.k8s.io/v1alpha3); skipping DRA augmentation"
+                );
                 return;
             }
         };
         if slices.is_empty() && classes.is_empty() {
             return; // no DRA in use
         }
-        let templates = templates.map(|t| t.items).unwrap_or_default();
+        // Disclosures accumulated here are folded into snapshot.warnings (the "not silently trusted"
+        // contract): anything that makes DRA demand/capacity approximate or incomplete is surfaced.
+        let mut dra_warnings: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let templates = match templates {
+            Ok(t) => t.items,
+            Err(_) => {
+                dra_warnings.insert(
+                    "DRA: could not list ResourceClaimTemplates; template-backed pod demand not modeled"
+                        .to_string(),
+                );
+                Vec::new()
+            }
+        };
 
         // Node capacity: synthetic dra.ksolver/<class> = unallocated matching devices.
         let avail = crate::dra::compute_availability(&slices, &classes, &claims);
+        for class in &avail.unevaluable_classes {
+            dra_warnings.insert(format!(
+                "DRA: DeviceClass '{class}' has selectors ksolver cannot evaluate; its devices are not counted"
+            ));
+        }
         let mut nodes_aug = 0usize;
         let mut total_capacity = 0i64;
         for node in &mut snapshot.nodes {
@@ -383,15 +403,18 @@ impl KubeCollector {
                 Some(((ns, name), c))
             })
             .collect();
-        let template_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaimTemplate> = templates
-            .iter()
-            .filter_map(|t| {
-                let ns = t.metadata.namespace.clone()?;
-                let name = t.metadata.name.clone()?;
-                Some(((ns, name), t))
-            })
-            .collect();
-        // Raw pod specs (the model Pod drops resourceClaims), keyed by (ns, name).
+        let template_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaimTemplate> =
+            templates
+                .iter()
+                .filter_map(|t| {
+                    let ns = t.metadata.namespace.clone()?;
+                    let name = t.metadata.name.clone()?;
+                    Some(((ns, name), t))
+                })
+                .collect();
+        // Raw pod specs (the model Pod drops resourceClaims), keyed by (ns, name). If the pod list
+        // fails, DRA pod demand cannot be modeled — disclose it (nodes still carry real capacity,
+        // so unmodeled demand would otherwise silently over-admit).
         let raw_pod_claims: BTreeMap<(String, String), Vec<corev1::PodResourceClaim>> = {
             let pods_api: Api<corev1::Pod> = Api::all(self.client.clone());
             match pods_api.list(&lp).await {
@@ -405,7 +428,13 @@ impl KubeCollector {
                         Some(((ns, name), rc))
                     })
                     .collect(),
-                Err(_) => BTreeMap::new(),
+                Err(_) => {
+                    dra_warnings.insert(
+                        "DRA: could not list pods for claim resolution; DRA pod demand not modeled"
+                            .to_string(),
+                    );
+                    BTreeMap::new()
+                }
             }
         };
         let mut pods_aug = 0usize;
@@ -413,7 +442,7 @@ impl KubeCollector {
             let Some(refs) = raw_pod_claims.get(&(pod.namespace.clone(), pod.name.clone())) else {
                 continue;
             };
-            let before = pod.extended_resource_requests.len();
+            let mut added = false;
             for pod_claim in refs {
                 let demand = if let Some(cn) = pod_claim.resource_claim_name.as_ref() {
                     claim_by_ns_name
@@ -427,20 +456,35 @@ impl KubeCollector {
                 } else {
                     None
                 };
-                if let Some(demand) = demand {
-                    for (class, count) in demand.by_class {
-                        if count > 0 {
-                            *pod.extended_resource_requests
-                                .entry(crate::dra::class_resource_key(&class))
-                                .or_default() += count;
+                match demand {
+                    Some(demand) => {
+                        for c in demand.caveats {
+                            dra_warnings.insert(format!("{}/{}: {c}", pod.namespace, pod.name));
                         }
+                        for (class, count) in demand.by_class {
+                            if count > 0 {
+                                *pod.extended_resource_requests
+                                    .entry(crate::dra::class_resource_key(&class))
+                                    .or_default() += count;
+                                added = true;
+                            }
+                        }
+                    }
+                    None => {
+                        // Referenced claim/template not found (transient or RBAC) — its demand is
+                        // unmodeled, so disclose rather than silently under-count.
+                        dra_warnings.insert(format!(
+                            "DRA: {}/{} references claim '{}' not found; demand not modeled",
+                            pod.namespace, pod.name, pod_claim.name
+                        ));
                     }
                 }
             }
-            if pod.extended_resource_requests.len() > before {
+            if added {
                 pods_aug += 1;
             }
         }
+        snapshot.warnings.extend(dra_warnings);
         info!(
             slices = slices.len(),
             device_classes = classes.len(),
@@ -1444,15 +1488,17 @@ pub(crate) fn modeled_preferred_pod_terms(
         }
     };
     consume(
-        aff.pod_affinity
-            .as_ref()
-            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.as_ref()),
+        aff.pod_affinity.as_ref().and_then(|a| {
+            a.preferred_during_scheduling_ignored_during_execution
+                .as_ref()
+        }),
         false,
     );
     consume(
-        aff.pod_anti_affinity
-            .as_ref()
-            .and_then(|a| a.preferred_during_scheduling_ignored_during_execution.as_ref()),
+        aff.pod_anti_affinity.as_ref().and_then(|a| {
+            a.preferred_during_scheduling_ignored_during_execution
+                .as_ref()
+        }),
         true,
     );
     out

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::model::{ObjectiveProfile, ObjectiveWeights};
+
 /// Shadow-mode scheduler configuration, sourced from environment variables.
 #[derive(Debug, Clone)]
 pub struct ShadowConfig {
@@ -33,6 +35,13 @@ pub struct ShadowConfig {
     pub real_binding_dry_run: bool,
     /// Upper bound on bindings applied per solve pass (throttle). Default 10.
     pub max_binds_per_pass: usize,
+    /// Solver objective profile used by shadow GPU scheduling.
+    pub objective_profile: ObjectiveProfile,
+    /// Solver objective weights used by objective profiles that need extra policy weights.
+    pub objective_weights: ObjectiveWeights,
+    /// Optional cap on feasible candidate nodes per pending workload/gang before CP-SAT model build.
+    /// 0 disables pruning and preserves the full feasible set.
+    pub candidate_node_limit: usize,
 }
 
 /// Parse `KSOLVER_SHADOW_QUOTAS="ns=cap,ns2=cap2"` (pure/testable). Entries with a
@@ -76,6 +85,34 @@ fn parse_max_binds(v: Option<String>) -> usize {
         .unwrap_or(10)
 }
 
+fn parse_i64_env(key: &str, default: i64) -> i64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_usize_env(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_objective_profile(v: Option<String>) -> ObjectiveProfile {
+    match v
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("gpu-gang-aware") | Some("gpu") | Some("gpu_throughput") | Some("gpu-throughput") => {
+            ObjectiveProfile::GpuGangAware
+        }
+        _ => ObjectiveProfile::CostBinpack,
+    }
+}
+
 fn csv_env(key: &str) -> Vec<String> {
     std::env::var(key)
         .ok()
@@ -103,6 +140,21 @@ impl ShadowConfig {
         if gpu_resource_prefixes.is_empty() {
             gpu_resource_prefixes = vec!["nvidia.com/mig-".to_string()];
         }
+        let objective_profile =
+            parse_objective_profile(std::env::var("KSOLVER_OBJECTIVE_PROFILE").ok());
+        let default_weights = ObjectiveWeights::default();
+        let objective_weights = ObjectiveWeights {
+            admission: parse_i64_env("KSOLVER_GPU_ADMISSION_WEIGHT", default_weights.admission),
+            gpu_demand: parse_i64_env("KSOLVER_GPU_DEMAND_WEIGHT", default_weights.gpu_demand),
+            gang_complete: parse_i64_env(
+                "KSOLVER_GPU_GANG_COMPLETE_WEIGHT",
+                default_weights.gang_complete,
+            ),
+            gpu_fragmentation: parse_i64_env(
+                "KSOLVER_GPU_FRAGMENTATION_WEIGHT",
+                default_weights.gpu_fragmentation,
+            ),
+        };
         Self {
             scheduler_name: std::env::var("KSOLVER_SHADOW_SCHEDULER_NAME")
                 .unwrap_or_else(|_| "ksolver".to_string()),
@@ -126,6 +178,9 @@ impl ShadowConfig {
             enable_real_binding: parse_bool(std::env::var("KSOLVER_ENABLE_REAL_BINDING").ok()),
             real_binding_dry_run: parse_bool(std::env::var("KSOLVER_REAL_BINDING_DRY_RUN").ok()),
             max_binds_per_pass: parse_max_binds(std::env::var("KSOLVER_MAX_BINDS_PER_PASS").ok()),
+            objective_profile,
+            objective_weights,
+            candidate_node_limit: parse_usize_env("KSOLVER_CANDIDATE_NODE_LIMIT", 0),
         }
     }
 
@@ -165,6 +220,9 @@ mod tests {
             enable_real_binding: false,
             real_binding_dry_run: false,
             max_binds_per_pass: 10,
+            objective_profile: ObjectiveProfile::CostBinpack,
+            objective_weights: ObjectiveWeights::default(),
+            candidate_node_limit: 0,
         }
     }
 

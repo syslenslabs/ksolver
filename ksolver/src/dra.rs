@@ -163,7 +163,11 @@ fn eval_selector(
             return SelMatch::Unevaluable;
         };
         let name = after2.trim();
-        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             return SelMatch::Unevaluable;
         }
         return match lookup_attr(attrs, domain, name) {
@@ -176,8 +180,10 @@ fn eval_selector(
     SelMatch::Unevaluable
 }
 
-/// Whether a class matches a device. Empty selectors ⇒ Yes. All Yes ⇒ Yes. Any Unevaluable ⇒
-/// Unevaluable (even if another selector is No — we can't be sure). Otherwise No.
+/// Whether a class matches a device (selectors are ANDed). CEL AND semantics: a definite `No`
+/// makes the class NOT match (returned even if other selectors are Unevaluable — `false && unknown`
+/// is `false`, so the device is safely excluded without a spurious unevaluable caveat). Otherwise
+/// any Unevaluable ⇒ Unevaluable; empty/all-Yes ⇒ Yes.
 fn class_matches(
     class: &dra::DeviceClass,
     slice_driver: &str,
@@ -191,7 +197,6 @@ fn class_matches(
         return SelMatch::Yes;
     }
     let mut any_unevaluable = false;
-    let mut all_yes = true;
     for sel in selectors {
         let Some(cel) = sel.cel.as_ref() else {
             any_unevaluable = true;
@@ -199,16 +204,16 @@ fn class_matches(
         };
         match eval_selector(&cel.expression, slice_driver, attrs) {
             SelMatch::Yes => {}
-            SelMatch::No => all_yes = false,
+            // A definite No short-circuits the AND: the device does not match this class.
+            SelMatch::No => return SelMatch::No,
             SelMatch::Unevaluable => any_unevaluable = true,
         }
     }
+    // Reached only if no selector was a definite No.
     if any_unevaluable {
         SelMatch::Unevaluable
-    } else if all_yes {
-        SelMatch::Yes
     } else {
-        SelMatch::No
+        SelMatch::Yes
     }
 }
 
@@ -275,7 +280,11 @@ pub fn compute_availability(
             continue;
         };
         for device in devices {
-            let id = (spec.driver.clone(), spec.pool.name.clone(), device.name.clone());
+            let id = (
+                spec.driver.clone(),
+                spec.pool.name.clone(),
+                device.name.clone(),
+            );
             if allocated.contains(&id) {
                 continue; // already allocated to a claim
             }
@@ -366,7 +375,9 @@ pub fn demand_from_device_claim(devices: &dra::DeviceClaim) -> ClaimDemand {
             ));
         }
         let count = req.count.unwrap_or(1).max(0);
-        *out.by_class.entry(req.device_class_name.clone()).or_default() += count;
+        *out.by_class
+            .entry(req.device_class_name.clone())
+            .or_default() += count;
     }
     out
 }
@@ -388,14 +399,25 @@ mod tests {
         dra::Device {
             name: name.to_string(),
             basic: Some(dra::BasicDevice {
-                attributes: Some(attrs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()),
+                attributes: Some(
+                    attrs
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect(),
+                ),
                 ..Default::default()
             }),
             ..Default::default()
         }
     }
 
-    fn slice(node: &str, driver: &str, pool: &str, gen: i64, devices: Vec<dra::Device>) -> dra::ResourceSlice {
+    fn slice(
+        node: &str,
+        driver: &str,
+        pool: &str,
+        gen: i64,
+        devices: Vec<dra::Device>,
+    ) -> dra::ResourceSlice {
         dra::ResourceSlice {
             spec: dra::ResourceSliceSpec {
                 driver: driver.to_string(),
@@ -453,16 +475,28 @@ mod tests {
         let mut a = BTreeMap::new();
         a.insert("gpu.nvidia.com/model".to_string(), attr_str("A100"));
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "A100""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].model == "A100""#,
+                "d",
+                &a
+            ),
             SelMatch::Yes
         );
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "H100""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].model == "H100""#,
+                "d",
+                &a
+            ),
             SelMatch::No
         );
         // absent attribute ⇒ predicate false ⇒ No
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].vendor == "x""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].vendor == "x""#,
+                "d",
+                &a
+            ),
             SelMatch::No
         );
     }
@@ -476,19 +510,30 @@ mod tests {
             r#"device.attributes["x"].y in ["a","b"]"#,
             r#"has(device.attributes["x"].y)"#,
         ] {
-            assert_eq!(eval_selector(e, "d", &a), SelMatch::Unevaluable, "expr: {e}");
+            assert_eq!(
+                eval_selector(e, "d", &a),
+                SelMatch::Unevaluable,
+                "expr: {e}"
+            );
         }
     }
 
     #[test]
     fn availability_counts_and_subtracts_allocation() {
-        let slices = vec![
-            slice("n1", "gpu.nvidia.com", "p", 1, vec![
+        let slices = vec![slice(
+            "n1",
+            "gpu.nvidia.com",
+            "p",
+            1,
+            vec![
                 device("gpu0", &[("gpu.nvidia.com/model", attr_str("A100"))]),
                 device("gpu1", &[("gpu.nvidia.com/model", attr_str("A100"))]),
-            ]),
-        ];
-        let classes = vec![class("a100", &[r#"device.attributes["gpu.nvidia.com"].model == "A100""#])];
+            ],
+        )];
+        let classes = vec![class(
+            "a100",
+            &[r#"device.attributes["gpu.nvidia.com"].model == "A100""#],
+        )];
         // gpu0 already allocated to a claim.
         let claims = vec![dra::ResourceClaim {
             status: Some(dra::ResourceClaimStatus {
@@ -510,7 +555,10 @@ mod tests {
             ..Default::default()
         }];
         let avail = compute_availability(&slices, &classes, &claims);
-        assert_eq!(avail.by_node_class.get(&("n1".into(), "a100".into())), Some(&1));
+        assert_eq!(
+            avail.by_node_class.get(&("n1".into(), "a100".into())),
+            Some(&1)
+        );
         assert!(!avail.overlapping_classes);
         assert!(avail.unevaluable_classes.is_empty());
     }
@@ -519,12 +567,21 @@ mod tests {
     fn stale_generation_ignored() {
         let slices = vec![
             slice("n1", "d", "p", 1, vec![device("g0", &[])]),
-            slice("n1", "d", "p", 2, vec![device("g0", &[]), device("g1", &[])]),
+            slice(
+                "n1",
+                "d",
+                "p",
+                2,
+                vec![device("g0", &[]), device("g1", &[])],
+            ),
         ];
         let classes = vec![class("all", &[])]; // empty selectors ⇒ matches all
         let avail = compute_availability(&slices, &classes, &[]);
         // only gen 2 counted ⇒ 2 devices
-        assert_eq!(avail.by_node_class.get(&("n1".into(), "all".into())), Some(&2));
+        assert_eq!(
+            avail.by_node_class.get(&("n1".into(), "all".into())),
+            Some(&2)
+        );
     }
 
     #[test]
@@ -533,6 +590,33 @@ mod tests {
         let classes = vec![class("c1", &[]), class("c2", &[])]; // both empty ⇒ both match g0
         let avail = compute_availability(&slices, &classes, &[]);
         assert!(avail.overlapping_classes);
+    }
+
+    #[test]
+    fn definite_no_wins_over_unevaluable_selector() {
+        // A class whose first selector is a definite No (driver mismatch) plus a second unevaluable
+        // selector must resolve to No (device excluded) — NOT unevaluable — so it is neither counted
+        // nor flagged unevaluable.
+        let slices = vec![slice(
+            "n1",
+            "gpu.other.com",
+            "p",
+            1,
+            vec![device("g0", &[])],
+        )];
+        let classes = vec![class(
+            "c",
+            &[
+                r#"device.driver == "gpu.nvidia.com""#, // No for driver gpu.other.com
+                r#"device.attributes["x"].y > 3"#,      // Unevaluable
+            ],
+        )];
+        let avail = compute_availability(&slices, &classes, &[]);
+        assert!(avail.by_node_class.is_empty());
+        assert!(
+            avail.unevaluable_classes.is_empty(),
+            "definite No must not mark the class unevaluable"
+        );
     }
 
     #[test]

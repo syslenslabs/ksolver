@@ -12,13 +12,42 @@
            align-items: baseline; gap: 16px; flex-wrap: wrap; }
   h1 { font-size: 16px; margin: 0; font-weight: 600; }
   .sub { color: #9aa4b2; font-size: 12px; }
+  .solver-busy { position: fixed; top: 12px; right: 16px; z-index: 20; display: none;
+                 align-items: center; gap: 8px; min-height: 32px; padding: 0 11px;
+                 border: 1px solid #315d86; border-radius: 999px; background: #102236;
+                 color: #9fd0ff; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+  .solver-busy.active { display: flex; }
+  .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #315d86;
+             border-top-color: #9fd0ff; animation: spin .75s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   #banner { display: none; padding: 8px 20px; background: #3a2a12; color: #ffcf8f;
             border-bottom: 1px solid #5a4420; font-size: 13px; }
   main { padding: 16px 20px; }
+  .controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+              border-bottom: 1px solid #1c2027; padding-bottom: 14px; }
+  .control { display: flex; flex-direction: column; gap: 4px; min-width: 118px; }
+  .control label { color: #9aa4b2; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  select, input[type="number"], button {
+    background: #0f1115; color: #e6e8eb; border: 1px solid #303746; border-radius: 6px;
+    min-height: 32px; padding: 0 9px; font: inherit;
+  }
+  input[type="number"] { width: 108px; font-variant-numeric: tabular-nums; }
+  button { cursor: pointer; background: #17324d; border-color: #315d86; color: #9fd0ff; }
+  button:disabled { cursor: default; opacity: .55; }
+  .control-status { color: #9aa4b2; font-size: 12px; min-height: 32px; display: flex; align-items: center; }
   .summary { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; }
   .kv { display: flex; flex-direction: column; }
   .kv .k { color: #9aa4b2; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .kv .v { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .cost-strip { border: 1px solid #232833; background: #11151d; border-radius: 8px;
+                padding: 10px 12px; margin-bottom: 14px; display: grid;
+                grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; }
+  .cost-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .cost-cell .label { color: #9aa4b2; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .cost-cell .value { font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cost-cell .detail { color: #9aa4b2; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cost-good { color: #7ee2a0; }
+  .cost-warn { color: #ffcf8f; }
   .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 18px; }
   .board { border: 1px solid #232833; background: #131722; border-radius: 8px; padding: 14px; min-width: 0; }
   .board h2 { margin: 0; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; gap: 12px; }
@@ -52,7 +81,7 @@
   .history { margin-top: 18px; color: #9aa4b2; font-size: 12px; }
   .history span { margin-right: 12px; font-variant-numeric: tabular-nums; }
   code { color: #9fd0ff; }
-  @media (max-width: 980px) { .compare { grid-template-columns: 1fr; } }
+  @media (max-width: 980px) { .compare, .cost-strip { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -61,13 +90,45 @@
   <span class="sub">read-only — this scheduler observes and computes placements; it binds nothing</span>
   <span class="sub" id="updated"></span>
 </header>
+<div class="solver-busy" id="solver-busy" aria-live="polite">
+  <span class="spinner"></span>
+  <span>solving</span>
+</div>
 <div id="banner"></div>
 <main>
+  <section class="controls" aria-label="Solver objective controls">
+    <div class="control">
+      <label for="objective-profile">Objective</label>
+      <select id="objective-profile">
+        <option value="cost-binpack">Cost binpack</option>
+        <option value="gpu-gang-aware">GPU gang aware</option>
+      </select>
+    </div>
+    <div class="control">
+      <label for="weight-admission">Admission</label>
+      <input id="weight-admission" type="number" min="0" step="1" value="1" />
+    </div>
+    <div class="control">
+      <label for="weight-gpu-demand">GPU demand</label>
+      <input id="weight-gpu-demand" type="number" min="0" step="1" value="1" />
+    </div>
+    <div class="control">
+      <label for="weight-gang">Gang complete</label>
+      <input id="weight-gang" type="number" min="0" step="1" value="2" />
+    </div>
+    <div class="control">
+      <label for="weight-fragmentation">Fragmentation</label>
+      <input id="weight-fragmentation" type="number" min="0" step="1" value="0" />
+    </div>
+    <button id="resolve-now" type="button">Resolve</button>
+    <span class="control-status" id="objective-status"></span>
+  </section>
   <div class="summary" id="summary"></div>
+  <section class="cost-strip" id="cost-strip" aria-label="Synthetic cost comparison"></section>
   <section class="compare" id="placement-compare">
     <div class="board">
-      <h2>Kube-style sequential placement <span class="board-score" id="kube-score"></span></h2>
-      <div class="note">Greedy spread simulation over the same pending jobs. This intentionally shows how local one-at-a-time placement can fragment 4-GPU nodes.</div>
+      <h2>kube-scheduler-simulator placement <span class="board-score" id="kube-score"></span></h2>
+      <div class="note" id="kube-note">Actual kube-scheduler-simulator output for default-scheduler clones of the same pending jobs.</div>
       <div class="nodes" id="kube-nodes"></div>
       <div class="unplaced-list" id="kube-unplaced"></div>
     </div>
@@ -108,6 +169,8 @@
   var elHistory = document.getElementById("history");
   var elBanner = document.getElementById("banner");
   var elUpdated = document.getElementById("updated");
+  var elSolverBusy = document.getElementById("solver-busy");
+  var elCostStrip = document.getElementById("cost-strip");
   var elBindings = document.getElementById("bindings");
   var elBindingNote = document.getElementById("bindingnote");
   var elKubeNodes = document.getElementById("kube-nodes");
@@ -116,7 +179,20 @@
   var elKsolverUnplaced = document.getElementById("ksolver-unplaced");
   var elKubeScore = document.getElementById("kube-score");
   var elKsolverScore = document.getElementById("ksolver-score");
+  var elKubeNote = document.getElementById("kube-note");
+  var elObjectiveProfile = document.getElementById("objective-profile");
+  var elWeightAdmission = document.getElementById("weight-admission");
+  var elWeightGpuDemand = document.getElementById("weight-gpu-demand");
+  var elWeightGang = document.getElementById("weight-gang");
+  var elWeightFragmentation = document.getElementById("weight-fragmentation");
+  var elResolveNow = document.getElementById("resolve-now");
+  var elObjectiveStatus = document.getElementById("objective-status");
   var inFlight = false;
+  var solving = false;
+  var controlsReady = false;
+  var resolveTimer = null;
+  var lastCluster = null;
+  var lastKubePlan = null;
 
   function kv(k, v) {
     var wrap = document.createElement("div"); wrap.className = "kv";
@@ -126,6 +202,102 @@
   }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
   function firstToken(s) { return (s || "").split(";")[0].trim(); }
+  function statusField(status, key) {
+    var parts = String(status || "").split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].trim();
+      if (p.indexOf(key + "=") === 0) return p.slice(key.length + 1);
+    }
+    return "";
+  }
+  function numberValue(el, fallback) {
+    var n = parseInt(el.value, 10);
+    return isFinite(n) && n >= 0 ? n : fallback;
+  }
+  function objectiveParams() {
+    var q = new URLSearchParams();
+    q.set("objective_profile", elObjectiveProfile.value || "cost-binpack");
+    q.set("admission", String(numberValue(elWeightAdmission, 1)));
+    q.set("gpu_demand", String(numberValue(elWeightGpuDemand, 1)));
+    q.set("gang_complete", String(numberValue(elWeightGang, 2)));
+    q.set("gpu_fragmentation", String(numberValue(elWeightFragmentation, 0)));
+    return q;
+  }
+  function setObjectiveStatus(text) {
+    elObjectiveStatus.textContent = text || "";
+  }
+  function setSolving(active) {
+    elSolverBusy.className = "solver-busy" + (active ? " active" : "");
+  }
+  function scheduleResolve() {
+    if (!controlsReady) return;
+    if (resolveTimer) clearTimeout(resolveTimer);
+    resolveTimer = setTimeout(resolveNow, 250);
+  }
+  function resolveNow() {
+    if (solving) return;
+    solving = true;
+    elResolveNow.disabled = true;
+    setSolving(true);
+    setObjectiveStatus("solving...");
+    fetch("/api/scheduler/solve?" + objectiveParams().toString(), { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (data) {
+        if (!data || !data.ok) throw new Error((data && data.reason) || "solve failed");
+        setObjectiveStatus("resolved #" + data.trace.sequence);
+        renderManualTrace(data.trace);
+      })
+      .catch(function (e) {
+        setObjectiveStatus("solve failed");
+        elBanner.style.display = "block";
+        elBanner.textContent = "cannot resolve selected objective: " + e.message;
+      })
+      .finally(function () {
+        solving = false;
+        elResolveNow.disabled = false;
+        setSolving(false);
+      });
+  }
+  function renderManualTrace(trace) {
+    fetch("/api/scheduler/cluster", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (cluster) {
+        lastCluster = cluster;
+        lastKubePlan = {
+          available: false,
+          reason: "kube-scheduler-simulator refreshing for trace #" + trace.sequence,
+          placements: []
+        };
+        render({ traces: [trace] }, cluster, lastKubePlan);
+        elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
+        return fetch("/api/scheduler/kube-simulator-plan", { cache: "no-store" })
+          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(function (kubePlan) {
+            lastKubePlan = kubePlan;
+            render({ traces: [trace] }, lastCluster, kubePlan);
+          })
+          .catch(function () { /* keep immediate ksolver render */ });
+      })
+      .catch(function () {
+        if (lastCluster) render({ traces: [trace] }, lastCluster, lastKubePlan || { available: false, placements: [] });
+      });
+  }
+  function loadObjectiveConfig() {
+    return fetch("/api/scheduler/objective", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (cfg) {
+        var w = (cfg && cfg.objective_weights) || {};
+        elObjectiveProfile.value = cfg.objective_profile || "cost-binpack";
+        elWeightAdmission.value = w.admission == null ? 1 : w.admission;
+        elWeightGpuDemand.value = w.gpu_demand == null ? 1 : w.gpu_demand;
+        elWeightGang.value = w.gang_complete == null ? 2 : w.gang_complete;
+        elWeightFragmentation.value = w.gpu_fragmentation == null ? 0 : w.gpu_fragmentation;
+        controlsReady = true;
+      })
+      .catch(function () {
+        controlsReady = true;
+      });
+  }
   function shortName(name) { return (name || "").replace(/^kwok-/, "").replace(/^train-/, ""); }
   function isBigJob(j) { return Number(j.gpu_request || 0) >= 2 || /^gang-/.test(j.name || ""); }
   function naturalNodeSort(a, b) {
@@ -154,29 +326,6 @@
       if (nodeName && byName[nodeName]) {
         byName[nodeName].used += qty;
         byName[nodeName].jobs.push(d);
-      } else {
-        unplaced.push(d);
-      }
-    });
-    return { nodes: nodes, unplaced: unplaced };
-  }
-  function planFromSequentialSpread(nodes, decisions) {
-    var unplaced = [];
-    decisions.slice().sort(function (a, b) {
-      return String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true });
-    }).forEach(function (d) {
-      var qty = Number(d.gpu_request || 0);
-      var best = null;
-      nodes.forEach(function (n) {
-        var free = n.capacity - n.used;
-        if (free < qty) return;
-        if (!best || free > (best.capacity - best.used) || (free === (best.capacity - best.used) && naturalNodeSort(n, best) < 0)) {
-          best = n;
-        }
-      });
-      if (best) {
-        best.used += qty;
-        best.jobs.push(d);
       } else {
         unplaced.push(d);
       }
@@ -223,19 +372,116 @@
       unplacedContainer.appendChild(tag);
     });
   }
-  function renderPlacementCompare(trace, cluster) {
+  function planStats(plan) {
+    var activeNodes = plan.nodes.filter(function (n) { return n.used > n.base; });
+    var scheduledGpu = plan.nodes.reduce(function (sum, n) { return sum + Math.max(0, n.used - n.base); }, 0);
+    var activeCapacity = activeNodes.reduce(function (sum, n) { return sum + n.capacity; }, 0);
+    var strandedGpu = Math.max(0, activeCapacity - scheduledGpu);
+    var unplacedGpu = plan.unplaced.reduce(function (sum, j) { return sum + Number(j.gpu_request || 0); }, 0);
+    return {
+      activeNodes: activeNodes.length,
+      scheduledGpu: scheduledGpu,
+      strandedGpu: strandedGpu,
+      unplacedGpu: unplacedGpu
+    };
+  }
+  function fakeCost(stats) {
+    // Synthetic cloud model: AWS P5 H100 on-demand proxy, normalized to per-GPU capacity.
+    // Cost is charged on active node GPU capacity, not only scheduled GPU work.
+    var gpuHour = 6.88;
+    var hourly = (stats.scheduledGpu + stats.strandedGpu) * gpuHour;
+    var strandedHourly = stats.strandedGpu * gpuHour;
+    return {
+      hourly: hourly,
+      strandedHourly: strandedHourly,
+      costPerScheduledGpu: stats.scheduledGpu > 0 ? hourly / stats.scheduledGpu : 0,
+      gpuHour: gpuHour
+    };
+  }
+  function money(n) {
+    return "$" + Number(n || 0).toFixed(2);
+  }
+  function costCell(label, value, detail, cls) {
+    var cell = document.createElement("div"); cell.className = "cost-cell";
+    var l = document.createElement("span"); l.className = "label"; l.textContent = label;
+    var v = document.createElement("span"); v.className = "value" + (cls ? " " + cls : ""); v.textContent = value;
+    var d = document.createElement("span"); d.className = "detail"; d.textContent = detail;
+    cell.appendChild(l); cell.appendChild(v); cell.appendChild(d);
+    return cell;
+  }
+  function renderCostCompare(kubeBoardPlan, ksolverBoardPlan, objective) {
+    clear(elCostStrip);
+    var ss = planStats(ksolverBoardPlan);
+    var sc = fakeCost(ss);
+    if (!kubeBoardPlan) {
+      elCostStrip.appendChild(costCell(
+        "cloud cost model",
+        "$6.88/H100-hr",
+        "AWS P5 on-demand proxy; charges active node GPU capacity"
+      ));
+      elCostStrip.appendChild(costCell("kube-scheduler", "unavailable", "simulator result not ready"));
+      elCostStrip.appendChild(costCell(
+        "ksolver",
+        money(sc.hourly) + "/hr",
+        ss.scheduledGpu + " scheduled GPU, " + ss.strandedGpu + " stranded GPU"
+      ));
+      elCostStrip.appendChild(costCell("delta", "pending", "waiting for kube-scheduler-simulator"));
+      return;
+    }
+    var ks = planStats(kubeBoardPlan);
+    var kc = fakeCost(ks);
+    var delta = kc.hourly - sc.hourly;
+    var unitDelta = kc.costPerScheduledGpu - sc.costPerScheduledGpu;
+    var deltaClass = delta >= 0 ? "cost-good" : "cost-warn";
+    var unitClass = unitDelta >= 0 ? "cost-good" : "cost-warn";
+    elCostStrip.appendChild(costCell(
+      "cloud cost model",
+      "$6.88/H100-hr",
+      "AWS P5 on-demand proxy; objective=" + (objective || "unknown")
+    ));
+    elCostStrip.appendChild(costCell(
+      "kube-scheduler",
+      money(kc.hourly) + "/hr",
+      ks.scheduledGpu + " scheduled GPU, " + ks.strandedGpu + " stranded GPU"
+    ));
+    elCostStrip.appendChild(costCell(
+      "ksolver",
+      money(sc.hourly) + "/hr",
+      ss.scheduledGpu + " scheduled GPU, " + ss.strandedGpu + " stranded GPU"
+    ));
+    elCostStrip.appendChild(costCell(
+      "delta",
+      (delta >= 0 ? "-" : "+") + money(Math.abs(delta)) + "/hr",
+      (unitDelta >= 0 ? "unit cost improves " : "unit cost worsens ") + money(Math.abs(unitDelta)) + "/GPU-hr",
+      deltaClass + " " + unitClass
+    ));
+  }
+  function renderUnavailableKubeBoard(message) {
+    clear(elKubeNodes); clear(elKubeUnplaced);
+    elKubeScore.textContent = "unavailable";
+    elKubeNote.textContent = message || "kube-scheduler-simulator is not configured.";
+  }
+  function renderPlacementCompare(trace, cluster, kubePlan) {
     var decisions = (trace && trace.decisions) || [];
-    var nodesA = cloneNodes(cluster);
     var nodesB = cloneNodes(cluster);
-    if (!nodesA.length || !decisions.length) return;
-    renderNodeBoard(elKubeNodes, elKubeUnplaced, elKubeScore, planFromSequentialSpread(nodesA, decisions));
-    renderNodeBoard(elKsolverNodes, elKsolverUnplaced, elKsolverScore, planFromKsolver(nodesB, decisions));
+    if (!nodesB.length || !decisions.length) return;
+    var ksolverBoardPlan = planFromKsolver(nodesB, decisions);
+    var kubeBoardPlan = null;
+    if (kubePlan && kubePlan.available) {
+      elKubeNote.textContent = kubePlan.source || "kube-scheduler-simulator output";
+      kubeBoardPlan = planFromKsolver(cloneNodes(cluster), kubePlan.placements || []);
+      renderNodeBoard(elKubeNodes, elKubeUnplaced, elKubeScore, kubeBoardPlan);
+    } else {
+      renderUnavailableKubeBoard(kubePlan && kubePlan.reason ? kubePlan.reason : "kube-scheduler-simulator is not configured.");
+    }
+    renderNodeBoard(elKsolverNodes, elKsolverUnplaced, elKsolverScore, ksolverBoardPlan);
+    renderCostCompare(kubeBoardPlan, ksolverBoardPlan, statusField(trace.solver_status, "objective_profile"));
   }
 
-  function render(data, cluster) {
+  function render(data, cluster, kubePlan) {
     var traces = (data && data.traces) || [];
     if (!traces.length) {
-      clear(elSummary); clear(elDecisions);
+      clear(elSummary); clear(elDecisions); clear(elCostStrip);
       elSummary.appendChild(kv("status", "no traces yet"));
       return;
     }
@@ -244,9 +490,10 @@
     elSummary.appendChild(kv("sequence", t.sequence));
     elSummary.appendChild(kv("observed pods", t.observed_pods));
     elSummary.appendChild(kv("solver", firstToken(t.solver_status)));
+    elSummary.appendChild(kv("objective", statusField(t.solver_status, "objective_profile") || "unknown"));
     elSummary.appendChild(kv("solve core (ms)", t.solve_core_millis));
     elSummary.appendChild(kv("snapshot age (ms)", t.snapshot_age_millis));
-    renderPlacementCompare(t, cluster);
+    renderPlacementCompare(t, cluster, kubePlan);
 
     clear(elDecisions);
     (t.decisions || []).forEach(function (d) {
@@ -318,10 +565,19 @@
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (data) {
         elBanner.style.display = "none";
-        return fetch("/api/scheduler/cluster", { cache: "no-store" })
-          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-          .then(function (cluster) {
-            render(data, cluster);
+        return Promise.all([
+          fetch("/api/scheduler/cluster", { cache: "no-store" })
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+          fetch("/api/scheduler/kube-simulator-plan", { cache: "no-store" })
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .catch(function (e) {
+              return { available: false, reason: "cannot reach kube-scheduler-simulator plan endpoint: " + e.message, placements: [] };
+            })
+        ])
+          .then(function (pair) {
+            lastCluster = pair[0];
+            lastKubePlan = pair[1];
+            render(data, pair[0], pair[1]);
             elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
           });
       })
@@ -340,7 +596,14 @@
       .finally(function () { inFlight = false; });
   }
 
-  poll();
+  [elObjectiveProfile, elWeightAdmission, elWeightGpuDemand, elWeightGang, elWeightFragmentation]
+    .forEach(function (el) {
+      el.addEventListener("change", scheduleResolve);
+      el.addEventListener("input", scheduleResolve);
+    });
+  elResolveNow.addEventListener("click", resolveNow);
+
+  loadObjectiveConfig().then(poll);
   setInterval(poll, refresh * 1000);
 })();
 </script>

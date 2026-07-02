@@ -1,8 +1,14 @@
-use crate::model::{OptimizationInput, OptimizationSolution, ScenarioConfig, SolverInfo};
+use crate::model::{
+    ObjectiveProfile, OptimizationInput, OptimizationSolution, OptimizationWorkload,
+    ScenarioConfig, SolverInfo,
+};
 
 #[cfg(feature = "rust-cp-sat")]
 mod enabled {
-    use super::{OptimizationInput, OptimizationSolution, ScenarioConfig, SolverInfo};
+    use super::{
+        ObjectiveProfile, OptimizationInput, OptimizationSolution, OptimizationWorkload,
+        ScenarioConfig, SolverInfo,
+    };
     use anyhow::{bail, Result};
     use cp_sat::builder::{BoolVar, CpModelBuilder, IntVar, LinearExpr};
     use cp_sat::ffi::cp_solver_response_stats;
@@ -35,6 +41,33 @@ mod enabled {
             }
         }
         e
+    }
+
+    fn is_gpu_resource_name(name: &str) -> bool {
+        name == "nvidia.com/gpu" || name.starts_with("nvidia.com/mig-") || name.contains("/gpu")
+    }
+
+    fn workload_gpu_request(workload: &OptimizationWorkload) -> i64 {
+        workload
+            .extended_resource_requests
+            .iter()
+            .filter(|(name, _)| is_gpu_resource_name(name))
+            .map(|(_, value)| (*value).max(0))
+            .sum()
+    }
+
+    fn admission_score(workload: &OptimizationWorkload, scenario: &ScenarioConfig) -> i64 {
+        match scenario.objective_profile {
+            ObjectiveProfile::CostBinpack => 1,
+            ObjectiveProfile::GpuGangAware => {
+                let w = &scenario.objective_weights;
+                let base = w.admission.max(0);
+                let gpu = workload_gpu_request(workload).saturating_mul(w.gpu_demand.max(0));
+                let gang_replicas = i64::from((workload.group_size - 1).max(0));
+                let gang = gang_replicas.saturating_mul(w.gang_complete.max(0));
+                base.saturating_add(gpu).saturating_add(gang).max(1)
+            }
+        }
     }
 
     pub fn solver_info() -> SolverInfo {
@@ -464,7 +497,20 @@ mod enabled {
                 if let Some(slack) =
                     scalar_slack_vars.get(&(node.name.clone(), resource_name.clone()))
                 {
-                    obj_terms.push((scenario.memory_slack_weight, ObjVar::Int(*slack)));
+                    let gpu_fragmentation_weight = if scenario.objective_profile
+                        == ObjectiveProfile::GpuGangAware
+                        && is_gpu_resource_name(resource_name)
+                    {
+                        scenario.objective_weights.gpu_fragmentation.max(0)
+                    } else {
+                        0
+                    };
+                    obj_terms.push((
+                        scenario
+                            .memory_slack_weight
+                            .saturating_add(gpu_fragmentation_weight),
+                        ObjVar::Int(*slack),
+                    ));
                 }
             }
         }
@@ -547,22 +593,38 @@ mod enabled {
                 // the full objective. saturating_add guards the i128::MAX saturated case.
                 rest_bound.saturating_add(1)
             };
-            let n = placed_vars.len() as i128;
+            let admission_score_sum = input
+                .workloads
+                .iter()
+                .filter(|w| placed_vars.contains_key(&w.id))
+                .try_fold(0_i128, |acc, w| {
+                    acc.checked_add(i128::from(admission_score(w, scenario)))
+                })
+                .unwrap_or(i128::MAX);
             let total = w
-                .checked_mul(n)
+                .checked_mul(admission_score_sum)
                 .and_then(|v| v.checked_add(rest_bound))
                 .unwrap_or(i128::MAX);
             if w > i64::MAX as i128 || total > i64::MAX as i128 {
-                bail!("partial_admission weight would overflow i64 objective (workloads={n}); reduce scope or set a smaller admission_weight");
+                bail!("partial_admission weight would overflow i64 objective (admission_score_sum={admission_score_sum}); reduce scope or set a smaller admission_weight");
             }
             w as i64
         } else {
             0
         };
-        for placed in placed_vars.values() {
+        for (workload_id, placed) in &placed_vars {
             // Reward admitting a workload; weight dominates the rest of the objective so
-            // the solver maximizes admitted count first, then minimizes cost.
-            obj_terms.push((-effective_admission_weight, ObjVar::Bool(*placed)));
+            // the solver maximizes the configured admission score first, then minimizes cost.
+            let score = input
+                .workloads
+                .iter()
+                .find(|w| &w.id == workload_id)
+                .map(|w| admission_score(w, scenario))
+                .unwrap_or(1);
+            obj_terms.push((
+                -effective_admission_weight.saturating_mul(score),
+                ObjVar::Bool(*placed),
+            ));
         }
 
         model.minimize(expr_from_terms(&obj_terms));
@@ -649,8 +711,7 @@ mod enabled {
                                 sum_b += (1_i64, *x);
                             }
                         }
-                        let both =
-                            model.new_bool_var_with_name(format!("coplace_{ci}_{di}"));
+                        let both = model.new_bool_var_with_name(format!("coplace_{ci}_{di}"));
                         let mut both_e = LinearExpr::default();
                         both_e += (1_i64, both);
                         model.add_le(both_e.clone(), sum_a); // both <= Σ x_a in domain
@@ -723,8 +784,9 @@ mod enabled {
                 name: "cp-sat-rust".to_string(),
                 available: true,
                 status: format!(
-                    "status={status:?}; workers={worker_count}; hinted_assignments={hinted_assignments}; hinted_nodes={}; cost_weight={}; active_node_weight={}; memory_slack_weight={}; cpu_slack_weight={}; churn_weight={}; partial_admission={}; admission_weight={effective_admission_weight}; {stats}",
+                    "status={status:?}; workers={worker_count}; hinted_assignments={hinted_assignments}; hinted_nodes={}; objective_profile={:?}; cost_weight={}; active_node_weight={}; memory_slack_weight={}; cpu_slack_weight={}; churn_weight={}; partial_admission={}; admission_weight={effective_admission_weight}; {stats}",
                     hinted_nodes.len(),
+                    scenario.objective_profile,
                     scenario.cost_weight,
                     scenario.active_node_weight,
                     scenario.memory_slack_weight,
@@ -1149,6 +1211,64 @@ mod tests {
             .values()
             .filter(|counts| counts.values().any(|c| *c > 0))
             .count()
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_admitted_gpu_demand_over_workload_count() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![
+                gpu_singleton("small-a", 1, &["n1"]),
+                gpu_singleton("small-b", 1, &["n1"]),
+                gpu_singleton("small-c", 1, &["n1"]),
+                gpu_singleton("large", 4, &["n1"]),
+            ],
+            ..Default::default()
+        };
+
+        let cost = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+        let (cost_solution, cost_info) =
+            super::enabled::solve(&input, &cost).expect("cost solve should succeed");
+        assert_eq!(
+            admitted_count(&cost_solution),
+            3,
+            "cost profile maximizes admitted workload count; status={}",
+            cost_info.status
+        );
+        assert!(
+            !cost_solution.assignment_counts.contains_key("t/large"),
+            "large job should lose to three small admitted workloads under cost profile"
+        );
+
+        let gpu = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 0,
+                gpu_demand: 1,
+                gang_complete: 0,
+                gpu_fragmentation: 0,
+            },
+            ..Default::default()
+        };
+        let (gpu_solution, gpu_info) =
+            super::enabled::solve(&input, &gpu).expect("gpu solve should succeed");
+        assert_eq!(
+            admitted_count(&gpu_solution),
+            1,
+            "gpu profile should be allowed to trade workload count for GPU demand; status={}",
+            gpu_info.status
+        );
+        assert!(
+            gpu_solution.assignment_counts.contains_key("t/large"),
+            "large 4-GPU job should be admitted under GPU-demand scoring"
+        );
     }
 
     #[test]

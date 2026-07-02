@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+const DEFAULT_SIMULATOR_URL: &str = "http://127.0.0.1:1212";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -26,7 +28,7 @@ async fn main() -> Result<()> {
                 default_pricing_file: std::env::var("KSOLVER_PRICING_FILE").unwrap_or_default(),
                 default_verification_url: std::env::var("SCHEDULER_SIMULATOR_URL")
                     .or_else(|_| std::env::var("KSOLVER_SCHEDULER_SIMULATOR_URL"))
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|_| DEFAULT_SIMULATOR_URL.to_string()),
                 metrics_addr: std::env::var("SYSLENS_SOLVER_METRICS_ADDR").unwrap_or_default(),
             };
             info!(
@@ -171,8 +173,63 @@ async fn main() -> Result<()> {
         }
         Some("bench") => {
             use ksolver::scheduler::bench;
-            let results = bench::run_matrix(&bench::default_matrix());
+            let rest: Vec<String> = args.collect();
+            let flag = |name: &str| -> Option<String> {
+                rest.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| rest.get(i + 1).cloned())
+            };
+            let results = match (flag("--jobs"), flag("--nodes")) {
+                (Some(jobs), Some(nodes)) => {
+                    let jobs = jobs.parse::<usize>()?;
+                    let nodes = nodes.parse::<usize>()?;
+                    let candidate_node_limit = flag("--candidate-nodes")
+                        .or_else(|| std::env::var("KSOLVER_CANDIDATE_NODE_LIMIT").ok())
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    bench::run_matrix(&[bench::custom_scenario(
+                        "custom",
+                        nodes,
+                        jobs,
+                        candidate_node_limit,
+                    )])
+                }
+                _ => bench::run_matrix(&bench::default_matrix()),
+            };
             bench::print_table(&results);
+        }
+        Some("gpu-scenarios") => {
+            let rest: Vec<String> = args.collect();
+            let flag = |name: &str| -> Option<String> {
+                rest.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| rest.get(i + 1).cloned())
+            };
+            let simulator_url = flag("--simulator")
+                .or_else(|| std::env::var("KSOLVER_SCHEDULER_SIMULATOR_URL").ok())
+                .or_else(|| std::env::var("SCHEDULER_SIMULATOR_URL").ok());
+            let json = rest.iter().any(|a| a == "--json");
+            let report =
+                ksolver::scheduler::gpu_scenarios::run_benchmark(simulator_url.as_deref()).await?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &report)?;
+                println!();
+            } else {
+                if simulator_url
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    println!(
+                        "no kube-scheduler-simulator URL configured; using deterministic greedy-spread baseline"
+                    );
+                    println!(
+                        "pass --simulator <url> or set KSOLVER_SCHEDULER_SIMULATOR_URL for actual simulator results\n"
+                    );
+                }
+                ksolver::scheduler::gpu_scenarios::print_table(&report);
+            }
         }
         Some("conform") => {
             // Parse simple flags from the remaining args.
@@ -219,7 +276,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver version"
             );
         }
     }

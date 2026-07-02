@@ -5,7 +5,9 @@ use crate::cpsat_rust;
 use crate::model::{
     NormalizedCluster, NormalizedNode, NormalizedWorkload, ResourceList, ScenarioConfig,
 };
-use crate::scheduler::pending_input::build_pending_input;
+use crate::scheduler::pending_input::{
+    build_pending_input, build_pending_input_with_candidate_limit,
+};
 use crate::scheduler::pod_filter::PendingGpuPod;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -33,6 +35,8 @@ pub struct BenchScenario {
     pub running_fill: i64,
     /// Inclusive expected-admitted band for validation.
     pub expect_admitted: (usize, usize),
+    /// Optional cap on feasible candidate nodes per workload/gang before solving. 0 = full set.
+    pub candidate_node_limit: usize,
 }
 
 fn rl(cpu: i64, mem: i64) -> ResourceList {
@@ -176,7 +180,16 @@ pub fn run_scenario(s: &BenchScenario) -> BenchResult {
     let (cluster, pending) = generate(s);
 
     let t0 = Instant::now();
-    let input = build_pending_input(&cluster, &pending, &BTreeMap::new());
+    let input = if s.candidate_node_limit > 0 {
+        build_pending_input_with_candidate_limit(
+            &cluster,
+            &pending,
+            &BTreeMap::new(),
+            s.candidate_node_limit,
+        )
+    } else {
+        build_pending_input(&cluster, &pending, &BTreeMap::new())
+    };
     let build_ms = t0.elapsed().as_millis();
 
     let workers = cpsat_rust::recommended_worker_count(&input);
@@ -354,11 +367,34 @@ fn sc(
         anti,
         running_fill,
         expect_admitted,
+        candidate_node_limit: 0,
     }
 }
 
 pub fn run_matrix(scenarios: &[BenchScenario]) -> Vec<BenchResult> {
     scenarios.iter().map(run_scenario).collect()
+}
+
+pub fn custom_scenario(
+    name: &'static str,
+    nodes: usize,
+    jobs: usize,
+    candidate_node_limit: usize,
+) -> BenchScenario {
+    let expected = jobs.min(nodes.saturating_mul(8));
+    let mut scenario = sc(
+        name,
+        nodes,
+        8,
+        jobs,
+        1,
+        false,
+        AntiAffinity::None,
+        0,
+        (expected, expected),
+    );
+    scenario.candidate_node_limit = candidate_node_limit;
+    scenario
 }
 
 pub fn print_table(results: &[BenchResult]) {

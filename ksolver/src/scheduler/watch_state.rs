@@ -109,6 +109,9 @@ mod tests {
             enable_real_binding: false,
             real_binding_dry_run: false,
             max_binds_per_pass: 10,
+            objective_profile: crate::model::ObjectiveProfile::CostBinpack,
+            objective_weights: crate::model::ObjectiveWeights::default(),
+            candidate_node_limit: 0,
         }
     }
 

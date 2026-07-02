@@ -5,6 +5,7 @@ use crate::model::{
 };
 use crate::scheduler::pod_filter::PendingGpuPod;
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 /// Resource name used for per-namespace quotas (MVP: GPUs only).
 const GPU_RESOURCE: &str = "nvidia.com/gpu";
@@ -170,6 +171,79 @@ impl Residual {
     }
 }
 
+fn stable_hash<T: Hash + ?Sized>(v: &T) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+fn residual_after_fit_score(
+    residual: &Residual,
+    requests: &ResourceList,
+    ext_requests: &BTreeMap<String, i64>,
+) -> (i64, i64, i64, i64, i64) {
+    let gpu_left: i64 = ext_requests
+        .iter()
+        .filter(|(name, _)| name.as_str() == GPU_RESOURCE || name.starts_with("nvidia.com/mig-"))
+        .map(|(name, qty)| residual.ext.get(name).copied().unwrap_or(0) - *qty)
+        .sum();
+    (
+        gpu_left.max(0),
+        sub_clamp(residual.pods, requests.pods.max(1)),
+        sub_clamp(residual.cpu, requests.milli_cpu),
+        sub_clamp(residual.mem, requests.memory_bytes),
+        sub_clamp(residual.disk, requests.ephemeral_storage),
+    )
+}
+
+fn prune_candidate_nodes(
+    workload_id: &str,
+    feasible_nodes: &mut Vec<String>,
+    residual: &BTreeMap<String, Residual>,
+    running_by_node: &BTreeMap<String, Vec<&NormalizedWorkload>>,
+    requests: &ResourceList,
+    ext_requests: &BTreeMap<String, i64>,
+    limit: usize,
+) {
+    if limit == 0 || feasible_nodes.len() <= limit {
+        return;
+    }
+    feasible_nodes.sort_by(|a, b| {
+        let a_residual = residual.get(a);
+        let b_residual = residual.get(b);
+        let a_score = a_residual
+            .map(|r| residual_after_fit_score(r, requests, ext_requests))
+            .unwrap_or((i64::MAX, i64::MAX, i64::MAX, i64::MAX, i64::MAX));
+        let b_score = b_residual
+            .map(|r| residual_after_fit_score(r, requests, ext_requests))
+            .unwrap_or((i64::MAX, i64::MAX, i64::MAX, i64::MAX, i64::MAX));
+        let a_active = if running_by_node.contains_key(a) {
+            0
+        } else {
+            1
+        };
+        let b_active = if running_by_node.contains_key(b) {
+            0
+        } else {
+            1
+        };
+        (
+            a_active,
+            a_score,
+            stable_hash(&(workload_id, a.as_str())),
+            a,
+        )
+            .cmp(&(
+                b_active,
+                b_score,
+                stable_hash(&(workload_id, b.as_str())),
+                b,
+            ))
+    });
+    feasible_nodes.truncate(limit);
+    feasible_nodes.sort();
+}
+
 /// Homogeneity signature of a workload: gang members must match on all of these to be
 /// modeled as one group_size workload (else the gang is excluded, not mis-modeled).
 fn signature(w: &NormalizedWorkload) -> (i64, i64, i64, i64, BTreeMap<String, i64>, Vec<String>) {
@@ -201,9 +275,25 @@ pub fn build_pending_input(
     pending: &[PendingGpuPod],
     quotas: &BTreeMap<String, i64>,
 ) -> OptimizationInput {
+    build_pending_input_with_candidate_limit(cluster, pending, quotas, 0)
+}
+
+pub fn build_pending_input_with_candidate_limit(
+    cluster: &NormalizedCluster,
+    pending: &[PendingGpuPod],
+    quotas: &BTreeMap<String, i64>,
+    candidate_node_limit: usize,
+) -> OptimizationInput {
     // Default GPU-resource matcher: whole GPUs only (callers wanting MIG-aware quota use the
     // diagnosed builder with a prefix-aware matcher).
-    build_pending_input_diagnosed(cluster, pending, quotas, &|n| n == GPU_RESOURCE).0
+    build_pending_input_diagnosed_with_candidate_limit(
+        cluster,
+        pending,
+        quotas,
+        &|n| n == GPU_RESOURCE,
+        candidate_node_limit,
+    )
+    .0
 }
 
 /// Build an optimization input that places ONLY the pending pods, grouping pods that
@@ -216,6 +306,16 @@ pub fn build_pending_input_diagnosed(
     pending: &[PendingGpuPod],
     quotas: &BTreeMap<String, i64>,
     is_gpu_resource: &dyn Fn(&str) -> bool,
+) -> (OptimizationInput, Vec<DropInfo>) {
+    build_pending_input_diagnosed_with_candidate_limit(cluster, pending, quotas, is_gpu_resource, 0)
+}
+
+pub fn build_pending_input_diagnosed_with_candidate_limit(
+    cluster: &NormalizedCluster,
+    pending: &[PendingGpuPod],
+    quotas: &BTreeMap<String, i64>,
+    is_gpu_resource: &dyn Fn(&str) -> bool,
+    candidate_node_limit: usize,
 ) -> (OptimizationInput, Vec<DropInfo>) {
     // 1. Accumulate running usage per node (running = current_node non-empty). In the same
     //    pass, sum each namespace's running GPU usage so quotas count existing consumption
@@ -476,7 +576,7 @@ pub fn build_pending_input_diagnosed(
         };
         let member_labels: Vec<&BTreeMap<String, String>> =
             member_workloads.iter().map(|w| &w.labels).collect();
-        let feasible_nodes: Vec<String> = rep
+        let mut feasible_nodes: Vec<String> = rep
             .feasible_node_names
             .iter()
             .filter(|node| {
@@ -563,6 +663,15 @@ pub fn build_pending_input_diagnosed(
             });
             continue;
         }
+        prune_candidate_nodes(
+            &id,
+            &mut feasible_nodes,
+            &residual,
+            &running_by_node,
+            &fit_req,
+            &fit_ext,
+            candidate_node_limit,
+        );
         // Soft (preferred) node-affinity scores per feasible node: Σ weight of the gang's preferred
         // terms whose expressions ALL match the node's labels. Requires gang-member agreement on
         // preferred terms (else no soft scores — soft is best-effort, so we drop scores not the gang).
@@ -601,7 +710,9 @@ pub fn build_pending_input_diagnosed(
         // Best-effort — NOT full kube-scheduler score parity (co-placement between two pending
         // pods remains deferred; symmetry via running pods' preferred terms is handled below).
         let pref_pod = &members[0].preferred_pod_affinity;
-        let pref_pod_agree = members.iter().all(|m| m.preferred_pod_affinity == *pref_pod);
+        let pref_pod_agree = members
+            .iter()
+            .all(|m| m.preferred_pod_affinity == *pref_pod);
         if pref_pod_agree {
             for cn in &feasible_nodes {
                 for term in pref_pod {
@@ -637,18 +748,23 @@ pub fn build_pending_input_diagnosed(
             for (rn, pods) in &running_by_node {
                 for w in pods {
                     for term in &w.preferred_pod_affinity {
-                        let (Some(cd), Some(rd)) =
-                            (domain(cn, &term.topology_key), domain(rn, &term.topology_key))
-                        else {
+                        let (Some(cd), Some(rd)) = (
+                            domain(cn, &term.topology_key),
+                            domain(rn, &term.topology_key),
+                        ) else {
                             continue;
                         };
                         if cd != rd {
                             continue;
                         }
-                        if selector_scopes_ns(&term.selector, &w.namespace, &rep.namespace, ns_labels)
-                            && member_labels
-                                .iter()
-                                .all(|ml| selector_matches(&term.selector.reqs, ml))
+                        if selector_scopes_ns(
+                            &term.selector,
+                            &w.namespace,
+                            &rep.namespace,
+                            ns_labels,
+                        ) && member_labels
+                            .iter()
+                            .all(|ml| selector_matches(&term.selector.reqs, ml))
                         {
                             let delta = if term.anti { -term.weight } else { term.weight };
                             *soft_scores.entry(cn.clone()).or_default() += delta;
@@ -2209,7 +2325,10 @@ mod tests {
         };
         let input = build_pending_input(
             &cluster,
-            &[ppod("team", "m0", Some("job")), ppod("team", "m1", Some("job"))],
+            &[
+                ppod("team", "m0", Some("job")),
+                ppod("team", "m1", Some("job")),
+            ],
         );
         assert!(input.workloads[0].soft_scores.is_empty()); // not ALL members match -> no score
     }
@@ -2255,8 +2374,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        let input =
-            build_pending_input(&cluster, &[ppod("team", "a", None), ppod("team", "b", None)]);
+        let input = build_pending_input(
+            &cluster,
+            &[ppod("team", "a", None), ppod("team", "b", None)],
+        );
         assert!(input.soft_coplacement_pairs.is_empty());
     }
 

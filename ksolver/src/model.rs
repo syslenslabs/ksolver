@@ -1209,6 +1209,53 @@ pub struct ScenarioConfig {
     /// placements prefer higher preferred-affinity score. Shadow-only; never changes admission/cost.
     #[serde(default)]
     pub enable_soft_affinity: bool,
+    /// Objective semantics for the solve. The default keeps the original cost/binpack objective.
+    #[serde(default)]
+    pub objective_profile: ObjectiveProfile,
+    /// Profile-specific objective weights. These are additive; legacy top-level weights remain the
+    /// source of truth for the cost/binpack objective.
+    #[serde(default)]
+    pub objective_weights: ObjectiveWeights,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectiveProfile {
+    /// Original objective: maximize admitted workload count in partial-admission mode, then minimize
+    /// node cost, active nodes, slack, and churn.
+    #[default]
+    CostBinpack,
+    /// GPU scheduler objective: maximize admitted GPU work/gangs in partial-admission mode, then
+    /// minimize the same cost/binpack terms.
+    GpuGangAware,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectiveWeights {
+    /// Base score for admitting any workload under GPU-aware partial admission.
+    #[serde(default = "default_gpu_admission_score")]
+    pub admission: i64,
+    /// Additional score per requested GPU under GPU-aware partial admission.
+    #[serde(default = "default_gpu_demand_score")]
+    pub gpu_demand: i64,
+    /// Additional score for each replica in a multi-pod gang under GPU-aware partial admission.
+    #[serde(default = "default_gpu_gang_complete_score")]
+    pub gang_complete: i64,
+    /// Extra penalty for idle GPU slots on active nodes under GPU-aware profiles. This is added to
+    /// the existing scalar slack penalty, so cost/binpack callers are unaffected.
+    #[serde(default)]
+    pub gpu_fragmentation: i64,
+}
+
+impl Default for ObjectiveWeights {
+    fn default() -> Self {
+        Self {
+            admission: default_gpu_admission_score(),
+            gpu_demand: default_gpu_demand_score(),
+            gang_complete: default_gpu_gang_complete_score(),
+            gpu_fragmentation: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1266,6 +1313,8 @@ impl Default for ScenarioConfig {
             admission_weight: 0,
             solve_time_limit_secs: 0,
             enable_soft_affinity: false,
+            objective_profile: ObjectiveProfile::CostBinpack,
+            objective_weights: ObjectiveWeights::default(),
         }
     }
 }
@@ -1772,4 +1821,16 @@ fn default_churn_weight() -> i64 {
 
 fn default_rightsizing_weight() -> i64 {
     100_000_000
+}
+
+fn default_gpu_admission_score() -> i64 {
+    1
+}
+
+fn default_gpu_demand_score() -> i64 {
+    1
+}
+
+fn default_gpu_gang_complete_score() -> i64 {
+    2
 }

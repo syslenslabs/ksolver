@@ -89,6 +89,7 @@ pub(crate) fn build_single_node_payload(
         storage_classes,
         priority_classes: raw.priority_classes.clone(),
         namespaces,
+        scheduler_config: crate::verifier::default_scheduler_config(),
     }
 }
 

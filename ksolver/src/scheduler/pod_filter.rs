@@ -135,7 +135,8 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
     if uses_dra {
         // Disclose that DRA device matching is a scalar approximation (exact per-device assignment
         // and full CEL selectors are not modeled — see the `dra` module contract).
-        unmodeled_constraints.push("DRA: device demand modeled as scalar approximation".to_string());
+        unmodeled_constraints
+            .push("DRA: device demand modeled as scalar approximation".to_string());
     }
     let all = modeled_anti_affinity_selectors(spec);
     let anti_affinity_host_selectors = all
@@ -333,6 +334,9 @@ mod tests {
             enable_real_binding: false,
             real_binding_dry_run: false,
             max_binds_per_pass: 10,
+            objective_profile: crate::model::ObjectiveProfile::CostBinpack,
+            objective_weights: crate::model::ObjectiveWeights::default(),
+            candidate_node_limit: 0,
         }
     }
 
@@ -404,7 +408,13 @@ mod tests {
     fn classifies_dra_pod_without_container_gpu() {
         // A DRA pod requests GPUs via spec.resourceClaims, not container limits — it must still be
         // in scope (gpu=0) and carry the scalar-approximation caveat.
-        let mut p = pod("ksolver", None, Some("Pending"), vec![container("m", None, None)], vec![]);
+        let mut p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("m", None, None)],
+            vec![],
+        );
         p.spec.as_mut().unwrap().resource_claims = Some(vec![corev1::PodResourceClaim {
             name: "gpu".to_string(),
             resource_claim_template_name: Some("gpu-template".to_string()),
@@ -412,15 +422,18 @@ mod tests {
         }]);
         let got = classify(&p, &cfg()).expect("DRA pod must be classified");
         assert_eq!(got.gpu_request, 0);
-        assert!(got
-            .unmodeled_constraints
-            .iter()
-            .any(|c| c.contains("DRA")));
+        assert!(got.unmodeled_constraints.iter().any(|c| c.contains("DRA")));
     }
 
     #[test]
     fn non_gpu_non_dra_pod_is_skipped() {
-        let p = pod("ksolver", None, Some("Pending"), vec![container("m", None, None)], vec![]);
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("m", None, None)],
+            vec![],
+        );
         assert!(classify(&p, &cfg()).is_none());
     }
 

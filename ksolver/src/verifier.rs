@@ -208,6 +208,15 @@ pub(crate) struct SimulatorImportPayload {
     pub(crate) storage_classes: Vec<storagev1::StorageClass>,
     pub(crate) priority_classes: Vec<schedulingv1::PriorityClass>,
     pub(crate) namespaces: Vec<corev1::Namespace>,
+    #[serde(default = "default_scheduler_config")]
+    pub(crate) scheduler_config: serde_json::Value,
+}
+
+pub(crate) fn default_scheduler_config() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kubescheduler.config.k8s.io/v1",
+        "kind": "KubeSchedulerConfiguration"
+    })
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -312,6 +321,7 @@ fn prepare_simulator_payload(
         storage_classes: raw.storage_classes.clone(),
         priority_classes: raw.priority_classes.clone(),
         namespaces: raw.namespaces.clone(),
+        scheduler_config: default_scheduler_config(),
     }
 }
 
@@ -337,7 +347,7 @@ pub(crate) fn clone_as_unscheduled_verification_pod(mut pod: corev1::Pod) -> cor
     pod
 }
 
-async fn reset_simulator(client: &reqwest::Client, base_url: &str) -> Result<()> {
+pub(crate) async fn reset_simulator(client: &reqwest::Client, base_url: &str) -> Result<()> {
     let response = client
         .put(format!("{base_url}/api/v1/reset"))
         .send()
@@ -355,7 +365,7 @@ async fn reset_simulator(client: &reqwest::Client, base_url: &str) -> Result<()>
     Ok(())
 }
 
-async fn import_snapshot(
+pub(crate) async fn import_snapshot(
     client: &reqwest::Client,
     base_url: &str,
     payload: &SimulatorImportPayload,
