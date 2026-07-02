@@ -4,7 +4,7 @@ use crate::model::{
     VpaContainerPolicy, VpaContainerRecommendation, VpaRecommenderConfig,
 };
 use anyhow::{Context, Error, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::policy::v1 as policyv1;
@@ -17,6 +17,7 @@ use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::{Api, Client, Config};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
@@ -28,6 +29,78 @@ const LIST_MAX_ATTEMPTS: usize = 3;
 const KUBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const KUBE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const KUBE_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn annotation_bool(annotations: &BTreeMap<String, String>, key: &str, default: bool) -> bool {
+    annotations
+        .get(key)
+        .map(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => true,
+            "false" | "0" | "no" | "off" => false,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn annotation_i32(annotations: &BTreeMap<String, String>, key: &str, default: i32) -> i32 {
+    annotations
+        .get(key)
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(default)
+}
+
+fn annotation_i64(annotations: &BTreeMap<String, String>, key: &str, default: i64) -> i64 {
+    annotations
+        .get(key)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn annotation_f64(annotations: &BTreeMap<String, String>, key: &str) -> f64 {
+    annotations
+        .get(key)
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0)
+}
+
+fn predicted_peak_vram_bytes(annotations: &BTreeMap<String, String>) -> i64 {
+    let explicit_bytes = annotation_i64(annotations, "ksolver.dev/predicted-peak-vram-bytes", 0);
+    if explicit_bytes > 0 {
+        return explicit_bytes;
+    }
+    let explicit_gib = annotation_f64(annotations, "ksolver.dev/predicted-peak-vram-gib");
+    if explicit_gib > 0.0 {
+        return (explicit_gib * 1024.0 * 1024.0 * 1024.0).round() as i64;
+    }
+    0
+}
+
+fn annotation_deadline_unix_seconds(annotations: &BTreeMap<String, String>) -> i64 {
+    annotations
+        .get("ksolver.dev/deadline")
+        .and_then(|v| DateTime::parse_from_rfc3339(v.trim()).ok())
+        .map(|dt| dt.with_timezone(&Utc).timestamp())
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn normalize_priority(raw: i64) -> i64 {
+    if raw <= 0 {
+        return 0;
+    }
+    ((raw + 999) / 1000).clamp(1, 1000)
+}
+
+fn pod_priority(annotations: &BTreeMap<String, String>, spec: Option<&corev1::PodSpec>) -> i64 {
+    let annotated = annotations
+        .get("ksolver.dev/priority")
+        .and_then(|v| v.trim().parse::<i64>().ok());
+    normalize_priority(
+        annotated
+            .or_else(|| spec.and_then(|s| s.priority.map(i64::from)))
+            .unwrap_or(0),
+    )
+}
 
 #[derive(Clone)]
 pub struct KubeCollector {
@@ -743,6 +816,14 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
         .as_ref()
         .and_then(|s| s.qos_class.clone())
         .unwrap_or_default();
+    let container_images = spec.as_ref().map(pod_container_images).unwrap_or_default();
+    let command_hash = spec.as_ref().map(pod_command_hash).unwrap_or_default();
+    let start_time_unix = status
+        .as_ref()
+        .and_then(|s| s.start_time.as_ref())
+        .map(|t| t.0.timestamp())
+        .unwrap_or(0);
+    let finish_time_unix = status.as_ref().map(pod_finish_time_unix).unwrap_or(0);
 
     Pod {
         namespace: namespace.clone(),
@@ -753,10 +834,32 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
             .and_then(|s| s.node_name.clone())
             .unwrap_or_default(),
         phase: status.and_then(|s| s.phase).unwrap_or_default(),
+        start_time_unix,
+        finish_time_unix,
         owner_kind: owner_kind(&owner_refs),
         owner_name: owner_name(&owner_refs),
         deleting: pod.metadata.deletion_timestamp.is_some(),
         labels,
+        team: annotations
+            .get("ksolver.dev/team")
+            .cloned()
+            .unwrap_or_default(),
+        container_images,
+        command_hash,
+        predicted_runtime_seconds: annotation_i64(
+            &annotations,
+            "ksolver.dev/predicted-runtime-seconds",
+            0,
+        )
+        .max(0),
+        predicted_peak_vram_bytes: predicted_peak_vram_bytes(&annotations),
+        business_value: annotation_i64(&annotations, "ksolver.dev/business-value", 0).max(0),
+        deadline_unix_seconds: annotation_deadline_unix_seconds(&annotations),
+        priority: pod_priority(&annotations, spec.as_ref()),
+        priority_class_name: spec
+            .as_ref()
+            .and_then(|s| s.priority_class_name.clone())
+            .unwrap_or_default(),
         qos_class,
         requests,
         extended_resource_requests: spec
@@ -788,9 +891,18 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
                 constraints
                     .iter()
                     .map(|c| crate::model::TopologySpreadRule {
+                        selector_reqs: c
+                            .label_selector
+                            .as_ref()
+                            .and_then(label_selector_to_reqs)
+                            .unwrap_or_default(),
                         max_skew: c.max_skew,
                         topology_key: c.topology_key.clone(),
                         when_unsatisfiable: c.when_unsatisfiable.clone(),
+                        min_domains: c.min_domains,
+                        node_affinity_policy: c.node_affinity_policy.clone(),
+                        node_taints_policy: c.node_taints_policy.clone(),
+                        match_label_keys: c.match_label_keys.clone().unwrap_or_default(),
                         selector: c
                             .label_selector
                             .as_ref()
@@ -803,12 +915,73 @@ fn to_model_pod(pod: corev1::Pod, usage_by_pod: &BTreeMap<String, ResourceUsage>
             })
             .unwrap_or_default(),
         pvcs,
-        disruption_cost: 0,
+        disruption_cost: annotation_i32(&annotations, "ksolver.dev/disruption-cost", 0).max(0),
+        migration_allowed: annotation_bool(&annotations, "ksolver.dev/migration-allowed", true),
+        preemption_allowed: annotation_bool(&annotations, "ksolver.dev/preemption-allowed", true),
+        do_not_disrupt: annotation_bool(&annotations, "ksolver.dev/do-not-disrupt", false),
+        checkpoint_age_seconds: annotation_i64(
+            &annotations,
+            "ksolver.dev/checkpoint-age-seconds",
+            0,
+        )
+        .max(0),
+        progress_percent: annotation_i32(&annotations, "ksolver.dev/progress-percent", 0)
+            .clamp(0, 100),
         autoscaler_not_safe_to_evict: annotations
             .get("cluster-autoscaler.kubernetes.io/safe-to-evict")
             .map(|v| v.eq_ignore_ascii_case("false"))
             .unwrap_or(false),
     }
+}
+
+fn pod_container_images(spec: &corev1::PodSpec) -> Vec<String> {
+    spec.containers
+        .iter()
+        .map(|c| c.image.clone().unwrap_or_default())
+        .filter(|image| !image.is_empty())
+        .collect()
+}
+
+fn pod_command_hash(spec: &corev1::PodSpec) -> String {
+    let mut hasher = Sha256::new();
+    for c in &spec.containers {
+        hasher.update(c.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(c.image.clone().unwrap_or_default().as_bytes());
+        hasher.update([0]);
+        for part in c.command.clone().unwrap_or_default() {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update([1]);
+        for part in c.args.clone().unwrap_or_default() {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update([2]);
+    }
+    let digest = hasher.finalize();
+    digest[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+fn pod_finish_time_unix(status: &corev1::PodStatus) -> i64 {
+    status
+        .container_statuses
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| {
+            s.state
+                .as_ref()
+                .and_then(|state| state.terminated.as_ref())
+                .and_then(|terminated| terminated.finished_at.as_ref())
+                .map(|t| t.0.timestamp())
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn owner_kind(refs: &[OwnerReference]) -> String {
@@ -885,9 +1058,15 @@ fn to_daemon_set(ds: appsv1::DaemonSet) -> DaemonSet {
 
 fn to_disruption_budget(pdb: policyv1::PodDisruptionBudget) -> DisruptionBudget {
     let spec = pdb.spec.as_ref();
+    let (selector, selector_modeled) = spec
+        .and_then(|s| s.selector.as_ref())
+        .map(pdb_label_selector_to_reqs)
+        .unwrap_or_else(|| (Vec::new(), true));
     DisruptionBudget {
         namespace: pdb.metadata.namespace.unwrap_or_default(),
         name: pdb.metadata.name.unwrap_or_default(),
+        selector,
+        selector_modeled,
         min_available: spec
             .and_then(|s| s.min_available.as_ref())
             .map(int_or_string_to_string)
@@ -896,7 +1075,51 @@ fn to_disruption_budget(pdb: policyv1::PodDisruptionBudget) -> DisruptionBudget 
             .and_then(|s| s.max_unavailable.as_ref())
             .map(int_or_string_to_string)
             .unwrap_or_default(),
+        disruptions_allowed: pdb
+            .status
+            .as_ref()
+            .map(|s| s.disruptions_allowed)
+            .unwrap_or(0),
     }
+}
+
+fn pdb_label_selector_to_reqs(
+    ls: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
+) -> (Vec<crate::model::LabelSelectorReq>, bool) {
+    let mut reqs = Vec::new();
+    if let Some(ml) = ls.match_labels.as_ref() {
+        for (k, v) in ml {
+            reqs.push(crate::model::LabelSelectorReq {
+                key: k.clone(),
+                operator: "In".to_string(),
+                values: vec![v.clone()],
+            });
+        }
+    }
+    if let Some(exprs) = ls.match_expressions.as_ref() {
+        for e in exprs {
+            match e.operator.as_str() {
+                "In" | "NotIn" => {
+                    let vals = e.values.clone().unwrap_or_default();
+                    if vals.is_empty() {
+                        return (reqs, false);
+                    }
+                    reqs.push(crate::model::LabelSelectorReq {
+                        key: e.key.clone(),
+                        operator: e.operator.clone(),
+                        values: vals,
+                    });
+                }
+                "Exists" | "DoesNotExist" => reqs.push(crate::model::LabelSelectorReq {
+                    key: e.key.clone(),
+                    operator: e.operator.clone(),
+                    values: Vec::new(),
+                }),
+                _ => return (reqs, false),
+            }
+        }
+    }
+    (reqs, true)
 }
 
 // @lineage
@@ -1732,9 +1955,10 @@ async fn list_vertical_pod_autoscalers(
 mod tests {
     use super::{
         extract_extended_resources, modeled_preferred_pod_terms, parse_bytes,
-        parse_vpa_safety_margin_arg,
+        parse_vpa_safety_margin_arg, to_model_pod,
     };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1769,6 +1993,116 @@ mod tests {
         assert!(got[0].anti);
         assert_eq!(got[0].topology_key, "kubernetes.io/hostname");
         assert_eq!(got[0].selector.reqs.len(), 1);
+    }
+
+    #[test]
+    fn collects_pod_policy_prediction_hints() {
+        use k8s_openapi::api::core::v1 as corev1;
+
+        let pod = corev1::Pod {
+            metadata: ObjectMeta {
+                namespace: Some("team".to_string()),
+                name: Some("trainer".to_string()),
+                annotations: Some(BTreeMap::from([
+                    ("ksolver.dev/business-value".to_string(), "42".to_string()),
+                    (
+                        "ksolver.dev/deadline".to_string(),
+                        "2027-01-15T12:00:00Z".to_string(),
+                    ),
+                    (
+                        "ksolver.dev/predicted-runtime-seconds".to_string(),
+                        "7200".to_string(),
+                    ),
+                    (
+                        "ksolver.dev/predicted-peak-vram-gib".to_string(),
+                        "80".to_string(),
+                    ),
+                ])),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                containers: vec![corev1::Container {
+                    name: "main".to_string(),
+                    image: Some("pytorch:latest".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let got = to_model_pod(pod, &BTreeMap::new());
+
+        assert_eq!(got.business_value, 42);
+        assert_eq!(got.deadline_unix_seconds, 1_800_014_400);
+        assert_eq!(got.predicted_runtime_seconds, 7200);
+        assert_eq!(got.predicted_peak_vram_bytes, 80 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn collects_topology_spread_match_expression_requirements() {
+        use k8s_openapi::api::core::v1 as corev1;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+
+        let pod = corev1::Pod {
+            metadata: ObjectMeta {
+                namespace: Some("team".to_string()),
+                name: Some("trainer".to_string()),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                containers: vec![corev1::Container {
+                    name: "main".to_string(),
+                    ..Default::default()
+                }],
+                topology_spread_constraints: Some(vec![corev1::TopologySpreadConstraint {
+                    max_skew: 1,
+                    topology_key: "topology.kubernetes.io/zone".to_string(),
+                    when_unsatisfiable: "DoNotSchedule".to_string(),
+                    min_domains: Some(2),
+                    node_affinity_policy: Some("Honor".to_string()),
+                    node_taints_policy: Some("Ignore".to_string()),
+                    match_label_keys: Some(vec!["pod-template-hash".to_string()]),
+                    label_selector: Some(LabelSelector {
+                        match_expressions: Some(vec![LabelSelectorRequirement {
+                            key: "app".to_string(),
+                            operator: "In".to_string(),
+                            values: Some(vec!["trainer".to_string(), "worker".to_string()]),
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let got = to_model_pod(pod, &BTreeMap::new());
+
+        assert_eq!(got.topology_spread_rules.len(), 1);
+        assert!(got.topology_spread_rules[0].selector.is_empty());
+        assert_eq!(got.topology_spread_rules[0].selector_reqs.len(), 1);
+        assert_eq!(got.topology_spread_rules[0].selector_reqs[0].key, "app");
+        assert_eq!(got.topology_spread_rules[0].min_domains, Some(2));
+        assert_eq!(
+            got.topology_spread_rules[0].node_affinity_policy,
+            Some("Honor".to_string())
+        );
+        assert_eq!(
+            got.topology_spread_rules[0].node_taints_policy,
+            Some("Ignore".to_string())
+        );
+        assert_eq!(
+            got.topology_spread_rules[0].match_label_keys,
+            vec!["pod-template-hash".to_string()]
+        );
+        assert_eq!(
+            got.topology_spread_rules[0].selector_reqs[0].values,
+            vec!["trainer".to_string(), "worker".to_string()]
+        );
     }
 
     #[test]

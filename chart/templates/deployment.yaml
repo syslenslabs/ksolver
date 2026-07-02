@@ -1,3 +1,60 @@
+{{- if eq .Values.runtime.mode "shadow" -}}
+{{- if ne (include "solver.bindingRolloutModeValid" .Values.scheduler.bindingRolloutMode) "true" -}}
+{{- fail "scheduler.bindingRolloutMode must be observe-only, dry-run, bind-low-risk, or bind-all" -}}
+{{- end -}}
+{{- $bindingCanaryMode := lower (toString .Values.scheduler.bindingCanaryMode) -}}
+{{- if not (or (eq $bindingCanaryMode "all") (eq $bindingCanaryMode "low-risk") (eq $bindingCanaryMode "low_risk") (eq $bindingCanaryMode "canary")) -}}
+{{- fail "scheduler.bindingCanaryMode must be all or low-risk" -}}
+{{- end -}}
+{{- $objectiveProfile := lower (toString .Values.scheduler.objectiveProfile) -}}
+{{- if not (or (eq $objectiveProfile "cost-binpack") (eq $objectiveProfile "cost_binpack") (eq $objectiveProfile "cost") (eq $objectiveProfile "gpu-gang-aware") (eq $objectiveProfile "gpu") (eq $objectiveProfile "gpu_throughput") (eq $objectiveProfile "gpu-throughput")) -}}
+{{- fail "scheduler.objectiveProfile must be cost-binpack or gpu-gang-aware" -}}
+{{- end -}}
+{{- range $name, $weight := .Values.scheduler.objectiveWeights -}}
+{{- if lt (int $weight) 0 -}}
+{{- fail (printf "scheduler.objectiveWeights.%s must be >= 0" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.batchSeconds) 1 -}}
+{{- fail "scheduler.batchSeconds must be >= 1" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.solveSeconds) 1 -}}
+{{- fail "scheduler.solveSeconds must be >= 1" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.bindingLowRiskMaxGpus) 0 -}}
+{{- fail "scheduler.bindingLowRiskMaxGpus must be >= 0" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.maxBindsPerPass) 1 -}}
+{{- fail "scheduler.maxBindsPerPass must be >= 1" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.bindingReservationTtlSeconds) 1 -}}
+{{- fail "scheduler.bindingReservationTtlSeconds must be >= 1" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.candidateNodeLimit) 0 -}}
+{{- fail "scheduler.candidateNodeLimit must be >= 0" -}}
+{{- end -}}
+{{- if or (lt (int .Values.scheduler.candidateWidenMinAdmissionPercent) 0) (gt (int .Values.scheduler.candidateWidenMinAdmissionPercent) 100) -}}
+{{- fail "scheduler.candidateWidenMinAdmissionPercent must be between 0 and 100" -}}
+{{- end -}}
+{{- if lt (int .Values.scheduler.repairCandidateLimit) 1 -}}
+{{- fail "scheduler.repairCandidateLimit must be >= 1" -}}
+{{- end -}}
+{{- $bindingWritesConfigured := or (eq (include "solver.bindingRolloutCanWrite" .Values.scheduler.bindingRolloutMode) "true") .Values.scheduler.enableRealBinding -}}
+{{- $bindingWritesEnabled := and $bindingWritesConfigured (not .Values.scheduler.bindingKillSwitch) -}}
+{{- $eventWritesEnabled := and .Values.scheduler.enableKubernetesEvents (not .Values.scheduler.bindingKillSwitch) -}}
+{{- if and .Values.rbac.create $bindingWritesEnabled (not .Values.rbac.allowBindingMutations) -}}
+{{- fail "scheduler binding write modes require rbac.allowBindingMutations=true" -}}
+{{- end -}}
+{{- if and .Values.rbac.create $eventWritesEnabled (not .Values.rbac.allowEventWrites) -}}
+{{- fail "scheduler.enableKubernetesEvents requires rbac.allowEventWrites=true" -}}
+{{- end -}}
+{{- if and .Values.rbac.create .Values.scheduler.enableLeaderElection (not .Values.rbac.allowLeaderElection) -}}
+{{- fail "scheduler.enableLeaderElection requires rbac.allowLeaderElection=true" -}}
+{{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (or $bindingWritesEnabled $eventWritesEnabled) (not .Values.scheduler.enableLeaderElection) -}}
+{{- fail "replicaCount > 1 with scheduler write paths requires scheduler.enableLeaderElection=true" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,12 +81,107 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if eq .Values.runtime.mode "shadow" }}
+          args:
+            - shadow
+          {{- else }}
           args:
             - serve
             - 0.0.0.0:{{ .Values.service.port }}
+          {{- end }}
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+          {{- if eq .Values.runtime.mode "shadow" }}
+            - name: KSOLVER_SHADOW_ADDR
+              value: {{ .Values.scheduler.shadowAddr | quote }}
+            - name: KSOLVER_SHADOW_SCHEDULER_NAME
+              value: {{ .Values.scheduler.schedulerName | quote }}
+            - name: KSOLVER_CLUSTER_NAME
+              value: {{ .Values.scheduler.clusterName | quote }}
+            - name: KSOLVER_SHADOW_NAMESPACES
+              value: {{ .Values.scheduler.namespaces | quote }}
+            - name: KSOLVER_SHADOW_GPU_RESOURCES
+              value: {{ .Values.scheduler.gpuResources | quote }}
+            - name: KSOLVER_SHADOW_GPU_RESOURCE_PREFIXES
+              value: {{ .Values.scheduler.gpuResourcePrefixes | quote }}
+            - name: KSOLVER_BINDING_ROLLOUT_MODE
+              value: {{ .Values.scheduler.bindingRolloutMode | quote }}
+            - name: KSOLVER_ENABLE_REAL_BINDING
+              value: {{ .Values.scheduler.enableRealBinding | quote }}
+            - name: KSOLVER_BINDING_KILL_SWITCH
+              value: {{ .Values.scheduler.bindingKillSwitch | quote }}
+            - name: KSOLVER_ENABLE_KUBERNETES_EVENTS
+              value: {{ .Values.scheduler.enableKubernetesEvents | quote }}
+            - name: KSOLVER_REAL_BINDING_DRY_RUN
+              value: {{ .Values.scheduler.realBindingDryRun | quote }}
+            - name: KSOLVER_BINDING_CANARY_MODE
+              value: {{ .Values.scheduler.bindingCanaryMode | quote }}
+            - name: KSOLVER_BINDING_LOW_RISK_MAX_GPUS
+              value: {{ .Values.scheduler.bindingLowRiskMaxGpus | quote }}
+            - name: KSOLVER_MAX_BINDS_PER_PASS
+              value: {{ .Values.scheduler.maxBindsPerPass | quote }}
+            - name: KSOLVER_BINDING_RESERVATION_TTL_SECONDS
+              value: {{ .Values.scheduler.bindingReservationTtlSeconds | quote }}
+            - name: KSOLVER_ADMISSION_OPT_IN_LABEL
+              value: {{ .Values.scheduler.admissionOptInLabel | quote }}
+            - name: KSOLVER_SHADOW_BATCH_SECONDS
+              value: {{ .Values.scheduler.batchSeconds | quote }}
+            - name: KSOLVER_SHADOW_SOLVE_SECS
+              value: {{ .Values.scheduler.solveSeconds | quote }}
+            - name: KSOLVER_SHADOW_QUOTAS
+              value: {{ .Values.scheduler.quotas | quote }}
+            - name: KSOLVER_SHADOW_TENANT_WEIGHTS
+              value: {{ .Values.scheduler.tenantWeights | quote }}
+            - name: KSOLVER_SHADOW_TENANT_MONTHLY_BUDGETS
+              value: {{ .Values.scheduler.tenantMonthlyBudgets | quote }}
+            - name: KSOLVER_SHADOW_QUEUE_WEIGHTS
+              value: {{ .Values.scheduler.queueWeights | quote }}
+            - name: KSOLVER_OBJECTIVE_PROFILE
+              value: {{ .Values.scheduler.objectiveProfile | quote }}
+            - name: KSOLVER_GPU_ADMISSION_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.admission | quote }}
+            - name: KSOLVER_GPU_DEMAND_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.gpuDemand | quote }}
+            - name: KSOLVER_GPU_GANG_COMPLETE_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.gangComplete | quote }}
+            - name: KSOLVER_GPU_PRIORITY_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.priority | quote }}
+            - name: KSOLVER_GPU_BUSINESS_VALUE_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.businessValue | quote }}
+            - name: KSOLVER_GPU_QUEUE_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.queue | quote }}
+            - name: KSOLVER_GPU_QUEUE_WAIT_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.queueWait | quote }}
+            - name: KSOLVER_GPU_FAIR_SHARE_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.fairShare | quote }}
+            - name: KSOLVER_GPU_DEADLINE_URGENCY_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.deadlineUrgency | quote }}
+            - name: KSOLVER_GPU_DEADLINE_MISS_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.deadlineMiss | quote }}
+            - name: KSOLVER_GPU_FRAGMENTATION_WEIGHT
+              value: {{ .Values.scheduler.objectiveWeights.gpuFragmentation | quote }}
+            - name: KSOLVER_CANDIDATE_NODE_LIMIT
+              value: {{ .Values.scheduler.candidateNodeLimit | quote }}
+            - name: KSOLVER_CANDIDATE_WIDEN_MIN_ADMISSION_PERCENT
+              value: {{ .Values.scheduler.candidateWidenMinAdmissionPercent | quote }}
+            - name: KSOLVER_ENABLE_NODE_GROUPING
+              value: {{ .Values.scheduler.enableNodeGrouping | quote }}
+            - name: KSOLVER_REPAIR_CANDIDATE_LIMIT
+              value: {{ .Values.scheduler.repairCandidateLimit | quote }}
+            - name: KSOLVER_ENABLE_LEADER_ELECTION
+              value: {{ .Values.scheduler.enableLeaderElection | quote }}
+            - name: KSOLVER_LEADER_ELECTION_NAMESPACE
+              value: {{ .Values.scheduler.leaderElectionNamespace | quote }}
+            - name: KSOLVER_LEADER_ELECTION_LEASE_NAME
+              value: {{ .Values.scheduler.leaderElectionLeaseName | quote }}
+            - name: KSOLVER_LEADER_ELECTION_IDENTITY
+              value: {{ .Values.scheduler.leaderElectionIdentity | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- end }}
           {{- with .Values.extraEnv }}
 {{ toYaml . | indent 10 }}
           {{- end }}
@@ -39,7 +191,11 @@ spec:
               protocol: TCP
           livenessProbe:
             httpGet:
+              {{- if eq .Values.runtime.mode "shadow" }}
+              path: /healthz
+              {{- else }}
               path: /api/health
+              {{- end }}
               port: http
             initialDelaySeconds: 10
             periodSeconds: 30
@@ -47,7 +203,11 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
+              {{- if eq .Values.runtime.mode "shadow" }}
+              path: /readyz
+              {{- else }}
               path: /api/health
+              {{- end }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

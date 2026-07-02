@@ -66,7 +66,7 @@ pub struct Node {
     pub price: Money,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pod {
     pub namespace: String,
     pub name: String,
@@ -78,6 +78,12 @@ pub struct Pod {
     pub node_name: String,
     #[serde(default)]
     pub phase: String,
+    /// Kubernetes `status.startTime` as unix seconds, when present.
+    #[serde(default)]
+    pub start_time_unix: i64,
+    /// Best-effort latest container termination finish time as unix seconds, when present.
+    #[serde(default)]
+    pub finish_time_unix: i64,
     #[serde(default)]
     pub owner_kind: String,
     #[serde(default)]
@@ -86,6 +92,28 @@ pub struct Pod {
     pub deleting: bool,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Optional tenant/team owner hint from `ksolver.dev/team`.
+    #[serde(default)]
+    pub team: String,
+    /// Container images from the pod spec. Used for prediction observation fingerprints.
+    #[serde(default)]
+    pub container_images: Vec<String>,
+    /// Stable SHA-256 digest over container image/command/args tuples. Empty if no pod spec.
+    #[serde(default)]
+    pub command_hash: String,
+    #[serde(default)]
+    pub predicted_runtime_seconds: i64,
+    #[serde(default)]
+    pub predicted_peak_vram_bytes: i64,
+    #[serde(default)]
+    pub business_value: i64,
+    #[serde(default)]
+    pub deadline_unix_seconds: i64,
+    /// Normalized scheduling priority. `ksolver.dev/priority` overrides Kubernetes `spec.priority`.
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub priority_class_name: String,
     #[serde(default)]
     pub qos_class: String,
     pub requests: ResourceList,
@@ -130,8 +158,68 @@ pub struct Pod {
     pub pvcs: Vec<String>,
     #[serde(default)]
     pub disruption_cost: i32,
+    #[serde(default = "default_true")]
+    pub migration_allowed: bool,
+    #[serde(default = "default_true")]
+    pub preemption_allowed: bool,
+    #[serde(default)]
+    pub do_not_disrupt: bool,
+    #[serde(default)]
+    pub checkpoint_age_seconds: i64,
+    #[serde(default)]
+    pub progress_percent: i32,
     #[serde(default)]
     pub autoscaler_not_safe_to_evict: bool,
+}
+
+impl Default for Pod {
+    fn default() -> Self {
+        Self {
+            namespace: String::new(),
+            name: String::new(),
+            uid: String::new(),
+            node_name: String::new(),
+            phase: String::new(),
+            start_time_unix: 0,
+            finish_time_unix: 0,
+            owner_kind: String::new(),
+            owner_name: String::new(),
+            deleting: false,
+            labels: BTreeMap::new(),
+            team: String::new(),
+            container_images: Vec::new(),
+            command_hash: String::new(),
+            predicted_runtime_seconds: 0,
+            predicted_peak_vram_bytes: 0,
+            business_value: 0,
+            deadline_unix_seconds: 0,
+            priority: 0,
+            priority_class_name: String::new(),
+            qos_class: String::new(),
+            requests: ResourceList::default(),
+            extended_resource_requests: BTreeMap::new(),
+            usage: ResourceUsage::default(),
+            memory_history: MemoryHistory::default(),
+            tolerations: Vec::new(),
+            node_selector: BTreeMap::new(),
+            required_affinity: Vec::new(),
+            required_anti: Vec::new(),
+            modeled_host_anti_selectors: Vec::new(),
+            anti_affinity_topology_selectors: Vec::new(),
+            preferred_pod_affinity: Vec::new(),
+            required_node_affinity: Vec::new(),
+            topology_spread_constraints: 0,
+            topology_spread_rules: Vec::new(),
+            pvcs: Vec::new(),
+            disruption_cost: 0,
+            migration_allowed: true,
+            preemption_allowed: true,
+            do_not_disrupt: false,
+            checkpoint_age_seconds: 0,
+            progress_percent: 0,
+            autoscaler_not_safe_to_evict: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,9 +281,15 @@ pub struct DisruptionBudget {
     pub namespace: String,
     pub name: String,
     #[serde(default)]
+    pub selector: Vec<LabelSelectorReq>,
+    #[serde(default = "default_true")]
+    pub selector_modeled: bool,
+    #[serde(default)]
     pub min_available: String,
     #[serde(default)]
     pub max_unavailable: String,
+    #[serde(default)]
+    pub disruptions_allowed: i32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -351,15 +445,18 @@ pub struct AntiAffinitySelector {
     pub namespace_selector: Option<Vec<LabelSelectorReq>>,
 }
 
-/// A `preferredDuringScheduling` node-affinity term: a `weight` (1–100) plus a preference selector
-/// (matchExpressions over node labels, as `NodeAffinityTerm`s). A node earns `weight` toward its
-/// soft score when ALL `exprs` match its labels. (matchFields in a preference are deferred.)
+/// A `preferredDuringScheduling` node-affinity term: a `weight` (1–100) plus a preference selector.
+/// `exprs` match node labels; `fields` match node fields. A node earns `weight` toward its soft
+/// score when ALL requirements match. Field support follows required affinity's narrow Kubernetes
+/// subset: `metadata.name` with `In`/`NotIn`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreferredNodeTerm {
     #[serde(default)]
     pub weight: i64,
     #[serde(default)]
     pub exprs: Vec<NodeAffinityTerm>,
+    #[serde(default)]
+    pub fields: Vec<NodeAffinityTerm>,
 }
 
 /// A `preferredDuringScheduling` pod (anti-)affinity term: a `weight` (1–100), a `topology_key`,
@@ -390,7 +487,7 @@ pub struct NodeAffinityGroup {
     pub match_fields: Vec<NodeAffinityTerm>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TopologySpreadRule {
     #[serde(default)]
     pub max_skew: i32,
@@ -398,8 +495,25 @@ pub struct TopologySpreadRule {
     pub topology_key: String,
     #[serde(default)]
     pub when_unsatisfiable: String,
+    /// Advanced Kubernetes topology-spread knobs. The shadow scheduler currently models only the
+    /// base hard-spread semantics, so explicit advanced fields are carried for caveats rather than
+    /// silently treated as exact.
+    #[serde(default)]
+    pub min_domains: Option<i32>,
+    #[serde(default)]
+    pub node_affinity_policy: Option<String>,
+    #[serde(default)]
+    pub node_taints_policy: Option<String>,
+    #[serde(default)]
+    pub match_label_keys: Vec<String>,
+    /// Backward-compatible matchLabels map used by older traces and tests. New code should prefer
+    /// `selector_reqs`, which also carries matchExpressions.
     #[serde(default)]
     pub selector: BTreeMap<String, String>,
+    /// Modeled label selector requirements. `matchLabels` lowers to `In [value]`; supported
+    /// matchExpressions are In, NotIn, Exists, and DoesNotExist.
+    #[serde(default)]
+    pub selector_reqs: Vec<LabelSelectorReq>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -599,6 +713,8 @@ pub struct NormalizedCluster {
     pub nodes: Vec<NormalizedNode>,
     #[serde(default)]
     pub workloads: Vec<NormalizedWorkload>,
+    #[serde(default)]
+    pub pdbs: Vec<DisruptionBudget>,
     /// Namespace name → labels, for `namespaceSelector`-scoped anti-affinity (F-CNS-2).
     #[serde(default)]
     pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
@@ -640,7 +756,7 @@ pub struct NormalizedNode {
     pub price: Money,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct NormalizedWorkload {
     pub namespace: String,
@@ -651,6 +767,9 @@ pub struct NormalizedWorkload {
     pub uid: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Optional tenant/team owner hint from `ksolver.dev/team`.
+    #[serde(default)]
+    pub team: String,
     /// Fully-modeled hostname pod-anti-affinity selectors (reqs + namespace scope) for symmetry
     /// enforcement in the shadow scheduler.
     #[serde(default)]
@@ -669,6 +788,16 @@ pub struct NormalizedWorkload {
     pub owner_name: String,
     #[serde(default)]
     pub current_node: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub priority_class_name: String,
+    #[serde(default)]
+    pub business_value: i64,
+    #[serde(default)]
+    pub deadline_unix_seconds: i64,
+    #[serde(default)]
+    pub predicted_runtime_seconds: i64,
     #[serde(default)]
     pub current_requests: ResourceList,
     #[serde(default)]
@@ -694,13 +823,76 @@ pub struct NormalizedWorkload {
     #[serde(default)]
     pub topology_spread_constraints: i32,
     #[serde(default)]
+    pub topology_spread_rules: Vec<TopologySpreadRule>,
+    #[serde(default)]
     pub qos_class: String,
     #[serde(default)]
     pub autoscaler_not_safe_to_evict: bool,
+    #[serde(default = "default_true")]
+    pub migration_allowed: bool,
+    #[serde(default = "default_true")]
+    pub preemption_allowed: bool,
+    #[serde(default)]
+    pub disruption_cost: i32,
+    #[serde(default)]
+    pub do_not_disrupt: bool,
+    #[serde(default)]
+    pub checkpoint_age_seconds: i64,
+    #[serde(default)]
+    pub progress_percent: i32,
+    #[serde(default)]
+    pub running_age_seconds: i64,
     #[serde(default)]
     pub reasons: Vec<String>,
     #[serde(default)]
     pub candidate_levels: Vec<CandidateLevel>,
+}
+
+impl Default for NormalizedWorkload {
+    fn default() -> Self {
+        Self {
+            namespace: String::new(),
+            name: String::new(),
+            uid: String::new(),
+            labels: BTreeMap::new(),
+            team: String::new(),
+            anti_affinity_host_selectors: Vec::new(),
+            anti_affinity_topology_selectors: Vec::new(),
+            preferred_pod_affinity: Vec::new(),
+            owner_kind: String::new(),
+            owner_name: String::new(),
+            current_node: String::new(),
+            priority: 0,
+            priority_class_name: String::new(),
+            business_value: 0,
+            deadline_unix_seconds: 0,
+            predicted_runtime_seconds: 0,
+            current_requests: ResourceList::default(),
+            recommended_requests: ResourceList::default(),
+            requests: ResourceList::default(),
+            extended_resource_requests: BTreeMap::new(),
+            usage: ResourceUsage::default(),
+            feasible_nodes: 0,
+            feasible_node_names: Vec::new(),
+            pinned_by_volume: false,
+            has_required_affinity: false,
+            has_required_anti_affinity: false,
+            has_required_node_affinity: false,
+            topology_spread_constraints: 0,
+            topology_spread_rules: Vec::new(),
+            qos_class: String::new(),
+            autoscaler_not_safe_to_evict: false,
+            migration_allowed: true,
+            preemption_allowed: true,
+            disruption_cost: 0,
+            do_not_disrupt: false,
+            checkpoint_age_seconds: 0,
+            progress_percent: 0,
+            running_age_seconds: 0,
+            reasons: Vec::new(),
+            candidate_levels: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1241,6 +1433,36 @@ pub struct ObjectiveWeights {
     /// Additional score for each replica in a multi-pod gang under GPU-aware partial admission.
     #[serde(default = "default_gpu_gang_complete_score")]
     pub gang_complete: i64,
+    /// Additional score per normalized workload priority point under GPU-aware partial admission.
+    /// Defaults to 0 so priority is inert unless explicitly enabled.
+    #[serde(default)]
+    pub priority: i64,
+    /// Additional score per `ksolver.dev/business-value` point under GPU-aware partial admission.
+    /// Defaults to 0 so business value is inert unless explicitly enabled.
+    #[serde(default)]
+    pub business_value: i64,
+    /// Additional score per configured `ksolver.dev/queue` point under GPU-aware partial admission.
+    /// Defaults to 0 so queue policy is inert unless explicitly enabled.
+    #[serde(default)]
+    pub queue: i64,
+    /// Additional score per queued minute under GPU-aware partial admission. Queue wait is derived
+    /// from Kubernetes `metadata.creationTimestamp` and bounded before scoring. Defaults to 0.
+    #[serde(default)]
+    pub queue_wait: i64,
+    /// Additional score per fair-share deficit GPU under GPU-aware partial admission. The shadow
+    /// scheduler computes a bounded per-workload deficit from configured tenant weights and current
+    /// running GPU usage. Defaults to 0 so fair-share remains observational unless enabled.
+    #[serde(default)]
+    pub fair_share: i64,
+    /// Additional score for explicit-deadline workloads under GPU-aware partial admission.
+    /// Deadline urgency is computed from latest start time (`deadline - predicted_runtime`);
+    /// defaults to 0 so deadlines are observational unless explicitly enabled.
+    #[serde(default)]
+    pub deadline_urgency: i64,
+    /// Admission-score penalty for explicit-deadline workloads whose predicted runtime already
+    /// exceeds the remaining time. Defaults to 0 so misses remain observational unless enabled.
+    #[serde(default)]
+    pub deadline_miss: i64,
     /// Extra penalty for idle GPU slots on active nodes under GPU-aware profiles. This is added to
     /// the existing scalar slack penalty, so cost/binpack callers are unaffected.
     #[serde(default)]
@@ -1253,6 +1475,13 @@ impl Default for ObjectiveWeights {
             admission: default_gpu_admission_score(),
             gpu_demand: default_gpu_demand_score(),
             gang_complete: default_gpu_gang_complete_score(),
+            priority: 0,
+            business_value: 0,
+            queue: 0,
+            queue_wait: 0,
+            fair_share: 0,
+            deadline_urgency: 0,
+            deadline_miss: 0,
             gpu_fragmentation: 0,
         }
     }
@@ -1365,6 +1594,10 @@ pub struct OptimizationInput {
     /// solver as `Σ total_resource_w · placed[w] ≤ limit` (requires partial_admission).
     #[serde(default)]
     pub quota_groups: Vec<QuotaGroup>,
+    /// Hard monthly-cost caps over groups of workloads (e.g. per-tenant budget).
+    /// Costs are expressed in milli-currency units and charged per selected replica/node edge.
+    #[serde(default)]
+    pub budget_groups: Vec<BudgetGroup>,
     /// Soft co-placement rewards between two *pending* workloads that prefer each other
     /// (`preferredDuringScheduling` pod affinity). Empty by default; only the shadow scheduler
     /// sets these. Applied ONLY in the Phase-2 soft pass — never changes admission or cost.
@@ -1412,6 +1645,18 @@ pub struct QuotaGroup {
     pub limit: i64,
 }
 
+/// A hard cap on admitted monthly placement cost for a workload group. `limit_milli` is the
+/// remaining budget after already-running work is charged by the caller.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BudgetGroup {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub workload_ids: Vec<String>,
+    #[serde(default)]
+    pub limit_milli: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OptimizationNode {
     pub name: String,
@@ -1448,6 +1693,40 @@ pub struct OptimizationWorkload {
     pub recommended_requests: ResourceList,
     #[serde(default)]
     pub extended_resource_requests: BTreeMap<String, i64>,
+    /// Normalized priority score used only by GPU-aware admission objectives.
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub priority_class_name: String,
+    #[serde(default)]
+    pub team: String,
+    #[serde(default)]
+    pub queue: String,
+    /// Bounded queue-policy score, stamped by shadow mode from operator config.
+    #[serde(default)]
+    pub queue_score: i64,
+    /// Seconds since Kubernetes `metadata.creationTimestamp` for pending workloads.
+    #[serde(default)]
+    pub queue_wait_seconds: i64,
+    #[serde(default)]
+    pub business_value: i64,
+    /// Bounded fair-share deficit score, stamped by shadow mode before solving.
+    #[serde(default)]
+    pub fair_share_deficit: i64,
+    #[serde(default)]
+    pub deadline_unix_seconds: i64,
+    #[serde(default)]
+    pub min_gpus: i64,
+    #[serde(default)]
+    pub max_gpus: i64,
+    #[serde(default)]
+    pub preferred_gpus: i64,
+    #[serde(default)]
+    pub flexible: bool,
+    #[serde(default)]
+    pub predicted_runtime_seconds: i64,
+    #[serde(default)]
+    pub predicted_peak_vram_bytes: i64,
     #[serde(default)]
     pub feasible_nodes: Vec<String>,
     #[serde(default)]
@@ -1461,6 +1740,97 @@ pub struct OptimizationWorkload {
     /// lands there. Used only by the soft-affinity tie-break pass; never affects admission/cost.
     #[serde(default)]
     pub soft_scores: BTreeMap<String, i64>,
+}
+
+pub fn is_gpu_resource_name(name: &str) -> bool {
+    name == "nvidia.com/gpu" || name.starts_with("nvidia.com/mig-") || name.contains("/gpu")
+}
+
+pub fn optimization_workload_gpu_request(workload: &OptimizationWorkload) -> i64 {
+    workload
+        .extended_resource_requests
+        .iter()
+        .filter(|(name, _)| is_gpu_resource_name(name))
+        .map(|(_, value)| (*value).max(0))
+        .sum()
+}
+
+fn ceil_div_positive(a: i64, b: i64) -> i64 {
+    (a + b - 1) / b
+}
+
+pub fn flexible_replica_bounds(workload: &OptimizationWorkload) -> Option<(i64, i64)> {
+    let group_size = i64::from(workload.group_size).max(0);
+    if !workload.flexible || group_size <= 1 {
+        return None;
+    }
+    if workload.min_gpus <= 0 && workload.preferred_gpus <= 0 && workload.max_gpus <= 0 {
+        return None;
+    }
+    let total_gpu = optimization_workload_gpu_request(workload);
+    if total_gpu <= 0 {
+        return None;
+    }
+    let per_replica_gpu = ceil_div_positive(total_gpu, group_size).max(1);
+    let min_replicas = if workload.min_gpus > 0 {
+        ceil_div_positive(workload.min_gpus, per_replica_gpu)
+    } else {
+        1
+    }
+    .clamp(1, group_size);
+    let mut max_gpu = if workload.preferred_gpus > 0 {
+        workload.preferred_gpus
+    } else if workload.max_gpus > 0 {
+        workload.max_gpus
+    } else {
+        total_gpu
+    };
+    if workload.max_gpus > 0 {
+        max_gpu = max_gpu.min(workload.max_gpus);
+    }
+    let max_replicas = ceil_div_positive(max_gpu.max(workload.min_gpus).max(1), per_replica_gpu)
+        .clamp(min_replicas, group_size);
+    (min_replicas < group_size || max_replicas < group_size).then_some((min_replicas, max_replicas))
+}
+
+fn predicted_runtime_for_replicas(
+    full_runtime_seconds: i64,
+    full_replicas: i64,
+    replicas: i64,
+) -> i64 {
+    if full_runtime_seconds <= 0 || full_replicas <= 0 || replicas <= 0 {
+        return 0;
+    }
+    let ratio = (full_replicas as f64 / replicas as f64).sqrt();
+    ((full_runtime_seconds as f64) * ratio).ceil() as i64
+}
+
+pub fn deadline_adjusted_flexible_replica_bounds(
+    workload: &OptimizationWorkload,
+    now_unix_seconds: i64,
+) -> Option<(i64, i64)> {
+    let (min_replicas, max_replicas) = flexible_replica_bounds(workload)?;
+    if workload.deadline_unix_seconds <= 0 || workload.predicted_runtime_seconds <= 0 {
+        return Some((min_replicas, max_replicas));
+    }
+    let remaining = workload
+        .deadline_unix_seconds
+        .saturating_sub(now_unix_seconds);
+    if remaining <= 0 {
+        return Some((min_replicas, max_replicas));
+    }
+    let group_size = i64::from(workload.group_size).max(1);
+    for replicas in min_replicas..=max_replicas {
+        let predicted_runtime = predicted_runtime_for_replicas(
+            workload.predicted_runtime_seconds,
+            group_size,
+            replicas,
+        );
+        if predicted_runtime > 0 && predicted_runtime <= remaining {
+            return Some((min_replicas, replicas));
+        }
+    }
+    Some((min_replicas, max_replicas))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1479,11 +1849,84 @@ pub struct CandidateLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisReport, AutoscalerBlockerSummary, ExplainabilityReport, InflationDriver,
-        MemoryRiskSummary, Money, NormalizedCluster, NormalizedNode, NormalizedWorkload,
-        OptimizationPlan, PlacementMemoryRisk, ResourceAllocation, ResourceList, ResourceSummary,
-        ResourceUsage, SolverInfo,
+        deadline_adjusted_flexible_replica_bounds, flexible_replica_bounds,
+        optimization_workload_gpu_request, AnalysisReport, AutoscalerBlockerSummary,
+        ExplainabilityReport, InflationDriver, MemoryRiskSummary, Money, NormalizedCluster,
+        NormalizedNode, NormalizedWorkload, OptimizationPlan, OptimizationWorkload,
+        PlacementMemoryRisk, ResourceAllocation, ResourceList, ResourceSummary, ResourceUsage,
+        SolverInfo,
     };
+    use std::collections::BTreeMap;
+
+    fn flexible_gpu_workload(group_size: i32, total_gpu: i64) -> OptimizationWorkload {
+        OptimizationWorkload {
+            group_size,
+            extended_resource_requests: BTreeMap::from([("nvidia.com/gpu".to_string(), total_gpu)]),
+            flexible: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn optimization_workload_gpu_request_counts_whole_mig_and_gpu_like_resources() {
+        let workload = OptimizationWorkload {
+            extended_resource_requests: BTreeMap::from([
+                ("nvidia.com/gpu".to_string(), 2),
+                ("nvidia.com/mig-1g.5gb".to_string(), 3),
+                ("vendor.example/gpu".to_string(), 4),
+                ("cpu".to_string(), 99),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(optimization_workload_gpu_request(&workload), 9);
+    }
+
+    #[test]
+    fn flexible_replica_bounds_convert_gpu_hints_to_replica_bounds() {
+        let mut workload = flexible_gpu_workload(8, 8);
+        workload.min_gpus = 2;
+        workload.preferred_gpus = 4;
+        workload.max_gpus = 8;
+
+        assert_eq!(flexible_replica_bounds(&workload), Some((2, 4)));
+    }
+
+    #[test]
+    fn flexible_replica_bounds_disabled_for_nonflexible_singletons_and_full_size() {
+        let mut nonflexible = flexible_gpu_workload(8, 8);
+        nonflexible.flexible = false;
+        assert_eq!(flexible_replica_bounds(&nonflexible), None);
+
+        let singleton = flexible_gpu_workload(1, 1);
+        assert_eq!(flexible_replica_bounds(&singleton), None);
+
+        let full_size = flexible_gpu_workload(8, 8);
+        assert_eq!(flexible_replica_bounds(&full_size), None);
+    }
+
+    #[test]
+    fn deadline_adjusted_flexible_bounds_cap_to_smallest_replicas_that_meet_deadline() {
+        let mut workload = flexible_gpu_workload(8, 8);
+        workload.min_gpus = 2;
+        workload.preferred_gpus = 8;
+        workload.max_gpus = 8;
+        workload.predicted_runtime_seconds = 3600;
+        workload.deadline_unix_seconds = 10_000;
+
+        assert_eq!(
+            deadline_adjusted_flexible_replica_bounds(&workload, 0),
+            Some((2, 2))
+        );
+        assert_eq!(
+            deadline_adjusted_flexible_replica_bounds(&workload, 4_800),
+            Some((2, 4))
+        );
+        assert_eq!(
+            deadline_adjusted_flexible_replica_bounds(&workload, 9_000),
+            Some((2, 8))
+        );
+    }
 
     #[test]
     fn analysis_report_serializes_with_ui_field_names() {

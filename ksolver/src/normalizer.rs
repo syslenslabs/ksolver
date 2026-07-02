@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::pricing::PricingCatalog;
+use chrono::Utc;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::{info, warn};
@@ -52,6 +53,7 @@ mod regression_tests {
     use super::{Normalizer, Options};
     use crate::model::{ClusterMetadata, ClusterSnapshot, DaemonSet, Node, Pod, ResourceList};
     use crate::pricing::PricingCatalog;
+    use chrono::Utc;
 
     #[test]
     fn current_pod_occupancy_does_not_make_node_infeasible() {
@@ -362,6 +364,50 @@ mod regression_tests {
     }
 
     #[test]
+    fn normalize_derives_running_age_from_pod_start_time() {
+        let now = Utc::now().timestamp();
+        let snapshot = ClusterSnapshot {
+            metadata: ClusterMetadata {
+                name: "test".to_string(),
+                collected: None,
+                ..Default::default()
+            },
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                allocatable: ResourceList {
+                    milli_cpu: 4000,
+                    memory_bytes: 16_384,
+                    ephemeral_storage: 0,
+                    pods: 32,
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "ns".to_string(),
+                name: "pod-a".to_string(),
+                node_name: "node-a".to_string(),
+                phase: "Running".to_string(),
+                start_time_unix: now - 7200,
+                requests: ResourceList {
+                    milli_cpu: 1000,
+                    memory_bytes: 8192,
+                    ephemeral_storage: 0,
+                    pods: 1,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert_eq!(normalized.workloads.len(), 1);
+        assert!(normalized.workloads[0].running_age_seconds >= 7200);
+        assert!(normalized.workloads[0].running_age_seconds < 7210);
+    }
+
+    #[test]
     fn usage_adjusted_requests_do_not_raise_underrequested_workloads() {
         let snapshot = ClusterSnapshot {
             metadata: ClusterMetadata {
@@ -415,6 +461,94 @@ mod regression_tests {
 
         assert_eq!(normalized.workloads[0].requests.milli_cpu, 100);
         assert_eq!(normalized.workloads[0].requests.memory_bytes, 1024);
+    }
+
+    #[test]
+    fn pod_priority_is_preserved_on_normalized_workloads() {
+        let snapshot = ClusterSnapshot {
+            metadata: ClusterMetadata {
+                name: "test".to_string(),
+                collected: None,
+                ..Default::default()
+            },
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                allocatable: ResourceList {
+                    milli_cpu: 4000,
+                    memory_bytes: 16_384,
+                    ephemeral_storage: 0,
+                    pods: 32,
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "ns".to_string(),
+                name: "pod-a".to_string(),
+                node_name: "node-a".to_string(),
+                phase: "Running".to_string(),
+                priority: 7,
+                priority_class_name: "research-high".to_string(),
+                requests: ResourceList {
+                    milli_cpu: 100,
+                    memory_bytes: 1024,
+                    ephemeral_storage: 0,
+                    pods: 1,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert_eq!(normalized.workloads[0].priority, 7);
+        assert_eq!(normalized.workloads[0].priority_class_name, "research-high");
+    }
+
+    #[test]
+    fn pod_policy_hints_are_preserved_on_normalized_workloads() {
+        let snapshot = ClusterSnapshot {
+            metadata: ClusterMetadata {
+                name: "test".to_string(),
+                collected: None,
+                ..Default::default()
+            },
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                allocatable: ResourceList {
+                    milli_cpu: 4000,
+                    memory_bytes: 16_384,
+                    ephemeral_storage: 0,
+                    pods: 32,
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "ns".to_string(),
+                name: "pod-a".to_string(),
+                node_name: "node-a".to_string(),
+                phase: "Running".to_string(),
+                business_value: 42,
+                deadline_unix_seconds: 1_800_000_000,
+                predicted_runtime_seconds: 7_200,
+                requests: ResourceList {
+                    milli_cpu: 100,
+                    memory_bytes: 1024,
+                    ephemeral_storage: 0,
+                    pods: 1,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert_eq!(normalized.workloads[0].business_value, 42);
+        assert_eq!(normalized.workloads[0].deadline_unix_seconds, 1_800_000_000);
+        assert_eq!(normalized.workloads[0].predicted_runtime_seconds, 7_200);
     }
 
     #[test]
@@ -580,6 +714,7 @@ impl Normalizer {
             cluster_name: snapshot.metadata.name.clone(),
             collected: snapshot.metadata.collected,
             warnings: snapshot.warnings.clone(),
+            pdbs: snapshot.pdbs.clone(),
             namespace_labels: snapshot
                 .namespaces
                 .iter()
@@ -657,12 +792,18 @@ impl Normalizer {
                 name: pod.name.clone(),
                 uid: pod.uid.clone(),
                 labels: pod.labels.clone(),
+                team: pod.team.clone(),
                 anti_affinity_host_selectors: pod.modeled_host_anti_selectors.clone(),
                 anti_affinity_topology_selectors: pod.anti_affinity_topology_selectors.clone(),
                 preferred_pod_affinity: pod.preferred_pod_affinity.clone(),
                 owner_kind: pod.owner_kind.clone(),
                 owner_name: pod.owner_name.clone(),
                 current_node: pod.node_name.clone(),
+                priority: pod.priority,
+                priority_class_name: pod.priority_class_name.clone(),
+                business_value: pod.business_value,
+                deadline_unix_seconds: pod.deadline_unix_seconds,
+                predicted_runtime_seconds: pod.predicted_runtime_seconds,
                 current_requests: pod.requests.clone(),
                 recommended_requests: recommended,
                 requests: effective_requests,
@@ -674,8 +815,16 @@ impl Normalizer {
                 has_required_anti_affinity: !pod.required_anti.is_empty(),
                 has_required_node_affinity: !pod.required_node_affinity.is_empty(),
                 topology_spread_constraints: pod.topology_spread_constraints,
+                topology_spread_rules: pod.topology_spread_rules.clone(),
                 qos_class: pod.qos_class.clone(),
                 autoscaler_not_safe_to_evict: pod.autoscaler_not_safe_to_evict,
+                migration_allowed: pod.migration_allowed,
+                preemption_allowed: pod.preemption_allowed,
+                disruption_cost: pod.disruption_cost,
+                do_not_disrupt: pod.do_not_disrupt,
+                checkpoint_age_seconds: pod.checkpoint_age_seconds,
+                progress_percent: pod.progress_percent,
+                running_age_seconds: running_age_seconds(pod.start_time_unix),
                 ..Default::default()
             };
 
@@ -693,15 +842,15 @@ impl Normalizer {
             workload.feasible_node_names.sort();
             workload.reasons = unique_strings(workload.reasons);
 
-            if workload.topology_spread_constraints > 0 {
+            if unsupported_hard_topology_spread_count(&workload.topology_spread_rules) > 0 {
                 normalized.warnings.push(format!(
-                    "workload {}/{} uses topology spread constraints; solver does not model them exactly yet",
+                    "workload {}/{} uses unsupported hard topology spread constraints; solver does not model them exactly yet",
                     workload.namespace, workload.name
                 ));
             }
             if workload.has_required_affinity {
                 normalized.warnings.push(format!(
-                    "workload {}/{} uses required pod affinity; solver does not model it exactly yet",
+                    "workload {}/{} uses required pod affinity; shadow scheduler applies a best-effort existing-peer topology filter but does not model full kube-scheduler affinity semantics exactly yet",
                     workload.namespace, workload.name
                 ));
             }
@@ -1036,6 +1185,16 @@ fn should_model_pod(pod: &Pod) -> bool {
     !is_terminal_or_deleting_pod(pod) && pod.owner_kind != "DaemonSet"
 }
 
+fn running_age_seconds(start_time_unix: i64) -> i64 {
+    if start_time_unix <= 0 {
+        return 0;
+    }
+    Utc::now()
+        .timestamp()
+        .saturating_sub(start_time_unix)
+        .max(0)
+}
+
 // @lineage
 // writes: warnings[]
 fn normalized_warning(
@@ -1172,7 +1331,10 @@ pub(crate) fn node_affinity_expr_matches(
 /// Whether a node-affinity `matchFields` term holds. Kubernetes allows only the field
 /// `metadata.name`, operators `In`/`NotIn`, with exactly one value; anything else is a parse
 /// error and never matches (so it can never become a match-all branch).
-fn node_affinity_field_matches(node_name: &str, term: &crate::model::NodeAffinityTerm) -> bool {
+pub(crate) fn node_affinity_field_matches(
+    node_name: &str,
+    term: &crate::model::NodeAffinityTerm,
+) -> bool {
     if term.key != "metadata.name" || term.values.len() != 1 {
         return false;
     }
@@ -1367,6 +1529,25 @@ fn namespaced_name(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
 
+fn modeled_hard_topology_spread(rule: &TopologySpreadRule) -> bool {
+    rule.when_unsatisfiable == "DoNotSchedule"
+        && rule.max_skew > 0
+        && !rule.topology_key.is_empty()
+        && (!rule.selector_reqs.is_empty() || !rule.selector.is_empty())
+        && rule.min_domains.is_none()
+        && rule.node_affinity_policy.is_none()
+        && rule.node_taints_policy.is_none()
+        && rule.match_label_keys.is_empty()
+}
+
+fn unsupported_hard_topology_spread_count(rules: &[TopologySpreadRule]) -> i32 {
+    rules
+        .iter()
+        .filter(|rule| rule.when_unsatisfiable == "DoNotSchedule")
+        .filter(|rule| !modeled_hard_topology_spread(rule))
+        .count() as i32
+}
+
 fn first_non_empty(values: &[Option<String>]) -> String {
     values
         .iter()
@@ -1422,10 +1603,12 @@ fn estimate_constraint_impacts(cluster: &NormalizedCluster) -> Vec<ConstraintImp
             entry.0.insert(key.clone());
             entry.1 += 1;
         }
-        if workload.topology_spread_constraints > 0 {
+        let unsupported_spread =
+            unsupported_hard_topology_spread_count(&workload.topology_spread_rules);
+        if unsupported_spread > 0 {
             let entry = acc.get_mut("topology spread constraints").unwrap();
             entry.0.insert(key.clone());
-            entry.1 += workload.topology_spread_constraints;
+            entry.1 += unsupported_spread;
         }
         if workload.autoscaler_not_safe_to_evict {
             let entry = acc
@@ -1654,6 +1837,163 @@ mod tests {
     }
 
     #[test]
+    fn normalize_preserves_topology_spread_rules_for_pending_scheduler() {
+        let snapshot = ClusterSnapshot {
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                pool: "pool-a".to_string(),
+                allocatable: ResourceList {
+                    pods: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "team".to_string(),
+                name: "trainer".to_string(),
+                node_name: "node-a".to_string(),
+                topology_spread_constraints: 1,
+                topology_spread_rules: vec![TopologySpreadRule {
+                    max_skew: 1,
+                    topology_key: "topology.kubernetes.io/zone".to_string(),
+                    when_unsatisfiable: "DoNotSchedule".to_string(),
+                    selector: BTreeMap::from([("app".to_string(), "trainer".to_string())]),
+                    selector_reqs: vec![LabelSelectorReq {
+                        key: "app".to_string(),
+                        operator: "In".to_string(),
+                        values: vec!["trainer".to_string()],
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert_eq!(normalized.workloads.len(), 1);
+        assert_eq!(normalized.workloads[0].topology_spread_constraints, 1);
+        assert_eq!(
+            normalized.workloads[0].topology_spread_rules[0].topology_key,
+            "topology.kubernetes.io/zone"
+        );
+        assert_eq!(
+            normalized.workloads[0].topology_spread_rules[0]
+                .selector
+                .get("app"),
+            Some(&"trainer".to_string())
+        );
+        assert!(normalized
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unsupported hard topology spread")));
+        assert!(normalized
+            .constraint_impacts
+            .iter()
+            .all(|impact| impact.name != "topology spread constraints"));
+    }
+
+    #[test]
+    fn unsupported_hard_topology_spread_is_reported_as_constraint_impact() {
+        let snapshot = ClusterSnapshot {
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                pool: "pool-a".to_string(),
+                price: Money {
+                    currency: "USD".to_string(),
+                    monthly: 100.0,
+                },
+                allocatable: ResourceList {
+                    pods: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "team".to_string(),
+                name: "trainer".to_string(),
+                node_name: "node-a".to_string(),
+                topology_spread_constraints: 1,
+                topology_spread_rules: vec![TopologySpreadRule {
+                    max_skew: 1,
+                    topology_key: "topology.kubernetes.io/zone".to_string(),
+                    when_unsatisfiable: "DoNotSchedule".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert!(normalized
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported hard topology spread")));
+        let impact = normalized
+            .constraint_impacts
+            .iter()
+            .find(|impact| impact.name == "topology spread constraints")
+            .expect("expected unsupported topology spread impact");
+        assert_eq!(impact.workloads_affected, 1);
+        assert_eq!(impact.reason_count, 1);
+    }
+
+    #[test]
+    fn advanced_hard_topology_spread_is_reported_as_constraint_impact() {
+        let snapshot = ClusterSnapshot {
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                pool: "pool-a".to_string(),
+                price: Money {
+                    currency: "USD".to_string(),
+                    monthly: 100.0,
+                },
+                allocatable: ResourceList {
+                    pods: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "team".to_string(),
+                name: "trainer".to_string(),
+                node_name: "node-a".to_string(),
+                topology_spread_constraints: 1,
+                topology_spread_rules: vec![TopologySpreadRule {
+                    max_skew: 1,
+                    topology_key: "topology.kubernetes.io/zone".to_string(),
+                    when_unsatisfiable: "DoNotSchedule".to_string(),
+                    min_domains: Some(2),
+                    selector: BTreeMap::from([("app".to_string(), "trainer".to_string())]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        assert!(normalized
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported hard topology spread")));
+        let impact = normalized
+            .constraint_impacts
+            .iter()
+            .find(|impact| impact.name == "topology spread constraints")
+            .expect("expected unsupported topology spread impact");
+        assert_eq!(impact.workloads_affected, 1);
+        assert_eq!(impact.reason_count, 1);
+    }
+
+    #[test]
     fn constraint_impacts_do_not_report_dead_max_pods_bucket() {
         let cluster = NormalizedCluster {
             workloads: vec![NormalizedWorkload {
@@ -1677,6 +2017,43 @@ mod tests {
         assert!(impacts
             .iter()
             .any(|impact| impact.name == "resource capacity"));
+    }
+
+    #[test]
+    fn required_pod_affinity_warning_describes_best_effort_shadow_support() {
+        let snapshot = ClusterSnapshot {
+            nodes: vec![Node {
+                name: "node-a".to_string(),
+                pool: "pool-a".to_string(),
+                allocatable: ResourceList {
+                    pods: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            pods: vec![Pod {
+                namespace: "team".to_string(),
+                name: "trainer".to_string(),
+                node_name: "node-a".to_string(),
+                required_affinity: vec![crate::model::AffinityTerm {
+                    topology_key: "topology.kubernetes.io/zone".to_string(),
+                    selector: BTreeMap::from([("app".to_string(), "peer".to_string())]),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let normalized =
+            Normalizer::new(PricingCatalog::default(), Options::default()).normalize(&snapshot);
+
+        let warning = normalized
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("required pod affinity"))
+            .expect("expected required pod affinity warning");
+        assert!(warning.contains("best-effort existing-peer topology filter"));
+        assert!(!warning.contains("does not model it exactly"));
     }
 
     // Helpers for node-affinity tests.

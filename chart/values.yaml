@@ -2,6 +2,11 @@ namespace: ksolver
 
 replicaCount: 1
 
+runtime:
+  # serve keeps the original explainability API/UI server. shadow runs the GPU scheduler's
+  # read-only shadow loop and serves its dashboard/API on KSOLVER_SHADOW_ADDR.
+  mode: serve
+
 image:
   repository: ghcr.io/syslenslabs/ksolver
   pullPolicy: Always
@@ -17,6 +22,77 @@ serviceAccount:
 
 rbac:
   create: true
+  # Keep observe-only installs read-only. Turn these on only with the matching scheduler rollout
+  # mode and an explicit operational review.
+  allowBindingMutations: false
+  allowEventWrites: false
+  allowLeaderElection: false
+
+scheduler:
+  schedulerName: ksolver
+  clusterName: default
+  shadowAddr: 0.0.0.0:8080
+  namespaces: ""
+  gpuResources: nvidia.com/gpu
+  gpuResourcePrefixes: nvidia.com/mig-
+  bindingRolloutMode: observe-only
+  enableRealBinding: false
+  bindingKillSwitch: true
+  enableKubernetesEvents: false
+  realBindingDryRun: false
+  bindingCanaryMode: all
+  bindingLowRiskMaxGpus: 1
+  maxBindsPerPass: 10
+  bindingReservationTtlSeconds: 60
+  admissionOptInLabel: ""
+  batchSeconds: 10
+  solveSeconds: 10
+  quotas: ""
+  tenantWeights: ""
+  tenantMonthlyBudgets: ""
+  queueWeights: ""
+  objectiveProfile: cost-binpack
+  objectiveWeights:
+    admission: "1000000"
+    gpuDemand: 1000
+    gangComplete: 100000
+    priority: 0
+    businessValue: 0
+    queue: 0
+    queueWait: 0
+    fairShare: 0
+    deadlineUrgency: 0
+    deadlineMiss: 0
+    gpuFragmentation: 1
+  candidateNodeLimit: 16
+  candidateWidenMinAdmissionPercent: 50
+  enableNodeGrouping: false
+  repairCandidateLimit: 8
+  enableLeaderElection: false
+  leaderElectionNamespace: ""
+  leaderElectionLeaseName: ksolver-scheduler
+  leaderElectionIdentity: ""
+
+admissionWebhook:
+  # Disabled by default. Kubernetes calls mutating webhooks over HTTPS; enable this only when
+  # /admission/scheduler-name is exposed behind valid TLS, either by url or service TLS termination.
+  enabled: false
+  # Use url for an externally TLS-terminated endpoint. When empty, the chart renders service config.
+  # If set, url must start with https://.
+  url: ""
+  caBundle: ""
+  # Kubernetes-valid values: Ignore or Fail.
+  failurePolicy: Ignore
+  # Kubernetes-valid values: Exact or Equivalent.
+  matchPolicy: Equivalent
+  # Kubernetes-valid values: Never or IfNeeded.
+  reinvocationPolicy: Never
+  # Kubernetes-valid values: None or NoneOnDryRun.
+  sideEffects: None
+  # Kubernetes requires 1-30 seconds.
+  timeoutSeconds: 5
+  namespaceSelector: {}
+  objectSelector: {}
 
 podSecurityContext:
   runAsNonRoot: true

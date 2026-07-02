@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow = "1"
 async-stream = "0.3"
 axum = { version = "0.7", features = ["macros"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 cp_sat = { git = "https://github.com/bmjask/cp_sat.git", branch = "support-ortools-9-15", optional = true }
 csv = "1.3"

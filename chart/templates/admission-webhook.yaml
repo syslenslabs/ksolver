@@ -1,0 +1,73 @@
+{{- if .Values.admissionWebhook.enabled -}}
+{{- if ne .Values.runtime.mode "shadow" -}}
+{{- fail "admissionWebhook.enabled requires runtime.mode=shadow because /admission/scheduler-name is served only by the shadow scheduler" -}}
+{{- end -}}
+{{- if and .Values.admissionWebhook.url (not (hasPrefix "https://" .Values.admissionWebhook.url)) -}}
+{{- fail "admissionWebhook.url must use https:// because Kubernetes admission webhooks require HTTPS" -}}
+{{- end -}}
+{{- if or (lt (int .Values.admissionWebhook.timeoutSeconds) 1) (gt (int .Values.admissionWebhook.timeoutSeconds) 30) -}}
+{{- fail "admissionWebhook.timeoutSeconds must be between 1 and 30" -}}
+{{- end -}}
+{{- $failurePolicy := .Values.admissionWebhook.failurePolicy -}}
+{{- if not (or (eq $failurePolicy "Ignore") (eq $failurePolicy "Fail")) -}}
+{{- fail "admissionWebhook.failurePolicy must be Ignore or Fail" -}}
+{{- end -}}
+{{- $matchPolicy := .Values.admissionWebhook.matchPolicy -}}
+{{- if not (or (eq $matchPolicy "Exact") (eq $matchPolicy "Equivalent")) -}}
+{{- fail "admissionWebhook.matchPolicy must be Exact or Equivalent" -}}
+{{- end -}}
+{{- $reinvocationPolicy := .Values.admissionWebhook.reinvocationPolicy -}}
+{{- if not (or (eq $reinvocationPolicy "Never") (eq $reinvocationPolicy "IfNeeded")) -}}
+{{- fail "admissionWebhook.reinvocationPolicy must be Never or IfNeeded" -}}
+{{- end -}}
+{{- $sideEffects := .Values.admissionWebhook.sideEffects -}}
+{{- if not (or (eq $sideEffects "None") (eq $sideEffects "NoneOnDryRun")) -}}
+{{- fail "admissionWebhook.sideEffects must be None or NoneOnDryRun" -}}
+{{- end -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "solver.fullname" . }}-scheduler-name
+  labels:
+    {{- include "solver.labels" . | nindent 4 }}
+webhooks:
+  - name: scheduler-name.ksolver.dev
+    admissionReviewVersions:
+      - v1
+    sideEffects: {{ .Values.admissionWebhook.sideEffects }}
+    failurePolicy: {{ .Values.admissionWebhook.failurePolicy }}
+    matchPolicy: {{ .Values.admissionWebhook.matchPolicy }}
+    reinvocationPolicy: {{ .Values.admissionWebhook.reinvocationPolicy }}
+    timeoutSeconds: {{ .Values.admissionWebhook.timeoutSeconds }}
+    clientConfig:
+      {{- if .Values.admissionWebhook.url }}
+      url: {{ .Values.admissionWebhook.url | quote }}
+      {{- else }}
+      service:
+        name: {{ include "solver.fullname" . }}
+        namespace: {{ .Values.namespace | default .Release.Namespace }}
+        path: /admission/scheduler-name
+        port: {{ .Values.service.port }}
+      {{- end }}
+      {{- if .Values.admissionWebhook.caBundle }}
+      caBundle: {{ .Values.admissionWebhook.caBundle | quote }}
+      {{- end }}
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+        scope: Namespaced
+    {{- with .Values.admissionWebhook.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.admissionWebhook.objectSelector }}
+    objectSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end -}}

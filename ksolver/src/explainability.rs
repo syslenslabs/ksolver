@@ -355,7 +355,7 @@ fn constraint_impact_drivers(normalized: &NormalizedCluster) -> Vec<InflationDri
                 ),
                 "required affinity" => (
                     "required-affinity",
-                    "Audit hard affinity rules and remove any rules that unnecessarily pin workloads to specific nodes or pools.",
+                    "Audit hard pod-affinity rules. Shadow scheduling honors common existing-peer topology matches best-effort, but hard affinity can still pin workloads to narrow pools.",
                 ),
                 "node selectors" => (
                     "node-selectors",
@@ -2032,6 +2032,7 @@ mod tests {
                 name: "test-pdb".to_string(),
                 min_available: "2".to_string(),
                 max_unavailable: String::new(),
+                ..Default::default()
             }],
             ..Default::default()
         };

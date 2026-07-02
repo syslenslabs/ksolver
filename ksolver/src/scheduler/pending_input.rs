@@ -1,14 +1,40 @@
 use crate::model::{
     AntiAffinitySelector, LabelSelectorReq, NormalizedCluster, NormalizedWorkload,
-    OptimizationInput, OptimizationNode, OptimizationWorkload, OptimizationWorkloadMember,
-    QuotaGroup, ResourceList,
+    OptimizationInput, OptimizationNode, OptimizationSolution, OptimizationWorkload,
+    OptimizationWorkloadMember, QuotaGroup, ResourceList,
 };
 use crate::scheduler::pod_filter::PendingGpuPod;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 
 /// Resource name used for per-namespace quotas (MVP: GPUs only).
 const GPU_RESOURCE: &str = "nvidia.com/gpu";
+
+fn default_is_gpu_resource(name: &str) -> bool {
+    name == GPU_RESOURCE || name.starts_with("nvidia.com/mig-")
+}
+
+fn is_dra_resource(name: &str) -> bool {
+    name.starts_with("dra.ksolver/")
+}
+
+fn has_modeled_gpu_or_dra_demand(
+    workload: &NormalizedWorkload,
+    is_gpu_resource: &dyn Fn(&str) -> bool,
+) -> bool {
+    workload
+        .extended_resource_requests
+        .iter()
+        .any(|(name, qty)| *qty > 0 && (is_gpu_resource(name) || is_dra_resource(name)))
+}
+
+fn pending_requires_unmodeled_dra(pending: &PendingGpuPod) -> bool {
+    pending.gpu_request <= 0
+        && pending
+            .unmodeled_constraints
+            .iter()
+            .any(|c| c.starts_with("DRA:"))
+}
 
 /// Whether an anti-affinity selector applies to a pod in `other_ns`, given the selector owner's
 /// namespace `own_ns` and the cluster's namespace labels. Kubernetes namespace scoping:
@@ -96,6 +122,148 @@ fn selector_matches(selector: &[LabelSelectorReq], labels: &BTreeMap<String, Str
     selector.iter().all(|req| req_matches(req, labels))
 }
 
+fn match_labels_selector_matches(
+    selector: &BTreeMap<String, String>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    !selector.is_empty()
+        && selector
+            .iter()
+            .all(|(key, value)| labels.get(key) == Some(value))
+}
+
+fn topology_spread_selector_matches(
+    rule: &crate::model::TopologySpreadRule,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    if !rule.selector_reqs.is_empty() {
+        selector_matches(&rule.selector_reqs, labels)
+    } else {
+        match_labels_selector_matches(&rule.selector, labels)
+    }
+}
+
+fn modeled_topology_spread_rule(rule: &crate::model::TopologySpreadRule) -> bool {
+    rule.when_unsatisfiable == "DoNotSchedule"
+        && rule.max_skew > 0
+        && !rule.topology_key.is_empty()
+        && (!rule.selector_reqs.is_empty() || !rule.selector.is_empty())
+        && rule.min_domains.is_none()
+        && rule.node_affinity_policy.is_none()
+        && rule.node_taints_policy.is_none()
+        && rule.match_label_keys.is_empty()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn topology_spread_allows_node(
+    candidate_node: &str,
+    pending_namespace: &str,
+    member_labels: &[&BTreeMap<String, String>],
+    rules: &[crate::model::TopologySpreadRule],
+    added_matching_pods: i64,
+    running_by_node: &BTreeMap<String, Vec<&NormalizedWorkload>>,
+    node_labels: &BTreeMap<&str, &BTreeMap<String, String>>,
+) -> bool {
+    for rule in rules {
+        if !modeled_topology_spread_rule(rule) {
+            continue;
+        }
+        if !member_labels
+            .iter()
+            .all(|labels| topology_spread_selector_matches(rule, labels))
+        {
+            continue;
+        }
+        let Some(candidate_domain) = node_labels
+            .get(candidate_node)
+            .and_then(|labels| labels.get(&rule.topology_key))
+        else {
+            return false;
+        };
+
+        let mut counts: BTreeMap<String, i64> = node_labels
+            .values()
+            .filter_map(|labels| labels.get(&rule.topology_key).cloned())
+            .map(|domain| (domain, 0))
+            .collect();
+        if counts.is_empty() {
+            return false;
+        }
+
+        for (node_name, pods) in running_by_node {
+            let Some(domain) = node_labels
+                .get(node_name.as_str())
+                .and_then(|labels| labels.get(&rule.topology_key))
+            else {
+                continue;
+            };
+            for pod in pods {
+                if pod.namespace == pending_namespace
+                    && topology_spread_selector_matches(rule, &pod.labels)
+                {
+                    *counts.entry(domain.clone()).or_default() += 1;
+                }
+            }
+        }
+
+        let min_count = counts.values().copied().min().unwrap_or(0);
+        let candidate_count = counts.get(candidate_domain).copied().unwrap_or(0);
+        if candidate_count + added_matching_pods - min_count > i64::from(rule.max_skew) {
+            return false;
+        }
+    }
+    true
+}
+
+fn pod_affinity_allows_node(
+    candidate_node: &str,
+    pending_namespace: &str,
+    selectors: &[(String, AntiAffinitySelector)],
+    running_by_node: &BTreeMap<String, Vec<&NormalizedWorkload>>,
+    node_labels: &BTreeMap<&str, &BTreeMap<String, String>>,
+    namespace_labels: &BTreeMap<String, BTreeMap<String, String>>,
+) -> bool {
+    for (topology_key, selector) in selectors {
+        if topology_key.is_empty() {
+            continue;
+        }
+        let mut matching_domains = std::collections::BTreeSet::new();
+        for (node_name, pods) in running_by_node {
+            let Some(domain) = node_labels
+                .get(node_name.as_str())
+                .and_then(|labels| labels.get(topology_key))
+            else {
+                continue;
+            };
+            if pods.iter().any(|pod| {
+                selector_scopes_ns(
+                    selector,
+                    pending_namespace,
+                    &pod.namespace,
+                    namespace_labels,
+                ) && selector_matches(&selector.reqs, &pod.labels)
+            }) {
+                matching_domains.insert(domain.clone());
+            }
+        }
+        if matching_domains.is_empty() {
+            // Kubernetes allows the first pod in a self-affine group to bootstrap in some cases.
+            // Keep this best-effort filter from over-constraining when no existing peer exists.
+            continue;
+        }
+        let Some(candidate_domain) = node_labels
+            .get(candidate_node)
+            .and_then(|labels| labels.get(topology_key))
+        else {
+            return false;
+        };
+        if !matching_domains.contains(candidate_domain) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Deterministic canonical form of a requirement so gang-member selector sets compare
 /// order-insensitively (values sorted within a requirement).
 fn canonical_req(r: &LabelSelectorReq) -> (String, String, Vec<String>) {
@@ -169,6 +337,88 @@ impl Residual {
         }
         true
     }
+}
+
+fn parse_vram_label_bytes(raw: &str) -> i64 {
+    let value = raw.trim();
+    if value.is_empty() {
+        return 0;
+    }
+    let split = value
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(value.len());
+    let (num, suffix) = value.split_at(split);
+    let Ok(parsed) = num.parse::<f64>() else {
+        return 0;
+    };
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return 0;
+    }
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "b" | "bytes" => 1.0,
+        "ki" | "kib" => 1024.0,
+        "mi" | "mib" => 1024.0 * 1024.0,
+        "gi" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "kb" => 1000.0,
+        "mb" => 1000.0 * 1000.0,
+        "gb" => 1000.0 * 1000.0 * 1000.0,
+        "" => {
+            if parsed <= 2_048.0 {
+                1024.0 * 1024.0 * 1024.0
+            } else if parsed < 1_000_000_000.0 {
+                1024.0 * 1024.0
+            } else {
+                1.0
+            }
+        }
+        _ => 0.0,
+    };
+    (parsed * multiplier).round() as i64
+}
+
+fn node_peak_vram_bytes(labels: &BTreeMap<String, String>) -> i64 {
+    [
+        "ksolver.dev/gpu-vram-bytes",
+        "ksolver.dev/gpu-vram-gib",
+        "nvidia.com/gpu.memory",
+    ]
+    .iter()
+    .filter_map(|key| labels.get(*key).map(|v| (*key, v.as_str())))
+    .find_map(|(key, value)| {
+        let bytes = if key.ends_with("-gib") {
+            parse_vram_label_bytes(&format!("{value}Gi"))
+        } else {
+            parse_vram_label_bytes(value)
+        };
+        (bytes > 0).then_some(bytes)
+    })
+    .unwrap_or(0)
+}
+
+fn vram_fits_node(
+    predicted_peak_vram_bytes: i64,
+    node_vram_bytes: i64,
+    ext_requests: &BTreeMap<String, i64>,
+    is_gpu_resource: &dyn Fn(&str) -> bool,
+) -> bool {
+    if predicted_peak_vram_bytes <= 0 || node_vram_bytes <= 0 {
+        return true;
+    }
+    let gpu_units: i64 = ext_requests
+        .iter()
+        .filter(|(res, _)| is_gpu_resource(res))
+        .map(|(_, qty)| *qty)
+        .sum();
+    gpu_units <= 0 || predicted_peak_vram_bytes <= node_vram_bytes
+}
+
+fn vram_rightsizing_score(predicted_peak_vram_bytes: i64, node_vram_bytes: i64) -> i64 {
+    if predicted_peak_vram_bytes <= 0 || node_vram_bytes < predicted_peak_vram_bytes {
+        return 0;
+    }
+    let gib = 1024_i64 * 1024 * 1024;
+    let excess_gib = (node_vram_bytes - predicted_peak_vram_bytes + gib - 1) / gib;
+    (1000 - excess_gib).clamp(1, 1000)
 }
 
 fn stable_hash<T: Hash + ?Sized>(v: &T) -> u64 {
@@ -267,6 +517,337 @@ pub struct DropInfo {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateDiagnostics {
+    pub candidate_edges_before_prune: usize,
+    pub candidate_edges_after_prune: usize,
+    pub pruned_workloads: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeGroupingDiagnostics {
+    pub eligible_group_count: usize,
+    pub eligible_node_count: usize,
+    pub max_group_size: usize,
+    pub disabled_reasons: Vec<String>,
+}
+
+fn grouping_node_signature(input: &OptimizationInput, node: &OptimizationNode) -> Vec<String> {
+    let mut sig = vec![
+        format!("pool={}", node.pool),
+        format!("price_currency={}", node.price.currency),
+        format!("price_monthly={}", node.price.monthly.to_bits()),
+        format!("cpu={}", node.effective_capacity.milli_cpu),
+        format!("memory={}", node.effective_capacity.memory_bytes),
+        format!("disk={}", node.effective_capacity.ephemeral_storage),
+        format!("pods={}", node.effective_capacity.pods),
+    ];
+    for (name, qty) in &node.extended_resources {
+        sig.push(format!("resource:{name}={qty}"));
+    }
+    for workload in &input.workloads {
+        let feasible = workload.feasible_nodes.iter().any(|n| n == &node.name);
+        let soft_score = workload.soft_scores.get(&node.name).copied().unwrap_or(0);
+        let current_count = workload
+            .current_counts
+            .get(&node.name)
+            .copied()
+            .unwrap_or(0);
+        sig.push(format!(
+            "workload:{}:feasible={feasible}:soft={soft_score}:current={current_count}",
+            workload.id
+        ));
+    }
+    sig
+}
+
+pub fn analyze_node_grouping(input: &OptimizationInput) -> NodeGroupingDiagnostics {
+    let mut reasons = BTreeSet::new();
+    if input.nodes.iter().any(|n| n.count != 1) {
+        reasons.insert("input already contains grouped nodes".to_string());
+    }
+    if input.workloads.iter().any(|w| w.colocate) {
+        reasons.insert("co-located workloads require physical-node identity".to_string());
+    }
+    if !input.anti_affinity_pairs.is_empty() {
+        reasons.insert("anti-affinity constraints require physical-node identity".to_string());
+    }
+    if !input.soft_coplacement_pairs.is_empty() {
+        reasons
+            .insert("same-batch preferred co-placement uses physical topology domains".to_string());
+    }
+
+    let disabled_reasons: Vec<String> = reasons.into_iter().collect();
+    if !disabled_reasons.is_empty() {
+        return NodeGroupingDiagnostics {
+            disabled_reasons,
+            ..Default::default()
+        };
+    }
+
+    let mut by_signature: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    for node in &input.nodes {
+        by_signature
+            .entry(grouping_node_signature(input, node))
+            .or_default()
+            .push(node.name.clone());
+    }
+
+    let eligible_groups: Vec<Vec<String>> = by_signature
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .collect();
+    NodeGroupingDiagnostics {
+        eligible_group_count: eligible_groups.len(),
+        eligible_node_count: eligible_groups.iter().map(Vec::len).sum(),
+        max_group_size: eligible_groups.iter().map(Vec::len).max().unwrap_or(0),
+        disabled_reasons,
+    }
+}
+
+pub fn group_pending_input_by_node_symmetry(
+    input: &OptimizationInput,
+) -> (OptimizationInput, NodeGroupingDiagnostics) {
+    let diagnostics = analyze_node_grouping(input);
+    if !diagnostics.disabled_reasons.is_empty() || diagnostics.eligible_group_count == 0 {
+        return (input.clone(), diagnostics);
+    }
+
+    let mut by_signature: BTreeMap<Vec<String>, Vec<OptimizationNode>> = BTreeMap::new();
+    for node in &input.nodes {
+        by_signature
+            .entry(grouping_node_signature(input, node))
+            .or_default()
+            .push(node.clone());
+    }
+
+    let mut physical_to_group = BTreeMap::new();
+    let mut grouped_nodes = Vec::new();
+    for mut members in by_signature.into_values() {
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        if members.len() == 1 {
+            let node = members.remove(0);
+            physical_to_group.insert(node.name.clone(), node.name.clone());
+            grouped_nodes.push(node);
+            continue;
+        }
+
+        let first = members[0].clone();
+        let group_name = format!("node-group-{}", first.name);
+        let member_names: Vec<String> = members.iter().map(|n| n.name.clone()).collect();
+        for name in &member_names {
+            physical_to_group.insert(name.clone(), group_name.clone());
+        }
+        grouped_nodes.push(OptimizationNode {
+            name: group_name,
+            count: member_names.len() as i32,
+            members: member_names,
+            ..first
+        });
+    }
+    grouped_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut grouped = input.clone();
+    grouped.nodes = grouped_nodes;
+    for workload in &mut grouped.workloads {
+        let mut feasible: Vec<String> = workload
+            .feasible_nodes
+            .iter()
+            .filter_map(|name| physical_to_group.get(name).cloned())
+            .collect();
+        feasible.sort();
+        feasible.dedup();
+        workload.feasible_nodes = feasible;
+
+        let mut current_counts = std::collections::HashMap::new();
+        for (node_name, count) in &workload.current_counts {
+            if let Some(group_name) = physical_to_group.get(node_name) {
+                *current_counts.entry(group_name.clone()).or_insert(0) += *count;
+            }
+        }
+        workload.current_counts = current_counts;
+        if let Some(group_name) = physical_to_group.get(&workload.current_node) {
+            workload.current_node = group_name.clone();
+        }
+
+        let mut soft_scores: BTreeMap<String, i64> = BTreeMap::new();
+        for (node_name, score) in &workload.soft_scores {
+            if let Some(group_name) = physical_to_group.get(node_name) {
+                soft_scores
+                    .entry(group_name.clone())
+                    .and_modify(|existing| *existing = (*existing).max(*score))
+                    .or_insert(*score);
+            }
+        }
+        workload.soft_scores = soft_scores;
+    }
+
+    (grouped, diagnostics)
+}
+
+pub fn expand_grouped_solution_to_physical(
+    input: &OptimizationInput,
+    solution: &OptimizationSolution,
+) -> Result<OptimizationSolution, String> {
+    let grouped_nodes: Vec<&OptimizationNode> = input
+        .nodes
+        .iter()
+        .filter(|node| node.count > 1 || node.members.len() > 1)
+        .collect();
+    if grouped_nodes.is_empty() {
+        return Ok(solution.clone());
+    }
+
+    let mut node_by_name = BTreeMap::new();
+    let mut residual = BTreeMap::new();
+    for node in &input.nodes {
+        node_by_name.insert(node.name.as_str(), node);
+        for member in physical_members(node) {
+            residual.insert(
+                member,
+                Residual {
+                    cpu: node.effective_capacity.milli_cpu,
+                    mem: node.effective_capacity.memory_bytes,
+                    disk: node.effective_capacity.ephemeral_storage,
+                    pods: node.effective_capacity.pods,
+                    ext: node.extended_resources.clone(),
+                },
+            );
+        }
+    }
+
+    let mut expanded = solution.clone();
+    expanded.assignments.clear();
+    expanded.assignment_counts.clear();
+    expanded.active_nodes.clear();
+
+    let mut workload_by_id: BTreeMap<&str, &OptimizationWorkload> = BTreeMap::new();
+    for workload in &input.workloads {
+        workload_by_id.insert(workload.id.as_str(), workload);
+    }
+
+    let mut units = Vec::new();
+    for (workload_id, counts) in &solution.assignment_counts {
+        let workload = workload_by_id
+            .get(workload_id.as_str())
+            .ok_or_else(|| format!("solution references unknown workload {workload_id}"))?;
+        for (node_name, count) in counts {
+            if *count <= 0 {
+                continue;
+            }
+            let node = node_by_name
+                .get(node_name.as_str())
+                .ok_or_else(|| format!("solution references unknown node {node_name}"))?;
+            for _ in 0..*count {
+                units.push((
+                    workload_id.clone(),
+                    (*workload).clone(),
+                    physical_members(node),
+                ));
+            }
+        }
+    }
+    units.sort_by(|a, b| {
+        let a_gpu = gpu_request_sum(&a.1.extended_resource_requests);
+        let b_gpu = gpu_request_sum(&b.1.extended_resource_requests);
+        b_gpu
+            .cmp(&a_gpu)
+            .then_with(|| b.1.requests.memory_bytes.cmp(&a.1.requests.memory_bytes))
+            .then_with(|| b.1.requests.milli_cpu.cmp(&a.1.requests.milli_cpu))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    for (workload_id, workload, members) in units {
+        let mut placed = None;
+        for member in members {
+            if let Some(r) = residual.get_mut(&member) {
+                if residual_fits(r, &workload.requests, &workload.extended_resource_requests) {
+                    consume_residual(r, &workload.requests, &workload.extended_resource_requests);
+                    placed = Some(member);
+                    break;
+                }
+            }
+        }
+        let Some(member) = placed else {
+            return Err(format!(
+                "grouped assignment for workload {workload_id} could not be expanded to a physical node"
+            ));
+        };
+        expanded
+            .assignments
+            .entry(workload_id.clone())
+            .or_insert_with(|| member.clone());
+        *expanded
+            .assignment_counts
+            .entry(workload_id)
+            .or_default()
+            .entry(member)
+            .or_insert(0) += 1;
+    }
+
+    for (node_name, r) in &residual {
+        let Some(original) = input
+            .nodes
+            .iter()
+            .find(|n| n.name == *node_name || n.members.iter().any(|m| m == node_name))
+        else {
+            continue;
+        };
+        let used = original.effective_capacity.pods.saturating_sub(r.pods);
+        if used > 0 {
+            expanded.active_nodes.insert(node_name.clone(), 1);
+        }
+    }
+
+    Ok(expanded)
+}
+
+fn physical_members(node: &OptimizationNode) -> Vec<String> {
+    if node.members.is_empty() {
+        vec![node.name.clone()]
+    } else {
+        let mut members = node.members.clone();
+        members.sort();
+        members
+    }
+}
+
+fn gpu_request_sum(ext: &BTreeMap<String, i64>) -> i64 {
+    ext.iter()
+        .filter(|(name, _)| name.as_str() == GPU_RESOURCE || name.starts_with("nvidia.com/mig-"))
+        .map(|(_, qty)| *qty)
+        .sum()
+}
+
+fn residual_fits(
+    residual: &Residual,
+    requests: &ResourceList,
+    ext_requests: &BTreeMap<String, i64>,
+) -> bool {
+    residual.pods >= requests.pods.max(1)
+        && residual.cpu >= requests.milli_cpu
+        && residual.mem >= requests.memory_bytes
+        && residual.disk >= requests.ephemeral_storage
+        && ext_requests
+            .iter()
+            .all(|(name, qty)| residual.ext.get(name).copied().unwrap_or(0) >= *qty)
+}
+
+fn consume_residual(
+    residual: &mut Residual,
+    requests: &ResourceList,
+    ext_requests: &BTreeMap<String, i64>,
+) {
+    residual.pods = sub_clamp(residual.pods, requests.pods.max(1));
+    residual.cpu = sub_clamp(residual.cpu, requests.milli_cpu);
+    residual.mem = sub_clamp(residual.mem, requests.memory_bytes);
+    residual.disk = sub_clamp(residual.disk, requests.ephemeral_storage);
+    for (name, qty) in ext_requests {
+        let entry = residual.ext.entry(name.clone()).or_default();
+        *entry = sub_clamp(*entry, *qty);
+    }
+}
+
 /// Build an optimization input that places ONLY the pending pods (see
 /// `build_pending_input_diagnosed`); returns just the input for callers that don't need the
 /// drop diagnostics (preserves the original signature — zero ripple).
@@ -284,13 +865,14 @@ pub fn build_pending_input_with_candidate_limit(
     quotas: &BTreeMap<String, i64>,
     candidate_node_limit: usize,
 ) -> OptimizationInput {
-    // Default GPU-resource matcher: whole GPUs only (callers wanting MIG-aware quota use the
-    // diagnosed builder with a prefix-aware matcher).
+    // Default GPU-resource matcher follows the shadow scheduler contract: whole GPUs plus
+    // NVIDIA MIG mixed-strategy slice resources. Callers needing a custom resource policy use
+    // the diagnosed builder and pass their own matcher.
     build_pending_input_diagnosed_with_candidate_limit(
         cluster,
         pending,
         quotas,
-        &|n| n == GPU_RESOURCE,
+        &default_is_gpu_resource,
         candidate_node_limit,
     )
     .0
@@ -317,6 +899,23 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
     is_gpu_resource: &dyn Fn(&str) -> bool,
     candidate_node_limit: usize,
 ) -> (OptimizationInput, Vec<DropInfo>) {
+    let (input, drops, _) = build_pending_input_diagnosed_with_candidate_limit_and_stats(
+        cluster,
+        pending,
+        quotas,
+        is_gpu_resource,
+        candidate_node_limit,
+    );
+    (input, drops)
+}
+
+pub fn build_pending_input_diagnosed_with_candidate_limit_and_stats(
+    cluster: &NormalizedCluster,
+    pending: &[PendingGpuPod],
+    quotas: &BTreeMap<String, i64>,
+    is_gpu_resource: &dyn Fn(&str) -> bool,
+    candidate_node_limit: usize,
+) -> (OptimizationInput, Vec<DropInfo>, CandidateDiagnostics) {
     // 1. Accumulate running usage per node (running = current_node non-empty). In the same
     //    pass, sum each namespace's running GPU usage so quotas count existing consumption
     //    (computed here, not in a second loop, to avoid drift from the residual math).
@@ -433,6 +1032,11 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
         .iter()
         .map(|n| (n.name.as_str(), &n.labels))
         .collect();
+    let node_vram_bytes: BTreeMap<&str, i64> = cluster
+        .nodes
+        .iter()
+        .map(|n| (n.name.as_str(), node_peak_vram_bytes(&n.labels)))
+        .collect();
     // Topology domain value of a node for a topology key: Some(value) iff the node carries
     // that label. A node without the label is its own singleton domain (never equal to a
     // present value), so it is never excluded by domain equality.
@@ -452,6 +1056,7 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
     // 5. Build one workload per feasible, homogeneous gang.
     let mut workloads = Vec::new();
     let mut dropped: Vec<DropInfo> = Vec::new();
+    let mut candidate_diagnostics = CandidateDiagnostics::default();
     let scopes = |ms: &[&PendingGpuPod]| -> Vec<String> {
         ms.iter()
             .map(|m| format!("{}/{}", m.namespace, m.name))
@@ -507,12 +1112,35 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
             });
             continue;
         }
+        if members.iter().any(|m| pending_requires_unmodeled_dra(m))
+            && member_workloads
+                .iter()
+                .any(|w| !has_modeled_gpu_or_dra_demand(w, is_gpu_resource))
+        {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "DRA device demand was not modeled; refusing to treat pod as zero-GPU work"
+                    .to_string(),
+            });
+            continue;
+        }
         // Members must agree on co-location; disagreement excludes the gang.
         let colocate = members[0].colocate;
         if members.iter().any(|m| m.colocate != colocate) {
             dropped.push(DropInfo {
                 pod_scopes: scopes(&members),
                 reason: "gang members disagree on co-location".to_string(),
+            });
+            continue;
+        }
+        let required_gpu_topology = &members[0].required_gpu_topology;
+        if members
+            .iter()
+            .any(|m| m.required_gpu_topology != *required_gpu_topology)
+        {
+            dropped.push(DropInfo {
+                pod_scopes: scopes(&members),
+                reason: "gang members disagree on required GPU topology".to_string(),
             });
             continue;
         }
@@ -542,6 +1170,14 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
         }
         let aa_selectors = &members[0].anti_affinity_host_selectors;
         let aa_topo_selectors = &members[0].anti_affinity_topology_selectors;
+        let affinity_selectors = if members
+            .iter()
+            .all(|m| m.affinity_topology_selectors == members[0].affinity_topology_selectors)
+        {
+            members[0].affinity_topology_selectors.as_slice()
+        } else {
+            &[]
+        };
         // Self-anti-affine: a modeled selector matches EVERY member's own labels, so the
         // gang's replicas must spread (<=1 per node). Requires >1 member. Matching all
         // members (not just the representative) is required because gang homogeneity does
@@ -564,6 +1200,54 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
             continue;
         }
         let n = members.len() as i64;
+        let priority = members.iter().map(|m| m.priority).max().unwrap_or(0);
+        let priority_class_name = members
+            .iter()
+            .filter_map(|m| m.priority_class_name.as_deref())
+            .find(|v| !v.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        let team = members
+            .iter()
+            .filter_map(|m| m.team.as_deref())
+            .find(|v| !v.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        let queue = members
+            .iter()
+            .filter_map(|m| m.queue.as_deref())
+            .find(|v| !v.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        let business_value = members.iter().map(|m| m.business_value).max().unwrap_or(0);
+        let queue_wait_seconds = members
+            .iter()
+            .map(|m| m.queue_wait_seconds)
+            .max()
+            .unwrap_or(0);
+        let deadline_unix_seconds = members
+            .iter()
+            .filter_map(|m| (m.deadline_unix_seconds > 0).then_some(m.deadline_unix_seconds))
+            .min()
+            .unwrap_or(0);
+        let min_gpus = members.iter().map(|m| m.min_gpus).max().unwrap_or(0);
+        let max_gpus = members
+            .iter()
+            .filter_map(|m| (m.max_gpus > 0).then_some(m.max_gpus))
+            .min()
+            .unwrap_or(0);
+        let preferred_gpus = members.iter().map(|m| m.preferred_gpus).max().unwrap_or(0);
+        let flexible = members.iter().any(|m| m.flexible);
+        let predicted_runtime_seconds = members
+            .iter()
+            .map(|m| m.predicted_runtime_seconds)
+            .max()
+            .unwrap_or(0);
+        let predicted_peak_vram_bytes = members
+            .iter()
+            .map(|m| m.predicted_peak_vram_bytes)
+            .max()
+            .unwrap_or(0);
         // Co-located gangs must fit the WHOLE gang on one node -> filter by total;
         // spread gangs need one replica per feasible node -> filter per replica.
         let (fit_req, fit_ext) = if colocate {
@@ -576,6 +1260,15 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
         };
         let member_labels: Vec<&BTreeMap<String, String>> =
             member_workloads.iter().map(|w| &w.labels).collect();
+        let topology_spread_rules = if member_workloads
+            .iter()
+            .all(|w| w.topology_spread_rules == rep.topology_spread_rules)
+        {
+            rep.topology_spread_rules.as_slice()
+        } else {
+            &[]
+        };
+        let topology_spread_added_pods = if colocate { n } else { 1 };
         let mut feasible_nodes: Vec<String> = rep
             .feasible_node_names
             .iter()
@@ -584,6 +1277,31 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
                     .get(*node)
                     .map(|r| r.fits(&fit_req, &fit_ext))
                     .unwrap_or(false)
+            })
+            // Explicit GPU locality hints: require candidate nodes to carry the requested
+            // topology labels (for example an NVLink/NVSwitch island label). This is a
+            // deterministic hard filter layered on top of Kubernetes' scalar feasibility.
+            .filter(|node| {
+                if required_gpu_topology.is_empty() {
+                    return true;
+                }
+                let Some(labels) = node_labels.get(node.as_str()) else {
+                    return false;
+                };
+                required_gpu_topology
+                    .iter()
+                    .all(|(key, value)| labels.get(key).map(|v| v == value).unwrap_or(false))
+            })
+            // If node GPU VRAM capacity is known, exclude candidates whose per-GPU predicted peak
+            // VRAM cannot fit. Unknown node VRAM remains eligible to avoid false negatives on
+            // clusters that do not expose NVIDIA GPU memory labels.
+            .filter(|node| {
+                vram_fits_node(
+                    predicted_peak_vram_bytes,
+                    node_vram_bytes.get(node.as_str()).copied().unwrap_or(0),
+                    &fit_ext,
+                    is_gpu_resource,
+                )
             })
             // Best-effort hostname anti-affinity node exclusion, both directions:
             //  (5e) the pending pod's own anti-affinity vs a running pod's labels, and
@@ -652,17 +1370,79 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
                 });
                 !violates
             })
+            // Best-effort required pod-affinity: if a modeled term has matching already-running
+            // pods, the candidate node must share that term's topology domain with at least one of
+            // them. Terms with no existing match are skipped to avoid over-constraining Kubernetes'
+            // self-affinity bootstrap case; the pod-affinity caveat remains.
+            .filter(|node| {
+                pod_affinity_allows_node(
+                    node,
+                    &rep.namespace,
+                    affinity_selectors,
+                    &running_by_node,
+                    &node_labels,
+                    ns_labels,
+                )
+            })
+            // Best-effort hard topology-spread filtering for the modeled subset: DoNotSchedule +
+            // supported label selector + same namespace + node label present for the topology key.
+            // This accounts for already-running pods only; same-batch spread remains broader than
+            // this local feasibility filter and unsupported shapes are still disclosed by caveats.
+            .filter(|node| {
+                topology_spread_allows_node(
+                    node,
+                    &rep.namespace,
+                    &member_labels,
+                    topology_spread_rules,
+                    topology_spread_added_pods,
+                    &running_by_node,
+                    &node_labels,
+                )
+            })
             .cloned()
             .collect();
         if feasible_nodes.is_empty() {
+            let has_capacity_without_vram = rep.feasible_node_names.iter().any(|node| {
+                residual
+                    .get(node)
+                    .map(|r| r.fits(&fit_req, &fit_ext))
+                    .unwrap_or(false)
+            });
+            let has_capacity_and_topology = rep.feasible_node_names.iter().any(|node| {
+                residual
+                    .get(node)
+                    .map(|r| r.fits(&fit_req, &fit_ext))
+                    .unwrap_or(false)
+                    && required_gpu_topology.iter().all(|(key, value)| {
+                        node_labels
+                            .get(node.as_str())
+                            .and_then(|labels| labels.get(key))
+                            .map(|v| v == value)
+                            .unwrap_or(false)
+                    })
+            });
             dropped.push(DropInfo {
                 pod_scopes: scopes(&members),
-                reason:
+                reason: if !required_gpu_topology.is_empty() && !has_capacity_and_topology {
+                    format!(
+                        "no feasible node (required GPU topology label {} not present on any residual-capacity candidate)",
+                        required_gpu_topology
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                } else if predicted_peak_vram_bytes > 0 && has_capacity_without_vram {
+                    "no feasible node (predicted peak VRAM exceeds known node GPU memory)"
+                        .to_string()
+                } else {
                     "no feasible node (insufficient residual capacity or excluded by anti-affinity)"
-                        .to_string(),
+                        .to_string()
+                },
             });
             continue;
         }
+        let candidate_edges_before_prune = feasible_nodes.len();
         prune_candidate_nodes(
             &id,
             &mut feasible_nodes,
@@ -672,10 +1452,32 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
             &fit_ext,
             candidate_node_limit,
         );
+        candidate_diagnostics.candidate_edges_before_prune += candidate_edges_before_prune;
+        candidate_diagnostics.candidate_edges_after_prune += feasible_nodes.len();
+        if feasible_nodes.len() < candidate_edges_before_prune {
+            candidate_diagnostics.pruned_workloads += 1;
+        }
         // Soft (preferred) node-affinity scores per feasible node: Σ weight of the gang's preferred
         // terms whose expressions ALL match the node's labels. Requires gang-member agreement on
         // preferred terms (else no soft scores — soft is best-effort, so we drop scores not the gang).
         let mut soft_scores: BTreeMap<String, i64> = BTreeMap::new();
+        // VRAM right-sizing score: after Phase 1 pins admission/cost, prefer the smallest known
+        // per-GPU memory capacity that still fits the predicted peak. Unknown memory remains
+        // neutral; too-small known nodes were already filtered out above.
+        if predicted_peak_vram_bytes > 0 {
+            for node_name in &feasible_nodes {
+                let score = vram_rightsizing_score(
+                    predicted_peak_vram_bytes,
+                    node_vram_bytes
+                        .get(node_name.as_str())
+                        .copied()
+                        .unwrap_or(0),
+                );
+                if score != 0 {
+                    *soft_scores.entry(node_name.clone()).or_default() += score;
+                }
+            }
+        }
         let preferred = &members[0].preferred_node_affinity;
         let preferred_agree = members
             .iter()
@@ -693,6 +1495,9 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
                         t.exprs
                             .iter()
                             .all(|e| crate::normalizer::node_affinity_expr_matches(labels, e))
+                            && t.fields.iter().all(|f| {
+                                crate::normalizer::node_affinity_field_matches(node_name, f)
+                            })
                     })
                     .map(|t| t.weight)
                     .sum();
@@ -802,6 +1607,19 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
             requests: scale_requests(&rep.requests, n),
             recommended_requests: scale_requests(&rep.recommended_requests, n),
             extended_resource_requests: scale_extended(&rep.extended_resource_requests, n),
+            priority,
+            priority_class_name,
+            team,
+            queue,
+            business_value,
+            queue_wait_seconds,
+            deadline_unix_seconds,
+            min_gpus,
+            max_gpus,
+            preferred_gpus,
+            flexible,
+            predicted_runtime_seconds,
+            predicted_peak_vram_bytes,
             feasible_nodes,
             colocate,
             soft_scores,
@@ -929,9 +1747,11 @@ pub fn build_pending_input_diagnosed_with_candidate_limit(
             workloads,
             anti_affinity_pairs,
             quota_groups,
+            budget_groups: Vec::new(),
             soft_coplacement_pairs,
         },
         dropped,
+        candidate_diagnostics,
     )
 }
 
@@ -1008,14 +1828,312 @@ mod tests {
             namespace: ns.into(),
             name: name.into(),
             gpu_request: 1,
+            priority: 0,
+            priority_class_name: None,
+            team: None,
+            queue: None,
+            business_value: 0,
+            queue_wait_seconds: 0,
+            deadline_unix_seconds: 0,
+            min_gpus: 0,
+            max_gpus: 0,
+            preferred_gpus: 0,
+            flexible: false,
+            predicted_runtime_seconds: 0,
+            predicted_peak_vram_bytes: 0,
+            required_gpu_topology: vec![],
             gang_key: gang.map(|g| format!("{ns}/{g}")),
             colocate,
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: vec![],
+            affinity_topology_selectors: vec![],
             anti_affinity_topology_selectors: vec![],
             preferred_node_affinity: vec![],
             preferred_pod_affinity: vec![],
         }
+    }
+
+    fn ppod_dra(ns: &str, name: &str) -> PendingGpuPod {
+        let mut p = ppod(ns, name, None);
+        p.gpu_request = 0;
+        p.unmodeled_constraints = vec!["DRA: device demand modeled as scalar approximation".into()];
+        p
+    }
+
+    #[test]
+    fn candidate_diagnostics_count_pruned_edges() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 8_000, 32, 10, 1),
+                node("n2", 8_000, 32, 10, 1),
+                node("n3", 8_000, 32, 10, 1),
+            ],
+            workloads: vec![workload("team", "p0", "", 1_000, 1, 1, &["n1", "n2", "n3"])],
+            ..Default::default()
+        };
+        let pending = vec![ppod("team", "p0", None)];
+        let (input, drops, diag) = build_pending_input_diagnosed_with_candidate_limit_and_stats(
+            &cluster,
+            &pending,
+            &BTreeMap::new(),
+            &|n| n == GPU_RESOURCE,
+            2,
+        );
+
+        assert!(drops.is_empty());
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes.len(), 2);
+        assert_eq!(diag.candidate_edges_before_prune, 3);
+        assert_eq!(diag.candidate_edges_after_prune, 2);
+        assert_eq!(diag.pruned_workloads, 1);
+    }
+
+    #[test]
+    fn unmodeled_dra_pod_is_dropped_instead_of_treated_as_free_work() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 8_000, 32, 10, 1)],
+            workloads: vec![workload("team", "dra", "", 1_000, 1, 0, &["n1"])],
+            ..Default::default()
+        };
+
+        let (input, drops) = super::build_pending_input_diagnosed(
+            &cluster,
+            &[ppod_dra("team", "dra")],
+            &BTreeMap::new(),
+            &|name| name == "nvidia.com/gpu",
+        );
+
+        assert!(input.workloads.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0]
+            .reason
+            .contains("DRA device demand was not modeled"));
+    }
+
+    #[test]
+    fn modeled_dra_resource_request_is_not_dropped_as_free_work() {
+        let mut node = node("n1", 8_000, 32, 10, 0);
+        node.extended_resources
+            .insert("dra.ksolver/gpu.example.com".to_string(), 1);
+        let mut workload = workload("team", "dra", "", 1_000, 1, 0, &["n1"]);
+        workload
+            .extended_resource_requests
+            .insert("dra.ksolver/gpu.example.com".to_string(), 1);
+        let cluster = NormalizedCluster {
+            nodes: vec![node],
+            workloads: vec![workload],
+            ..Default::default()
+        };
+
+        let (input, drops) = super::build_pending_input_diagnosed(
+            &cluster,
+            &[ppod_dra("team", "dra")],
+            &BTreeMap::new(),
+            &|name| name == "nvidia.com/gpu",
+        );
+
+        assert!(drops.is_empty());
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0]
+                .extended_resource_requests
+                .get("dra.ksolver/gpu.example.com"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn grouping_analysis_finds_homogeneous_node_pool() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 8_000, 32, 10, 1),
+                node("n2", 8_000, 32, 10, 1),
+                node("n3", 8_000, 32, 10, 1),
+            ],
+            workloads: vec![workload("team", "p0", "", 1_000, 1, 1, &["n1", "n2", "n3"])],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "p0", None)]);
+
+        let grouping = analyze_node_grouping(&input);
+
+        assert!(grouping.disabled_reasons.is_empty());
+        assert_eq!(grouping.eligible_group_count, 1);
+        assert_eq!(grouping.eligible_node_count, 3);
+        assert_eq!(grouping.max_group_size, 3);
+    }
+
+    #[test]
+    fn grouping_analysis_separates_nodes_with_different_soft_scores() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 8_000, 32, 10, 1),
+                node("n2", 8_000, 32, 10, 1),
+                node("n3", 8_000, 32, 10, 1),
+            ],
+            workloads: vec![workload("team", "p0", "", 1_000, 1, 1, &["n1", "n2", "n3"])],
+            ..Default::default()
+        };
+        let mut input = build_pending_input(&cluster, &[ppod("team", "p0", None)]);
+        input.workloads[0].soft_scores.insert("n1".to_string(), 10);
+
+        let grouping = analyze_node_grouping(&input);
+
+        assert!(grouping.disabled_reasons.is_empty());
+        assert_eq!(grouping.eligible_group_count, 1);
+        assert_eq!(grouping.eligible_node_count, 2);
+        assert_eq!(grouping.max_group_size, 2);
+    }
+
+    #[test]
+    fn grouping_analysis_disables_for_colocation() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 8_000, 32, 10, 4), node("n2", 8_000, 32, 10, 4)],
+            workloads: vec![
+                workload("team", "m0", "", 1_000, 1, 1, &["n1", "n2"]),
+                workload("team", "m1", "", 1_000, 1, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[
+                ppod_co("team", "m0", Some("job"), true),
+                ppod_co("team", "m1", Some("job"), true),
+            ],
+        );
+
+        let grouping = analyze_node_grouping(&input);
+
+        assert_eq!(grouping.eligible_group_count, 0);
+        assert!(grouping
+            .disabled_reasons
+            .contains(&"co-located workloads require physical-node identity".to_string()));
+    }
+
+    #[test]
+    fn node_grouping_collapses_safe_homogeneous_nodes() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 8_000, 32, 10, 1),
+                node("n2", 8_000, 32, 10, 1),
+                node("n3", 8_000, 32, 10, 1),
+            ],
+            workloads: vec![workload("team", "p0", "", 1_000, 1, 1, &["n1", "n2", "n3"])],
+            ..Default::default()
+        };
+        let input = build_pending_input(&cluster, &[ppod("team", "p0", None)]);
+
+        let (grouped, diagnostics) = group_pending_input_by_node_symmetry(&input);
+
+        assert!(diagnostics.disabled_reasons.is_empty());
+        assert_eq!(diagnostics.eligible_group_count, 1);
+        assert_eq!(grouped.nodes.len(), 1);
+        assert_eq!(grouped.nodes[0].count, 3);
+        assert_eq!(grouped.nodes[0].members, vec!["n1", "n2", "n3"]);
+        assert_eq!(
+            grouped.workloads[0].feasible_nodes,
+            vec!["node-group-n1".to_string()]
+        );
+    }
+
+    #[test]
+    fn grouped_solution_expands_to_physical_nodes_when_packable() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 8_000, 32, 10, 1), node("n2", 8_000, 32, 10, 1)],
+            workloads: vec![
+                workload("team", "p0", "", 1_000, 1, 1, &["n1", "n2"]),
+                workload("team", "p1", "", 1_000, 1, 1, &["n1", "n2"]),
+            ],
+            ..Default::default()
+        };
+        let input = build_pending_input(
+            &cluster,
+            &[ppod("team", "p0", None), ppod("team", "p1", None)],
+        );
+        let (grouped, _) = group_pending_input_by_node_symmetry(&input);
+        let group_name = grouped.nodes[0].name.clone();
+        let workload_ids: Vec<String> = grouped.workloads.iter().map(|w| w.id.clone()).collect();
+        let mut solution = OptimizationSolution::default();
+        solution.assignment_counts.insert(
+            workload_ids[0].clone(),
+            std::collections::HashMap::from([(group_name.clone(), 1)]),
+        );
+        solution.assignment_counts.insert(
+            workload_ids[1].clone(),
+            std::collections::HashMap::from([(group_name, 1)]),
+        );
+
+        let expanded = expand_grouped_solution_to_physical(&grouped, &solution)
+            .expect("grouped solution should expand");
+
+        assert_eq!(
+            expanded.assignment_counts[&workload_ids[0]]
+                .values()
+                .sum::<i32>(),
+            1
+        );
+        assert_eq!(
+            expanded.assignment_counts[&workload_ids[1]]
+                .values()
+                .sum::<i32>(),
+            1
+        );
+        let used_nodes: BTreeSet<String> = expanded
+            .assignment_counts
+            .values()
+            .flat_map(|counts| counts.keys().cloned())
+            .collect();
+        assert_eq!(
+            used_nodes,
+            BTreeSet::from(["n1".to_string(), "n2".to_string()])
+        );
+    }
+
+    #[test]
+    fn grouped_solution_expansion_rejects_unphysical_aggregate_pack() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node("n1", 8_000, 32, 10, 4),
+                node("n2", 8_000, 32, 10, 4),
+                node("n3", 8_000, 32, 10, 4),
+            ],
+            workloads: (0..4)
+                .map(|i| {
+                    workload(
+                        "team",
+                        &format!("p{i}"),
+                        "",
+                        1_000,
+                        1,
+                        3,
+                        &["n1", "n2", "n3"],
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let pending: Vec<PendingGpuPod> = (0..4)
+            .map(|i| PendingGpuPod {
+                gpu_request: 3,
+                ..ppod("team", &format!("p{i}"), None)
+            })
+            .collect();
+        let input = build_pending_input(&cluster, &pending);
+        let (grouped, _) = group_pending_input_by_node_symmetry(&input);
+        let group_name = grouped.nodes[0].name.clone();
+        let mut solution = OptimizationSolution::default();
+        for workload in &grouped.workloads {
+            solution.assignment_counts.insert(
+                workload.id.clone(),
+                std::collections::HashMap::from([(group_name.clone(), 1)]),
+            );
+        }
+
+        let err = expand_grouped_solution_to_physical(&grouped, &solution)
+            .expect_err("aggregate-only grouped placement must be rejected");
+
+        assert!(err.contains("could not be expanded"));
     }
 
     #[test]
@@ -1025,6 +2143,7 @@ mod tests {
             workloads: vec![
                 workload("team", "m0", "", 1000, 2, 1, &["n1"]),
                 workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m2", "", 1000, 2, 1, &["n1"]),
             ],
             ..Default::default()
         };
@@ -1046,6 +2165,194 @@ mod tests {
             2
         );
         assert_eq!(w.requests.pods, 2);
+    }
+
+    #[test]
+    fn gang_priority_uses_max_member_priority() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 8)],
+            workloads: vec![
+                workload("team", "m0", "", 1000, 2, 1, &["n1"]),
+                workload("team", "m1", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let mut low = ppod("team", "m0", Some("job"));
+        low.deadline_unix_seconds = 1783252800;
+        low.max_gpus = 6;
+        low.predicted_runtime_seconds = 3600;
+        low.predicted_peak_vram_bytes = 24 * 1024 * 1024 * 1024;
+        let mut high = ppod("team", "m1", Some("job"));
+        high.priority = 9;
+        high.priority_class_name = Some("research-high".to_string());
+        high.team = Some("research".to_string());
+        high.queue = Some("urgent".to_string());
+        high.queue_wait_seconds = 900;
+        high.business_value = 42;
+        high.deadline_unix_seconds = 1783339200;
+        high.min_gpus = 2;
+        high.max_gpus = 8;
+        high.preferred_gpus = 4;
+        high.flexible = true;
+        high.predicted_runtime_seconds = 7200;
+        high.predicted_peak_vram_bytes = 48 * 1024 * 1024 * 1024;
+        let input = build_pending_input(&cluster, &[low, high]);
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].priority, 9);
+        assert_eq!(input.workloads[0].priority_class_name, "research-high");
+        assert_eq!(input.workloads[0].team, "research");
+        assert_eq!(input.workloads[0].queue, "urgent");
+        assert_eq!(input.workloads[0].queue_wait_seconds, 900);
+        assert_eq!(input.workloads[0].business_value, 42);
+        assert_eq!(input.workloads[0].deadline_unix_seconds, 1783252800);
+        assert_eq!(input.workloads[0].min_gpus, 2);
+        assert_eq!(input.workloads[0].max_gpus, 6);
+        assert_eq!(input.workloads[0].preferred_gpus, 4);
+        assert!(input.workloads[0].flexible);
+        assert_eq!(input.workloads[0].predicted_runtime_seconds, 7200);
+        assert_eq!(
+            input.workloads[0].predicted_peak_vram_bytes,
+            48 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn predicted_vram_filters_known_too_small_gpu_nodes() {
+        let mut small = node("small", 16000, 64, 110, 8);
+        small
+            .labels
+            .insert("nvidia.com/gpu.memory".to_string(), "24576".to_string());
+        let mut large = node("large", 16000, 64, 110, 8);
+        large
+            .labels
+            .insert("nvidia.com/gpu.memory".to_string(), "81920".to_string());
+        let cluster = NormalizedCluster {
+            nodes: vec![small, large],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["small", "large"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 40 * 1024 * 1024 * 1024;
+
+        let input = build_pending_input(&cluster, &[pending]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(input.workloads[0].feasible_nodes, vec!["large".to_string()]);
+    }
+
+    #[test]
+    fn predicted_vram_does_not_filter_unknown_node_memory() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("unknown", 16000, 64, 110, 8)],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["unknown"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 120 * 1024 * 1024 * 1024;
+
+        let input = build_pending_input(&cluster, &[pending]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["unknown".to_string()]
+        );
+    }
+
+    #[test]
+    fn predicted_vram_soft_score_prefers_smallest_adequate_gpu_memory() {
+        let mut l40 = node("l40", 16000, 64, 110, 8);
+        l40.labels
+            .insert("nvidia.com/gpu.memory".to_string(), "49152".to_string());
+        let mut h100 = node("h100", 16000, 64, 110, 8);
+        h100.labels
+            .insert("nvidia.com/gpu.memory".to_string(), "81920".to_string());
+        let cluster = NormalizedCluster {
+            nodes: vec![l40, h100],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["l40", "h100"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 40 * 1024 * 1024 * 1024;
+
+        let input = build_pending_input(&cluster, &[pending]);
+        let scores = &input.workloads[0].soft_scores;
+
+        assert!(scores["l40"] > scores["h100"]);
+    }
+
+    #[test]
+    fn predicted_vram_rightsizing_drives_soft_solver_tiebreak() {
+        let mut l40 = node("l40", 16000, 64, 110, 8);
+        l40.labels
+            .insert("nvidia.com/gpu.memory".to_string(), "49152".to_string());
+        let mut h100 = node("h100", 16000, 64, 110, 8);
+        h100.labels
+            .insert("nvidia.com/gpu.memory".to_string(), "81920".to_string());
+        let cluster = NormalizedCluster {
+            nodes: vec![l40, h100],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["l40", "h100"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 40 * 1024 * 1024 * 1024;
+        let input = build_pending_input(&cluster, &[pending]);
+        let scenario = crate::model::ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            enable_soft_affinity: true,
+            ..Default::default()
+        };
+
+        let (solution, info) = crate::cpsat_rust::solve(&input, &scenario).expect("solve");
+        let counts = solution
+            .assignment_counts
+            .get("pod:team/p0")
+            .unwrap_or_else(|| panic!("workload should be admitted; status={}", info.status));
+
+        assert!(
+            counts.contains_key("l40") && !counts.contains_key("h100"),
+            "VRAM right-sizing should choose the smaller adequate GPU, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn predicted_vram_soft_score_ignores_unknown_gpu_memory() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("unknown", 16000, 64, 110, 8)],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["unknown"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 40 * 1024 * 1024 * 1024;
+
+        let input = build_pending_input(&cluster, &[pending]);
+
+        assert!(input.workloads[0].soft_scores.is_empty());
+    }
+
+    #[test]
+    fn predicted_vram_drop_reason_is_specific_when_capacity_otherwise_fits() {
+        let mut small = node("small", 16000, 64, 110, 8);
+        small
+            .labels
+            .insert("ksolver.dev/gpu-vram-gib".to_string(), "24".to_string());
+        let cluster = NormalizedCluster {
+            nodes: vec![small],
+            workloads: vec![workload("team", "p0", "", 1000, 2, 1, &["small"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "p0", None);
+        pending.predicted_peak_vram_bytes = 40 * 1024 * 1024 * 1024;
+
+        let (input, drops) =
+            build_pending_input_diagnosed(&cluster, &[pending], &BTreeMap::new(), &|n| {
+                n == GPU_RESOURCE
+            });
+
+        assert!(input.workloads.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0].reason.contains("predicted peak VRAM"));
     }
 
     #[test]
@@ -1280,6 +2587,120 @@ mod tests {
         p
     }
 
+    fn ppod_affinity(
+        ns: &str,
+        name: &str,
+        topology_key: &str,
+        labels: &[(&str, &str)],
+    ) -> PendingGpuPod {
+        let mut p = ppod(ns, name, None);
+        p.affinity_topology_selectors = vec![(topology_key.to_string(), sel(labels))];
+        p
+    }
+
+    #[test]
+    fn required_pod_affinity_keeps_candidate_in_matching_running_domain() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![
+                running_labeled("team", "peer", "zone-a-node", &[("app", "trainer")]),
+                workload(
+                    "team",
+                    "pending",
+                    "",
+                    1000,
+                    2,
+                    1,
+                    &["zone-a-node", "zone-b-node"],
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(
+            &cluster,
+            &[ppod_affinity(
+                "team",
+                "pending",
+                "topology.kubernetes.io/zone",
+                &[("app", "trainer")],
+            )],
+        );
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-a-node".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_pod_affinity_without_existing_match_does_not_block_bootstrap() {
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![workload(
+                "team",
+                "pending",
+                "",
+                1000,
+                2,
+                1,
+                &["zone-a-node", "zone-b-node"],
+            )],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(
+            &cluster,
+            &[ppod_affinity(
+                "team",
+                "pending",
+                "topology.kubernetes.io/zone",
+                &[("app", "trainer")],
+            )],
+        );
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-a-node".to_string(), "zone-b-node".to_string()]
+        );
+    }
+
     #[test]
     fn anti_affinity_excludes_node_with_matching_running_pod() {
         let cluster = NormalizedCluster {
@@ -1329,6 +2750,258 @@ mod tests {
         assert_eq!(input.workloads[0].feasible_nodes, vec!["n1".to_string()]);
     }
 
+    fn node_with_label(
+        name: &str,
+        cpu: i64,
+        mem: i64,
+        pods: i64,
+        gpu: i64,
+        labels: &[(&str, &str)],
+    ) -> NormalizedNode {
+        let mut n = node(name, cpu, mem, pods, gpu);
+        n.labels = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        n
+    }
+
+    fn topology_spread_rule(
+        topology_key: &str,
+        selector: &[(&str, &str)],
+    ) -> crate::model::TopologySpreadRule {
+        crate::model::TopologySpreadRule {
+            max_skew: 1,
+            topology_key: topology_key.to_string(),
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+            selector: selector
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            selector_reqs: selector
+                .iter()
+                .map(|(k, v)| crate::model::LabelSelectorReq {
+                    key: k.to_string(),
+                    operator: "In".to_string(),
+                    values: vec![v.to_string()],
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn topology_spread_rule_expr(
+        topology_key: &str,
+        key: &str,
+        operator: &str,
+        values: &[&str],
+    ) -> crate::model::TopologySpreadRule {
+        crate::model::TopologySpreadRule {
+            max_skew: 1,
+            topology_key: topology_key.to_string(),
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+            selector_reqs: vec![crate::model::LabelSelectorReq {
+                key: key.to_string(),
+                operator: operator.to_string(),
+                values: values.iter().map(|v| v.to_string()).collect(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hard_topology_spread_filters_domains_over_max_skew() {
+        let mut pending = labeled_pending(
+            "team",
+            "pending",
+            &["zone-a-node", "zone-b-node"],
+            &[("app", "trainer")],
+        );
+        pending.topology_spread_rules = vec![topology_spread_rule(
+            "topology.kubernetes.io/zone",
+            &[("app", "trainer")],
+        )];
+        pending.topology_spread_constraints = 1;
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![
+                running_labeled("team", "running", "zone-a-node", &[("app", "trainer")]),
+                pending,
+            ],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-b-node".to_string()]
+        );
+    }
+
+    #[test]
+    fn hard_topology_spread_match_expression_filters_domains_over_max_skew() {
+        let mut pending = labeled_pending(
+            "team",
+            "pending",
+            &["zone-a-node", "zone-b-node"],
+            &[("app", "trainer")],
+        );
+        pending.topology_spread_rules = vec![topology_spread_rule_expr(
+            "topology.kubernetes.io/zone",
+            "app",
+            "In",
+            &["trainer", "worker"],
+        )];
+        pending.topology_spread_constraints = 1;
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![
+                running_labeled("team", "running", "zone-a-node", &[("app", "worker")]),
+                pending,
+            ],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-b-node".to_string()]
+        );
+    }
+
+    #[test]
+    fn advanced_hard_topology_spread_is_not_partially_enforced() {
+        let mut pending = labeled_pending(
+            "team",
+            "pending",
+            &["zone-a-node", "zone-b-node"],
+            &[("app", "trainer")],
+        );
+        let mut rule = topology_spread_rule("topology.kubernetes.io/zone", &[("app", "trainer")]);
+        rule.min_domains = Some(2);
+        pending.topology_spread_rules = vec![rule];
+        pending.topology_spread_constraints = 1;
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![
+                running_labeled("team", "running", "zone-a-node", &[("app", "trainer")]),
+                pending,
+            ],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-a-node".to_string(), "zone-b-node".to_string()]
+        );
+    }
+
+    #[test]
+    fn hard_topology_spread_ignores_pending_pod_outside_selector() {
+        let mut pending = labeled_pending(
+            "team",
+            "pending",
+            &["zone-a-node", "zone-b-node"],
+            &[("app", "other")],
+        );
+        pending.topology_spread_rules = vec![topology_spread_rule(
+            "topology.kubernetes.io/zone",
+            &[("app", "trainer")],
+        )];
+        pending.topology_spread_constraints = 1;
+        let cluster = NormalizedCluster {
+            nodes: vec![
+                node_with_label(
+                    "zone-a-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-a")],
+                ),
+                node_with_label(
+                    "zone-b-node",
+                    16000,
+                    64,
+                    110,
+                    8,
+                    &[("topology.kubernetes.io/zone", "zone-b")],
+                ),
+            ],
+            workloads: vec![
+                running_labeled("team", "running", "zone-a-node", &[("app", "trainer")]),
+                pending,
+            ],
+            ..Default::default()
+        };
+
+        let input = build_pending_input(&cluster, &[ppod("team", "pending", None)]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["zone-a-node".to_string(), "zone-b-node".to_string()]
+        );
+    }
+
     fn labeled_pending(
         ns: &str,
         name: &str,
@@ -1355,10 +3028,25 @@ mod tests {
             namespace: ns.into(),
             name: name.into(),
             gpu_request: 1,
+            priority: 0,
+            priority_class_name: None,
+            team: None,
+            queue: None,
+            business_value: 0,
+            queue_wait_seconds: 0,
+            deadline_unix_seconds: 0,
+            min_gpus: 0,
+            max_gpus: 0,
+            preferred_gpus: 0,
+            flexible: false,
+            predicted_runtime_seconds: 0,
+            predicted_peak_vram_bytes: 0,
+            required_gpu_topology: vec![],
             gang_key: Some(format!("{ns}/{gang}")),
             colocate,
             unmodeled_constraints: vec![],
             anti_affinity_host_selectors: sel_list(selectors),
+            affinity_topology_selectors: vec![],
             anti_affinity_topology_selectors: vec![],
             preferred_node_affinity: vec![],
             preferred_pod_affinity: vec![],
@@ -1951,6 +3639,36 @@ mod tests {
     }
 
     #[test]
+    fn quota_group_counts_mig_slices_through_default_builder() {
+        let mut mig_node = node("n1", 16000, 64, 110, 0);
+        mig_node
+            .extended_resources
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 7);
+        let mut running = workload("team", "run", "n1", 1000, 2, 0, &["n1"]);
+        running
+            .extended_resource_requests
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 1);
+        let mut pending_w = workload("team", "pending", "", 1000, 2, 0, &["n1"]);
+        pending_w
+            .extended_resource_requests
+            .insert("nvidia.com/mig-1g.5gb".to_string(), 1);
+        let cluster = NormalizedCluster {
+            nodes: vec![mig_node],
+            workloads: vec![running, pending_w],
+            ..Default::default()
+        };
+        let quotas = BTreeMap::from([("team".to_string(), 3_i64)]);
+
+        let input = super::build_pending_input(&cluster, &[ppod("team", "pending", None)], &quotas);
+
+        assert_eq!(input.quota_groups.len(), 1);
+        let g = &input.quota_groups[0];
+        assert!(g.resources.contains(&"nvidia.com/gpu".to_string()));
+        assert!(g.resources.contains(&"nvidia.com/mig-1g.5gb".to_string()));
+        assert_eq!(g.limit, 2);
+    }
+
+    #[test]
     fn mig_slice_pod_places_via_generic_extended_resource_path() {
         // A MIG node advertises a slice resource; a pending pod requesting that slice is
         // emitted and feasible — no GPU-specific solver/builder code, just the generic path.
@@ -1975,6 +3693,110 @@ mod tests {
                 .get("nvidia.com/mig-1g.5gb")
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn required_gpu_topology_filters_candidate_nodes_by_label() {
+        let mut island_a = node("island-a-0", 16000, 64, 110, 4);
+        island_a.labels.insert(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-a".to_string(),
+        );
+        let mut island_b = node("island-b-0", 16000, 64, 110, 4);
+        island_b.labels.insert(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-b".to_string(),
+        );
+        let cluster = NormalizedCluster {
+            nodes: vec![island_a, island_b],
+            workloads: vec![workload(
+                "team",
+                "trainer",
+                "",
+                1000,
+                2,
+                1,
+                &["island-a-0", "island-b-0"],
+            )],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "trainer", None);
+        pending.required_gpu_topology = vec![(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-b".to_string(),
+        )];
+
+        let input = build_pending_input(&cluster, &[pending]);
+
+        assert_eq!(input.workloads.len(), 1);
+        assert_eq!(
+            input.workloads[0].feasible_nodes,
+            vec!["island-b-0".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_gpu_topology_drop_reports_missing_label() {
+        let mut island_a = node("island-a-0", 16000, 64, 110, 4);
+        island_a.labels.insert(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-a".to_string(),
+        );
+        let cluster = NormalizedCluster {
+            nodes: vec![island_a],
+            workloads: vec![workload("team", "trainer", "", 1000, 2, 1, &["island-a-0"])],
+            ..Default::default()
+        };
+        let mut pending = ppod("team", "trainer", None);
+        pending.required_gpu_topology = vec![(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-b".to_string(),
+        )];
+
+        let (input, drops) =
+            super::build_pending_input_diagnosed(&cluster, &[pending], &BTreeMap::new(), &|n| {
+                n == GPU_RESOURCE
+            });
+
+        assert!(input.workloads.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0]
+            .reason
+            .contains("required GPU topology label topology.gpu.ksolver.dev/island=island-b"));
+    }
+
+    #[test]
+    fn gang_members_must_agree_on_required_gpu_topology() {
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 16000, 64, 110, 4)],
+            workloads: vec![
+                workload("team", "a", "", 1000, 2, 1, &["n1"]),
+                workload("team", "b", "", 1000, 2, 1, &["n1"]),
+            ],
+            ..Default::default()
+        };
+        let mut a = ppod("team", "a", Some("gang"));
+        a.required_gpu_topology = vec![(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-a".to_string(),
+        )];
+        let mut b = ppod("team", "b", Some("gang"));
+        b.required_gpu_topology = vec![(
+            "topology.gpu.ksolver.dev/island".to_string(),
+            "island-b".to_string(),
+        )];
+
+        let (input, drops) =
+            super::build_pending_input_diagnosed(&cluster, &[a, b], &BTreeMap::new(), &|n| {
+                n == GPU_RESOURCE
+            });
+
+        assert!(input.workloads.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert_eq!(
+            drops[0].reason,
+            "gang members disagree on required GPU topology"
         );
     }
 
@@ -2157,11 +3979,38 @@ mod tests {
                 operator: "In".to_string(),
                 values: vec!["a".to_string()],
             }],
+            fields: vec![],
         }];
         let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
         let w = &input.workloads[0];
         assert_eq!(w.soft_scores.get("n1"), Some(&10));
         assert!(!w.soft_scores.contains_key("n2")); // zone=b doesn't match ⇒ no score
+    }
+
+    #[test]
+    fn builder_computes_soft_scores_for_preferred_node_match_fields() {
+        use crate::model::{NodeAffinityTerm, PreferredNodeTerm};
+        let n1 = node("node-a", 16000, 64, 110, 8);
+        let n2 = node("node-b", 16000, 64, 110, 8);
+        let cluster = NormalizedCluster {
+            nodes: vec![n1, n2],
+            workloads: vec![workload("team", "p", "", 1000, 2, 1, &["node-a", "node-b"])],
+            ..Default::default()
+        };
+        let mut p = ppod("team", "p", None);
+        p.preferred_node_affinity = vec![PreferredNodeTerm {
+            weight: 20,
+            exprs: vec![],
+            fields: vec![NodeAffinityTerm {
+                key: "metadata.name".to_string(),
+                operator: "In".to_string(),
+                values: vec!["node-a".to_string()],
+            }],
+        }];
+        let input = super::build_pending_input(&cluster, &[p], &BTreeMap::new());
+        let w = &input.workloads[0];
+        assert_eq!(w.soft_scores.get("node-a"), Some(&20));
+        assert!(!w.soft_scores.contains_key("node-b"));
     }
 
     #[test]

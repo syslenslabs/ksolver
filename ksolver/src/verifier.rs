@@ -219,6 +219,34 @@ pub(crate) fn default_scheduler_config() -> serde_json::Value {
     })
 }
 
+/// A KubeSchedulerConfiguration that makes NodeResourcesFit score with `MostAllocated` (bin-packing)
+/// instead of the default `LeastAllocated` (spread), weighting GPUs heavily. Used as the *harder*
+/// kube-scheduler baseline in the GPU comparison suite.
+pub(crate) fn binpack_scheduler_config() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kubescheduler.config.k8s.io/v1",
+        "kind": "KubeSchedulerConfiguration",
+        "profiles": [{
+            "schedulerName": "default-scheduler",
+            "pluginConfig": [{
+                "name": "NodeResourcesFit",
+                "args": {
+                    "apiVersion": "kubescheduler.config.k8s.io/v1",
+                    "kind": "NodeResourcesFitArgs",
+                    "scoringStrategy": {
+                        "type": "MostAllocated",
+                        "resources": [
+                            {"name": "nvidia.com/gpu", "weight": 100},
+                            {"name": "cpu", "weight": 1},
+                            {"name": "memory", "weight": 1}
+                        ]
+                    }
+                }
+            }]
+        }]
+    })
+}
+
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SimulatorExportPayload {

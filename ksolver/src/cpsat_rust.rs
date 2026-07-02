@@ -1,15 +1,19 @@
+#[cfg(feature = "rust-cp-sat")]
 use crate::model::{
-    ObjectiveProfile, OptimizationInput, OptimizationSolution, OptimizationWorkload,
-    ScenarioConfig, SolverInfo,
+    deadline_adjusted_flexible_replica_bounds, is_gpu_resource_name,
+    optimization_workload_gpu_request, ObjectiveProfile, OptimizationWorkload,
 };
+use crate::model::{OptimizationInput, OptimizationSolution, ScenarioConfig, SolverInfo};
 
 #[cfg(feature = "rust-cp-sat")]
 mod enabled {
     use super::{
-        ObjectiveProfile, OptimizationInput, OptimizationSolution, OptimizationWorkload,
-        ScenarioConfig, SolverInfo,
+        deadline_adjusted_flexible_replica_bounds, is_gpu_resource_name,
+        optimization_workload_gpu_request, ObjectiveProfile, OptimizationInput,
+        OptimizationSolution, OptimizationWorkload, ScenarioConfig, SolverInfo,
     };
     use anyhow::{bail, Result};
+    use chrono::Utc;
     use cp_sat::builder::{BoolVar, CpModelBuilder, IntVar, LinearExpr};
     use cp_sat::ffi::cp_solver_response_stats;
     use cp_sat::proto::{CpSolverResponse, CpSolverStatus, SatParameters};
@@ -43,29 +47,98 @@ mod enabled {
         e
     }
 
-    fn is_gpu_resource_name(name: &str) -> bool {
-        name == "nvidia.com/gpu" || name.starts_with("nvidia.com/mig-") || name.contains("/gpu")
-    }
+    fn deadline_urgency_scores(
+        input: &OptimizationInput,
+        scenario: &ScenarioConfig,
+    ) -> HashMap<String, i64> {
+        let weight = scenario.objective_weights.deadline_urgency.max(0);
+        if scenario.objective_profile != ObjectiveProfile::GpuGangAware || weight == 0 {
+            return HashMap::new();
+        }
 
-    fn workload_gpu_request(workload: &OptimizationWorkload) -> i64 {
-        workload
-            .extended_resource_requests
+        let latest_starts: Vec<(&str, i64)> = input
+            .workloads
             .iter()
-            .filter(|(name, _)| is_gpu_resource_name(name))
-            .map(|(_, value)| (*value).max(0))
-            .sum()
+            .filter(|w| w.deadline_unix_seconds > 0)
+            .map(|w| {
+                (
+                    w.id.as_str(),
+                    w.deadline_unix_seconds
+                        .saturating_sub(w.predicted_runtime_seconds.max(0)),
+                )
+            })
+            .collect();
+        let Some(max_latest_start) = latest_starts.iter().map(|(_, t)| *t).max() else {
+            return HashMap::new();
+        };
+
+        latest_starts
+            .into_iter()
+            .map(|(id, latest_start)| {
+                // One base point for having an explicit deadline, then one extra point per minute
+                // earlier than the least-urgent deadline in this batch, capped at a week.
+                let urgency_minutes = max_latest_start
+                    .saturating_sub(latest_start)
+                    .saturating_div(60)
+                    .clamp(0, 7 * 24 * 60);
+                (
+                    id.to_string(),
+                    weight.saturating_mul(1_i64.saturating_add(urgency_minutes)),
+                )
+            })
+            .collect()
     }
 
-    fn admission_score(workload: &OptimizationWorkload, scenario: &ScenarioConfig) -> i64 {
+    fn admission_score(
+        workload: &OptimizationWorkload,
+        scenario: &ScenarioConfig,
+        deadline_urgency_score: i64,
+        now_unix_seconds: i64,
+    ) -> i64 {
         match scenario.objective_profile {
             ObjectiveProfile::CostBinpack => 1,
             ObjectiveProfile::GpuGangAware => {
                 let w = &scenario.objective_weights;
                 let base = w.admission.max(0);
-                let gpu = workload_gpu_request(workload).saturating_mul(w.gpu_demand.max(0));
+                let gpu =
+                    optimization_workload_gpu_request(workload).saturating_mul(w.gpu_demand.max(0));
                 let gang_replicas = i64::from((workload.group_size - 1).max(0));
                 let gang = gang_replicas.saturating_mul(w.gang_complete.max(0));
-                base.saturating_add(gpu).saturating_add(gang).max(1)
+                let priority = workload.priority.max(0).saturating_mul(w.priority.max(0));
+                let business_value = workload
+                    .business_value
+                    .max(0)
+                    .saturating_mul(w.business_value.max(0));
+                let queue = workload.queue_score.max(0).saturating_mul(w.queue.max(0));
+                let queue_wait_minutes = workload
+                    .queue_wait_seconds
+                    .max(0)
+                    .saturating_div(60)
+                    .clamp(0, 7 * 24 * 60);
+                let queue_wait = queue_wait_minutes.saturating_mul(w.queue_wait.max(0));
+                let fair_share = workload
+                    .fair_share_deficit
+                    .max(0)
+                    .saturating_mul(w.fair_share.max(0));
+                let predicted_deadline_miss = workload.deadline_unix_seconds > 0
+                    && workload.predicted_runtime_seconds > 0
+                    && now_unix_seconds.saturating_add(workload.predicted_runtime_seconds)
+                        > workload.deadline_unix_seconds;
+                let deadline_miss = if predicted_deadline_miss {
+                    w.deadline_miss.max(0)
+                } else {
+                    0
+                };
+                base.saturating_add(gpu)
+                    .saturating_add(gang)
+                    .saturating_add(priority)
+                    .saturating_add(business_value)
+                    .saturating_add(queue)
+                    .saturating_add(queue_wait)
+                    .saturating_add(fair_share)
+                    .saturating_add(deadline_urgency_score.max(0))
+                    .saturating_sub(deadline_miss)
+                    .max(1)
             }
         }
     }
@@ -91,6 +164,7 @@ mod enabled {
         let mut cpu_slack_vars: HashMap<String, IntVar> = HashMap::new();
         let mut mem_slack_vars: HashMap<String, IntVar> = HashMap::new();
         let mut scalar_slack_vars: HashMap<(String, String), IntVar> = HashMap::new();
+        let now_unix_seconds = Utc::now().timestamp();
 
         for node in &input.nodes {
             let var = model.new_int_var_with_name(
@@ -186,7 +260,18 @@ mod enabled {
                 // All-or-nothing admission: sum of replicas == group_size * placed.
                 let placed =
                     model.new_bool_var_with_name(format!("placed_{}", sanitize(&workload.id)));
-                model.add_eq(sum_expr, (group_size, placed));
+                if scenario.objective_profile == ObjectiveProfile::GpuGangAware {
+                    if let Some((min_replicas, max_replicas)) =
+                        deadline_adjusted_flexible_replica_bounds(workload, now_unix_seconds)
+                    {
+                        model.add_ge(sum_expr.clone(), (min_replicas, placed));
+                        model.add_le(sum_expr, (max_replicas, placed));
+                    } else {
+                        model.add_eq(sum_expr, (group_size, placed));
+                    }
+                } else {
+                    model.add_eq(sum_expr, (group_size, placed));
+                }
                 placed_vars.insert(workload.id.clone(), placed);
             } else {
                 model.add_eq(sum_expr, group_size);
@@ -444,12 +529,9 @@ mod enabled {
             }
         }
 
-        // Quota groups: cap the total resource consumed by admitted workloads in each
-        // group (e.g. a per-namespace GPU quota). The coefficient is the workload's
-        // stored TOTAL resource request times its admission bool `placed[w]` — exact
-        // integer, no per-replica division. Only workloads that have a `placed` var
-        // (i.e. partial_admission) contribute, so strict/planner solves that never set
-        // partial_admission are unaffected and can never be made infeasible by a group.
+        // Quota groups: cap the total resource consumed by admitted workloads in each group
+        // (e.g. a per-namespace GPU quota). Charge actual selected replicas so flexible partial
+        // admission does not consume quota for replicas intentionally left deferred.
         if !input.quota_groups.is_empty() {
             let by_id: HashMap<&str, &crate::model::OptimizationWorkload> =
                 input.workloads.iter().map(|w| (w.id.as_str(), w)).collect();
@@ -459,22 +541,64 @@ mod enabled {
                 }
                 let mut expr = LinearExpr::default();
                 for wid in &group.workload_ids {
-                    let (Some(placed), Some(w)) = (placed_vars.get(wid), by_id.get(wid.as_str()))
-                    else {
+                    let Some(w) = by_id.get(wid.as_str()) else {
                         continue;
                     };
-                    // Sum the workload's totals across all quota'd resources (whole GPUs + MIG
-                    // slices); each unit counts as 1 toward the cap.
-                    let total: i64 = group
+                    let per_replica = per_replica_scalar_requests(w);
+                    let unit: i64 = group
                         .resources
                         .iter()
-                        .map(|r| w.extended_resource_requests.get(r).copied().unwrap_or(0))
+                        .map(|r| per_replica.get(r).copied().unwrap_or(0))
                         .sum();
-                    if total > 0 {
-                        expr += (total, *placed);
+                    if unit > 0 {
+                        for node_name in &w.feasible_nodes {
+                            if let Some(x) = x_vars.get(&(w.id.clone(), node_name.clone())) {
+                                expr += (unit, *x);
+                            }
+                        }
                     }
                 }
                 model.add_le(expr, group.limit);
+            }
+        }
+
+        // Budget groups: cap admitted monthly placement cost for selected workload groups.
+        // Costs are per selected replica and node-dependent, so charge each assignment edge.
+        if !input.budget_groups.is_empty() {
+            let by_id: HashMap<&str, &crate::model::OptimizationWorkload> =
+                input.workloads.iter().map(|w| (w.id.as_str(), w)).collect();
+            let node_by_name: HashMap<&str, &crate::model::OptimizationNode> =
+                input.nodes.iter().map(|n| (n.name.as_str(), n)).collect();
+            for group in &input.budget_groups {
+                if group.limit_milli < 0 {
+                    continue;
+                }
+                let mut expr = LinearExpr::default();
+                for wid in &group.workload_ids {
+                    let Some(w) = by_id.get(wid.as_str()) else {
+                        continue;
+                    };
+                    let per_replica_gpu = optimization_workload_gpu_request(w)
+                        .checked_div(i64::from(w.group_size).max(1))
+                        .unwrap_or(0)
+                        .max(0);
+                    if per_replica_gpu <= 0 {
+                        continue;
+                    }
+                    for node_name in &w.feasible_nodes {
+                        let Some(node) = node_by_name.get(node_name.as_str()) else {
+                            continue;
+                        };
+                        let coeff = placement_cost_milli_per_replica(node, per_replica_gpu);
+                        if coeff <= 0 {
+                            continue;
+                        }
+                        if let Some(x) = x_vars.get(&(w.id.clone(), node_name.clone())) {
+                            expr += (coeff, *x);
+                        }
+                    }
+                }
+                model.add_le(expr, group.limit_milli);
             }
         }
 
@@ -524,6 +648,27 @@ mod enabled {
                         ObjVar::Int(x_vars[&(workload.id.clone(), node_name.clone())]),
                     ));
                 }
+                if scenario.objective_profile == ObjectiveProfile::GpuGangAware
+                    && deadline_adjusted_flexible_replica_bounds(workload, now_unix_seconds)
+                        .is_some()
+                {
+                    // After admission is decided, prefer the lower flexible replica count. This
+                    // must dominate the ordinary GPU slack penalty, which otherwise rewards filling
+                    // idle GPUs on already-active nodes.
+                    let per_replica_gpu = optimization_workload_gpu_request(workload)
+                        .checked_div(i64::from(workload.group_size).max(1))
+                        .unwrap_or(0)
+                        .max(1);
+                    let coeff = scenario
+                        .memory_slack_weight
+                        .saturating_add(scenario.objective_weights.gpu_fragmentation.max(0))
+                        .saturating_add(1)
+                        .saturating_mul(per_replica_gpu);
+                    obj_terms.push((
+                        coeff,
+                        ObjVar::Int(x_vars[&(workload.id.clone(), node_name.clone())]),
+                    ));
+                }
             }
         }
         for (workload_id, lvars) in &level_vars {
@@ -538,6 +683,7 @@ mod enabled {
                 }
             }
         }
+        let deadline_urgency_scores = deadline_urgency_scores(input, scenario);
         let effective_admission_weight = if scenario.partial_admission && !placed_vars.is_empty() {
             // Conservative upper bound (i128) of the max magnitude of ALL non-admission
             // objective terms. Node terms use int vars y in [0, node.count], so every
@@ -576,11 +722,27 @@ mod enabled {
                 }
             }
             // Churn reward: -churn_weight * x on edges with current_count>0; sum of x over
-            // nodes == group_size, so per workload the magnitude is <= churn_weight*group_size.
+            // nodes <= group_size, so per workload the magnitude is <= churn_weight*group_size.
             for workload in &input.workloads {
                 let gs = i128::from(workload.group_size.max(0));
                 rest_bound = rest_bound
                     .saturating_add((scenario.churn_weight as i128).abs().saturating_mul(gs));
+                if scenario.objective_profile == ObjectiveProfile::GpuGangAware
+                    && deadline_adjusted_flexible_replica_bounds(workload, now_unix_seconds)
+                        .is_some()
+                {
+                    let per_replica_gpu = optimization_workload_gpu_request(workload)
+                        .checked_div(i64::from(workload.group_size).max(1))
+                        .unwrap_or(0)
+                        .max(1);
+                    let coeff = scenario
+                        .memory_slack_weight
+                        .saturating_add(scenario.objective_weights.gpu_fragmentation.max(0))
+                        .saturating_add(1)
+                        .saturating_mul(per_replica_gpu);
+                    rest_bound =
+                        rest_bound.saturating_add((coeff as i128).abs().saturating_mul(gs));
+                }
             }
             let w: i128 = if scenario.admission_weight > 0 {
                 let explicit = scenario.admission_weight as i128;
@@ -598,7 +760,13 @@ mod enabled {
                 .iter()
                 .filter(|w| placed_vars.contains_key(&w.id))
                 .try_fold(0_i128, |acc, w| {
-                    acc.checked_add(i128::from(admission_score(w, scenario)))
+                    let deadline_score = *deadline_urgency_scores.get(&w.id).unwrap_or(&0);
+                    acc.checked_add(i128::from(admission_score(
+                        w,
+                        scenario,
+                        deadline_score,
+                        now_unix_seconds,
+                    )))
                 })
                 .unwrap_or(i128::MAX);
             let total = w
@@ -619,7 +787,10 @@ mod enabled {
                 .workloads
                 .iter()
                 .find(|w| &w.id == workload_id)
-                .map(|w| admission_score(w, scenario))
+                .map(|w| {
+                    let deadline_score = *deadline_urgency_scores.get(&w.id).unwrap_or(&0);
+                    admission_score(w, scenario, deadline_score, now_unix_seconds)
+                })
                 .unwrap_or(1);
             obj_terms.push((
                 -effective_admission_weight.saturating_mul(score),
@@ -836,6 +1007,31 @@ mod enabled {
             .iter()
             .map(|(name, value)| (name.clone(), *value / group_size))
             .collect()
+    }
+
+    fn node_gpu_capacity(node: &crate::model::OptimizationNode) -> i64 {
+        node.extended_resources
+            .iter()
+            .filter(|(name, _)| is_gpu_resource_name(name))
+            .map(|(_, value)| (*value).max(0))
+            .sum()
+    }
+
+    fn placement_cost_milli_per_replica(
+        node: &crate::model::OptimizationNode,
+        per_replica_gpu: i64,
+    ) -> i64 {
+        let gpu_capacity = node_gpu_capacity(node);
+        if gpu_capacity <= 0 || node.price.monthly <= 0.0 || per_replica_gpu <= 0 {
+            return 0;
+        }
+        let cost =
+            (node.price.monthly * 1000.0 * per_replica_gpu as f64 / gpu_capacity as f64).round();
+        if cost.is_finite() && cost > 0.0 {
+            cost as i64
+        } else {
+            0
+        }
     }
 
     /// Pure model-size worker heuristic (deterministic; no CPU/env coupling).
@@ -1160,6 +1356,102 @@ mod tests {
     }
 
     #[test]
+    fn flexible_gang_can_admit_preferred_subset() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let mut flexible = gang_workload(8, 8, &["n1"]);
+        flexible.flexible = true;
+        flexible.min_gpus = 2;
+        flexible.preferred_gpus = 4;
+        flexible.max_gpus = 8;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 8)],
+            workloads: vec![flexible],
+            anti_affinity_pairs: vec![],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("flexible solve should succeed");
+        let total: i64 = solution
+            .assignment_counts
+            .get("gang:t/job")
+            .map(|c| c.values().map(|v| i64::from(*v)).sum())
+            .unwrap_or(0);
+        assert_eq!(
+            total, 4,
+            "flexible gang should use preferred 4/8 replicas; status={}",
+            info.status
+        );
+    }
+
+    #[test]
+    fn flexible_deadline_job_uses_smallest_replicas_that_meet_slack() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let mut flexible = gang_workload(8, 8, &["n1"]);
+        flexible.flexible = true;
+        flexible.min_gpus = 2;
+        flexible.preferred_gpus = 8;
+        flexible.max_gpus = 8;
+        flexible.predicted_runtime_seconds = 3600;
+        flexible.deadline_unix_seconds = chrono::Utc::now().timestamp() + 10_000;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 8)],
+            workloads: vec![flexible],
+            anti_affinity_pairs: vec![],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 1,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("flexible solve should succeed");
+        let total: i64 = solution
+            .assignment_counts
+            .get("gang:t/job")
+            .map(|c| c.values().map(|v| i64::from(*v)).sum())
+            .unwrap_or(0);
+
+        assert_eq!(
+            total, 2,
+            "flexible job with enough deadline slack should use minimum replicas; status={}",
+            info.status
+        );
+    }
+
+    #[test]
     fn gang_of_five_admitted_on_five_gpus() {
         use crate::model::ScenarioConfig;
         let input = OptimizationInput {
@@ -1253,7 +1545,13 @@ mod tests {
                 admission: 0,
                 gpu_demand: 1,
                 gang_complete: 0,
-                gpu_fragmentation: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1268,6 +1566,360 @@ mod tests {
         assert!(
             gpu_solution.assignment_counts.contains_key("t/large"),
             "large 4-GPU job should be admitted under GPU-demand scoring"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_high_priority_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let low = gpu_singleton("low", 1, &["n1"]);
+        let mut high = gpu_singleton("high", 1, &["n1"]);
+        high.priority = 10;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![low, high],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 1,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("priority solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/high"),
+            "high-priority workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/low"),
+            "low-priority workload should lose scarce capacity"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_ignores_priority_when_priority_weight_is_zero() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let mut high_priority_large = gpu_singleton("high-priority-large", 4, &["n1"]);
+        high_priority_large.priority = 10_000;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 4)],
+            workloads: vec![
+                gpu_singleton("small-a", 1, &["n1"]),
+                gpu_singleton("small-b", 1, &["n1"]),
+                gpu_singleton("small-c", 1, &["n1"]),
+                high_priority_large,
+            ],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("priority-zero solve should succeed");
+
+        assert_eq!(
+            admitted_count(&solution),
+            3,
+            "priority metadata should not alter admission when its weight is zero; status={}",
+            info.status
+        );
+        assert!(
+            !solution
+                .assignment_counts
+                .contains_key("t/high-priority-large"),
+            "high-priority workload should not displace three lower-priority jobs unless priority is weighted"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_high_business_value_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let low_value = gpu_singleton("low-value", 1, &["n1"]);
+        let mut high_value = gpu_singleton("high-value", 1, &["n1"]);
+        high_value.business_value = 25;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![low_value, high_value],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 1,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("business-value solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/high-value"),
+            "high-business-value workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/low-value"),
+            "low-business-value workload should lose scarce capacity"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_high_queue_score_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let low_queue = gpu_singleton("batch", 1, &["n1"]);
+        let mut high_queue = gpu_singleton("urgent", 1, &["n1"]);
+        high_queue.queue = "urgent".to_string();
+        high_queue.queue_score = 50;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![low_queue, high_queue],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 1,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("queue solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/urgent"),
+            "high-queue-score workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/batch"),
+            "low-queue-score workload should lose scarce capacity"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_long_waiting_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let fresh = gpu_singleton("fresh", 1, &["n1"]);
+        let mut waiting = gpu_singleton("waiting", 1, &["n1"]);
+        waiting.queue_wait_seconds = 3_600;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![fresh, waiting],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 1,
+                fair_share: 0,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("queue-wait solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/waiting"),
+            "long-waiting workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/fresh"),
+            "fresh workload should lose scarce capacity when queue-wait weight is enabled"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_under_share_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let over_share = gpu_singleton("over-share", 1, &["n1"]);
+        let mut under_share = gpu_singleton("under-share", 1, &["n1"]);
+        under_share.fair_share_deficit = 1;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![over_share, under_share],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 1,
+                deadline_urgency: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("fair-share solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/under-share"),
+            "under-share workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/over-share"),
+            "over-share workload should lose scarce capacity"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_prioritize_deadline_urgent_workload() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let no_deadline = gpu_singleton("no-deadline", 1, &["n1"]);
+        let mut urgent = gpu_singleton("urgent", 1, &["n1"]);
+        urgent.deadline_unix_seconds = 1_893_456_000;
+        urgent.predicted_runtime_seconds = 7_200;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![no_deadline, urgent],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 1,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("deadline solve should succeed");
+        assert!(
+            solution.assignment_counts.contains_key("t/urgent"),
+            "deadline workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/no-deadline"),
+            "no-deadline workload should lose scarce capacity"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_can_penalize_predicted_deadline_miss() {
+        use crate::model::{ObjectiveProfile, ObjectiveWeights, ScenarioConfig};
+        let now = chrono::Utc::now().timestamp();
+        let mut missed = gpu_singleton("missed-deadline", 1, &["n1"]);
+        missed.deadline_unix_seconds = now + 60;
+        missed.predicted_runtime_seconds = 3_600;
+        let mut meetable = gpu_singleton("meetable-deadline", 1, &["n1"]);
+        meetable.deadline_unix_seconds = now + 7_200;
+        meetable.predicted_runtime_seconds = 3_600;
+        let input = OptimizationInput {
+            nodes: vec![gpu_node("n1", 1)],
+            workloads: vec![missed, meetable],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            objective_profile: ObjectiveProfile::GpuGangAware,
+            objective_weights: ObjectiveWeights {
+                admission: 10,
+                gpu_demand: 0,
+                gang_complete: 0,
+                priority: 0,
+                business_value: 0,
+                queue: 0,
+                queue_wait: 0,
+                fair_share: 0,
+                deadline_urgency: 1,
+                deadline_miss: 100_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (solution, info) =
+            super::enabled::solve(&input, &scenario).expect("deadline-miss solve should succeed");
+        assert!(
+            solution
+                .assignment_counts
+                .contains_key("t/meetable-deadline"),
+            "meetable deadline workload should be admitted; status={}",
+            info.status
+        );
+        assert!(
+            !solution.assignment_counts.contains_key("t/missed-deadline"),
+            "predicted-missed deadline workload should lose scarce capacity when miss penalty is enabled"
         );
     }
 
@@ -1539,10 +2191,56 @@ mod tests {
     }
 
     #[test]
-    fn quota_ignored_without_partial_admission() {
+    fn budget_group_caps_admitted_monthly_cost() {
+        use crate::model::{BudgetGroup, Money, ScenarioConfig};
+        let mut node = gpu_node("n1", 4);
+        node.price = Money {
+            monthly: 4000.0,
+            ..Default::default()
+        };
+        let make = |limit_milli: i64| OptimizationInput {
+            nodes: vec![node.clone()],
+            workloads: vec![
+                gpu_singleton("a", 1, &["n1"]),
+                gpu_singleton("b", 1, &["n1"]),
+            ],
+            budget_groups: vec![BudgetGroup {
+                name: "research".to_string(),
+                workload_ids: vec!["t/a".to_string(), "t/b".to_string()],
+                limit_milli,
+            }],
+            ..Default::default()
+        };
+        let scenario = ScenarioConfig {
+            solver: "cp-sat-rust".to_string(),
+            partial_admission: true,
+            ..Default::default()
+        };
+
+        let (capped, capped_info) =
+            super::enabled::solve(&make(1_000_000), &scenario).expect("capped solve");
+        assert_eq!(
+            admitted_count(&capped),
+            1,
+            "one 1-GPU placement costs 1000 monthly units; status={}",
+            capped_info.status
+        );
+        let (uncapped, uncapped_info) =
+            super::enabled::solve(&make(2_000_000), &scenario).expect("uncapped solve");
+        assert_eq!(
+            admitted_count(&uncapped),
+            2,
+            "two 1-GPU placements fit a 2000 monthly unit cap; status={}",
+            uncapped_info.status
+        );
+    }
+
+    #[test]
+    fn quota_is_hard_constraint_without_partial_admission() {
         use crate::model::{QuotaGroup, ScenarioConfig};
-        // Without partial_admission there are no `placed` vars, so a quota group is a
-        // no-op: strict placement still admits both singletons (backward compatible).
+        // Without partial_admission every workload must be placed. Quota groups remain hard
+        // constraints, so a quota that cannot admit all required work makes the strict model
+        // infeasible instead of silently over-admitting.
         let input = OptimizationInput {
             nodes: vec![gpu_node("n1", 4)],
             workloads: vec![
@@ -1561,13 +2259,7 @@ mod tests {
             partial_admission: false,
             ..Default::default()
         };
-        let (solution, info) = super::enabled::solve(&input, &scenario).expect("solve");
-        assert_eq!(
-            admitted_count(&solution),
-            2,
-            "quota must be ignored without partial_admission; status={}",
-            info.status
-        );
+        assert!(super::enabled::solve(&input, &scenario).is_err());
     }
 
     #[test]

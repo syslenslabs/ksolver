@@ -1207,6 +1207,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64",
  "chrono",
  "cp_sat",
  "csv",

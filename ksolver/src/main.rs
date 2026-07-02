@@ -162,12 +162,31 @@ async fn main() -> Result<()> {
         Some("shadow") => {
             metrics::register_metrics();
             let cfg = ksolver::scheduler::config::ShadowConfig::from_env();
+            let binding_status = if cfg.binding_kill_switch {
+                "disabled by kill switch"
+            } else if !cfg.enable_real_binding {
+                "observe-only"
+            } else if cfg.real_binding_dry_run {
+                "dry-run validation"
+            } else {
+                match cfg.binding_canary_mode {
+                    ksolver::scheduler::config::BindingCanaryMode::LowRisk => {
+                        "live low-risk canary"
+                    }
+                    ksolver::scheduler::config::BindingCanaryMode::All => "live bind-all",
+                }
+            };
             info!(
                 scheduler_name = %cfg.scheduler_name,
                 batch_seconds = cfg.batch_window.as_secs(),
                 http_addr = %cfg.http_addr,
                 namespaces = ?cfg.namespace_allowlist,
-                "starting shadow-mode GPU scheduler (binds nothing)"
+                binding_rollout_mode = ?cfg.binding_rollout_mode,
+                enable_real_binding = cfg.enable_real_binding,
+                real_binding_dry_run = cfg.real_binding_dry_run,
+                binding_kill_switch = cfg.binding_kill_switch,
+                binding_status,
+                "starting shadow-mode GPU scheduler"
             );
             ksolver::scheduler::shadow::run_shadow(cfg).await?;
         }
@@ -234,6 +253,9 @@ async fn main() -> Result<()> {
         Some("conform") => {
             // Parse simple flags from the remaining args.
             let rest: Vec<String> = args.collect();
+            let json = rest.iter().any(|a| a == "--json");
+            let fail_on_strict_false_positive =
+                rest.iter().any(|a| a == "--fail-on-strict-false-positive");
             let flag = |name: &str| -> Option<String> {
                 rest.iter()
                     .position(|a| a == name)
@@ -244,9 +266,21 @@ async fn main() -> Result<()> {
                 .or_else(|| std::env::var("SCHEDULER_SIMULATOR_URL").ok())
                 .unwrap_or_default();
             if simulator_url.trim().is_empty() {
-                println!(
-                    "conformance skipped: no kube-scheduler-simulator URL configured (set --simulator <url> or KSOLVER_SCHEDULER_SIMULATOR_URL)"
-                );
+                if json {
+                    serde_json::to_writer_pretty(
+                        std::io::stdout(),
+                        &serde_json::json!({
+                            "skipped": true,
+                            "reason": "no kube-scheduler-simulator URL configured",
+                            "configure": "set --simulator <url> or KSOLVER_SCHEDULER_SIMULATOR_URL"
+                        }),
+                    )?;
+                    println!();
+                } else {
+                    println!(
+                        "conformance skipped: no kube-scheduler-simulator URL configured (set --simulator <url> or KSOLVER_SCHEDULER_SIMULATOR_URL)"
+                    );
+                }
                 return Ok(());
             }
             let sample: usize = flag("--sample").and_then(|v| v.parse().ok()).unwrap_or(20);
@@ -269,14 +303,32 @@ async fn main() -> Result<()> {
                 sample,
             )
             .await?;
-            print!("{}", report.render());
+            if json {
+                let mut value = serde_json::to_value(&report)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "strict_gate_status".to_string(),
+                        serde_json::Value::String(report.strict_gate_status().to_string()),
+                    );
+                }
+                serde_json::to_writer_pretty(std::io::stdout(), &value)?;
+                println!();
+            } else {
+                print!("{}", report.render());
+            }
+            if fail_on_strict_false_positive && report.has_strict_false_positives() {
+                anyhow::bail!(
+                    "conformance failed: {} strict false positives",
+                    report.strict.false_positive
+                );
+            }
         }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver version"
             );
         }
     }

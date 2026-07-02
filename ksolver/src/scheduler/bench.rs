@@ -146,10 +146,25 @@ pub fn generate(s: &BenchScenario) -> (NormalizedCluster, Vec<PendingGpuPod>) {
                 namespace: "bench".to_string(),
                 name,
                 gpu_request: 1,
+                priority: 0,
+                priority_class_name: None,
+                team: None,
+                queue: None,
+                business_value: 0,
+                queue_wait_seconds: 0,
+                deadline_unix_seconds: 0,
+                min_gpus: 0,
+                max_gpus: 0,
+                preferred_gpus: 0,
+                flexible: false,
+                predicted_runtime_seconds: 0,
+                predicted_peak_vram_bytes: 0,
+                required_gpu_topology: vec![],
                 gang_key: gang_key.clone(),
                 colocate: s.colocate,
                 unmodeled_constraints: Vec::new(),
                 anti_affinity_host_selectors: selectors.clone(),
+                affinity_topology_selectors: vec![],
                 anti_affinity_topology_selectors: vec![],
                 preferred_node_affinity: vec![],
                 preferred_pod_affinity: vec![],
@@ -193,15 +208,10 @@ pub fn run_scenario(s: &BenchScenario) -> BenchResult {
     let build_ms = t0.elapsed().as_millis();
 
     let workers = cpsat_rust::recommended_worker_count(&input);
-    let cap = std::env::var("KSOLVER_BENCH_SOLVE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(60);
     let scenario = ScenarioConfig {
         solver: "cp-sat-rust".to_string(),
         partial_admission: true,
-        solve_time_limit_secs: cap,
+        solve_time_limit_secs: bench_solve_cap_secs(),
         ..Default::default()
     };
 
@@ -375,6 +385,14 @@ pub fn run_matrix(scenarios: &[BenchScenario]) -> Vec<BenchResult> {
     scenarios.iter().map(run_scenario).collect()
 }
 
+fn bench_solve_cap_secs() -> i64 {
+    std::env::var("KSOLVER_BENCH_SOLVE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(60)
+}
+
 pub fn custom_scenario(
     name: &'static str,
     nodes: usize,
@@ -398,7 +416,10 @@ pub fn custom_scenario(
 }
 
 pub fn print_table(results: &[BenchResult]) {
-    println!("solver-core benchmark (build + solve only; solve capped at 60s; not full collect/normalize)");
+    println!(
+        "solver-core benchmark (build + solve only; solve capped at {}s; not full collect/normalize)",
+        bench_solve_cap_secs()
+    );
     println!(
         "{:<30} {:>5} {:>6} {:>6} {:>9} {:>4} {:>9} {:>9} {:>10} {:>5} {:>4}",
         "scenario",

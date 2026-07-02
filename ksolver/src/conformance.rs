@@ -12,6 +12,7 @@ use crate::verifier::{
     SimulatorImportPayload, SimulatorResources, FILTER_RESULT_ANNOTATION,
 };
 use k8s_openapi::api::core::v1 as corev1;
+use serde::Serialize;
 
 /// Build a simulator import payload isolating ONE node and ONE pod so a successful bind means
 /// that node passed Filter (Score is moot with a single candidate). The node carries raw
@@ -95,25 +96,31 @@ pub(crate) fn build_single_node_payload(
 
 /// True when the pod carries a construct that `feasible_on_node` does not model (so a
 /// divergence from kube-scheduler is EXPECTED, not a bug): required pod affinity/anti-affinity,
-/// DoNotSchedule topology spread, or non-empty priority/priorityClassName. Required node
-/// affinity (both matchExpressions OR-of-terms and matchFields metadata.name) is now modeled,
-/// so it is NOT bucketed here.
-pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
+/// unsupported DoNotSchedule topology spread shapes, or non-empty priority/priorityClassName.
+/// Required node affinity (both matchExpressions OR-of-terms and matchFields metadata.name) and
+/// the supported hard topology-spread subset are now modeled, so they are NOT bucketed here.
+pub(crate) fn pod_expected_divergence_reasons(pod: &corev1::Pod) -> Vec<String> {
+    let mut reasons = Vec::new();
     let Some(spec) = pod.spec.as_ref() else {
-        return false;
+        return reasons;
     };
-    if spec.priority.unwrap_or(0) != 0
-        || spec
-            .priority_class_name
-            .as_ref()
-            .map(|p| !p.is_empty())
-            .unwrap_or(false)
+    if spec.priority.unwrap_or(0) != 0 {
+        reasons.push("priority".to_string());
+    }
+    if spec
+        .priority_class_name
+        .as_ref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false)
     {
-        return true;
+        reasons.push("priorityClassName".to_string());
     }
     if let Some(tsc) = spec.topology_spread_constraints.as_ref() {
-        if tsc.iter().any(|c| c.when_unsatisfiable == "DoNotSchedule") {
-            return true;
+        if tsc
+            .iter()
+            .any(|c| c.when_unsatisfiable == "DoNotSchedule" && !modeled_hard_spread(c))
+        {
+            reasons.push("topologySpreadConstraints/DoNotSchedule".to_string());
         }
     }
     if let Some(aff) = spec.affinity.as_ref() {
@@ -125,16 +132,43 @@ pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
             .as_ref()
             .map(|a| required_terms(&a.required_during_scheduling_ignored_during_execution))
             .unwrap_or(false)
-            || aff
-                .pod_anti_affinity
-                .as_ref()
-                .map(|a| required_terms(&a.required_during_scheduling_ignored_during_execution))
-                .unwrap_or(false)
         {
-            return true;
+            reasons.push("requiredPodAffinity".to_string());
+        }
+        if aff
+            .pod_anti_affinity
+            .as_ref()
+            .map(|a| required_terms(&a.required_during_scheduling_ignored_during_execution))
+            .unwrap_or(false)
+        {
+            reasons.push("requiredPodAntiAffinity".to_string());
         }
     }
-    false
+    reasons
+}
+
+fn modeled_hard_spread(c: &corev1::TopologySpreadConstraint) -> bool {
+    if c.when_unsatisfiable != "DoNotSchedule" || c.max_skew <= 0 || c.topology_key.is_empty() {
+        return false;
+    }
+    if c.min_domains.is_some()
+        || c.node_affinity_policy.is_some()
+        || c.node_taints_policy.is_some()
+        || c.match_label_keys
+            .as_ref()
+            .is_some_and(|keys| !keys.is_empty())
+    {
+        return false;
+    }
+    c.label_selector
+        .as_ref()
+        .and_then(crate::collector::label_selector_to_reqs)
+        .map(|reqs| !reqs.is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
+    !pod_expected_divergence_reasons(pod).is_empty()
 }
 
 /// The scheduler's Filter verdict for `pod_scope_target` on `node_name`, read from the export:
@@ -167,7 +201,8 @@ pub(crate) fn scheduler_feasible(
 /// Outcome of comparing our feasibility verdict to the scheduler's for one (pod, node) pair.
 /// `FalsePositive` (we say feasible, the scheduler rejects) is the dangerous case — it means
 /// we would recommend a placement the real scheduler refuses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Agree,
     FalsePositive,
@@ -184,7 +219,7 @@ pub fn classify(ours_feasible: bool, scheduler_feasible: bool) -> Verdict {
 }
 
 /// Tally of verdicts across all compared pairs.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct ConfusionMatrix {
     pub agree: usize,
     pub false_positive: usize,
@@ -215,26 +250,43 @@ impl ConfusionMatrix {
 }
 
 /// A strict-bucket disagreement worth reporting.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Mismatch {
     pub pod: String,
     pub node: String,
     pub verdict: Verdict,
     pub ours_reasons: Vec<String>,
     pub scheduler_reason: Option<String>,
+    pub expected_divergence_reasons: Vec<String>,
 }
 
 /// Full conformance result: strict (plain pods, must match) vs expected-divergence buckets.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ConformanceReport {
     pub strict: ConfusionMatrix,
     pub expected_divergence: ConfusionMatrix,
+    pub expected_divergence_reason_counts: std::collections::BTreeMap<String, usize>,
     pub pods_evaluated: usize,
     pub cordoned_nodes_skipped: usize,
     pub mismatches: Vec<Mismatch>,
+    pub expected_divergence_mismatches: Vec<Mismatch>,
 }
 
 impl ConformanceReport {
+    /// True when ksolver says a strict-bucket pod/node pair is feasible but kube-scheduler rejects
+    /// it. This is the CI-gate condition because expected-divergence mismatches are advisory.
+    pub fn has_strict_false_positives(&self) -> bool {
+        self.strict.false_positive > 0
+    }
+
+    pub fn strict_gate_status(&self) -> &'static str {
+        if self.has_strict_false_positives() {
+            "fail"
+        } else {
+            "pass"
+        }
+    }
+
     /// Human-readable summary. FalsePositives (we say feasible, scheduler rejects) are the
     /// dangerous ones and are listed first.
     pub fn render(&self) -> String {
@@ -251,6 +303,22 @@ impl ConformanceReport {
             "  strict: agree={} false_positive={} false_negative={}\n",
             self.strict.agree, self.strict.false_positive, self.strict.false_negative
         ));
+        out.push_str(&format!("  strict-gate: {}\n", self.strict_gate_status()));
+        out.push_str(&format!(
+            "  expected-divergence: agree={} false_positive={} false_negative={}\n",
+            self.expected_divergence.agree,
+            self.expected_divergence.false_positive,
+            self.expected_divergence.false_negative
+        ));
+        if !self.expected_divergence_reason_counts.is_empty() {
+            let counts = self
+                .expected_divergence_reason_counts
+                .iter()
+                .map(|(reason, count)| format!("{reason}={count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("  expected-divergence reasons: {counts}\n"));
+        }
         let mut sorted = self.mismatches.clone();
         // FalsePositive first (dangerous), then FalseNegative.
         sorted.sort_by_key(|m| match m.verdict {
@@ -271,6 +339,30 @@ impl ConformanceReport {
                 m.ours_reasons.join(","),
                 m.scheduler_reason.as_deref().unwrap_or("-"),
             ));
+        }
+        if !self.expected_divergence_mismatches.is_empty() {
+            out.push_str("  expected-divergence mismatches (bucketed separately):\n");
+            let mut expected = self.expected_divergence_mismatches.clone();
+            expected.sort_by_key(|m| match m.verdict {
+                Verdict::FalsePositive => 0,
+                Verdict::FalseNegative => 1,
+                Verdict::Agree => 2,
+            });
+            for m in expected.iter().take(25) {
+                let kind = match m.verdict {
+                    Verdict::FalsePositive => "false-positive in expected-divergence bucket",
+                    Verdict::FalseNegative => "false-negative in expected-divergence bucket",
+                    Verdict::Agree => "agree",
+                };
+                out.push_str(&format!(
+                    "    {kind}: {}@{} expected=[{}] ours=[{}] scheduler={}\n",
+                    m.pod,
+                    m.node,
+                    m.expected_divergence_reasons.join(","),
+                    m.ours_reasons.join(","),
+                    m.scheduler_reason.as_deref().unwrap_or("-"),
+                ));
+            }
         }
         out
     }
@@ -351,6 +443,7 @@ pub async fn run_conformance(
         let Some(raw_pod) = raw_pods.get(&scope) else {
             continue;
         };
+        let expected_divergence_reasons = pod_expected_divergence_reasons(raw_pod);
         let expected_divergence = pod_has_unmodeled_constructs(raw_pod);
         for node in &candidate_nodes {
             let Some(raw_node) = raw_nodes.get(&node.name) else {
@@ -368,6 +461,22 @@ pub async fn run_conformance(
             let verdict = classify(ours_feasible, sched_feasible);
             if expected_divergence {
                 report.expected_divergence.record(verdict);
+                for reason in &expected_divergence_reasons {
+                    *report
+                        .expected_divergence_reason_counts
+                        .entry(reason.clone())
+                        .or_insert(0) += 1;
+                }
+                if verdict != Verdict::Agree {
+                    report.expected_divergence_mismatches.push(Mismatch {
+                        pod: scope.clone(),
+                        node: node.name.clone(),
+                        verdict,
+                        ours_reasons: ours_reasons.clone(),
+                        scheduler_reason: sched_reason,
+                        expected_divergence_reasons: expected_divergence_reasons.clone(),
+                    });
+                }
             } else {
                 report.strict.record(verdict);
                 if verdict != Verdict::Agree {
@@ -377,6 +486,7 @@ pub async fn run_conformance(
                         verdict,
                         ours_reasons: ours_reasons.clone(),
                         scheduler_reason: sched_reason,
+                        expected_divergence_reasons: Vec::new(),
                     });
                 }
             }
@@ -452,6 +562,52 @@ mod tests {
     }
 
     #[test]
+    fn conformance_node_uses_raw_allocatable_capacity() {
+        let node = crate::model::NormalizedNode {
+            name: "n1".to_string(),
+            allocatable: crate::model::ResourceList {
+                milli_cpu: 16_000,
+                memory_bytes: 128,
+                ephemeral_storage: 64,
+                pods: 110,
+            },
+            effective_capacity: crate::model::ResourceList {
+                milli_cpu: 12_000,
+                memory_bytes: 96,
+                ephemeral_storage: 32,
+                pods: 100,
+            },
+            reserved: crate::model::ResourceList {
+                milli_cpu: 4_000,
+                memory_bytes: 32,
+                ephemeral_storage: 32,
+                pods: 10,
+            },
+            ..Default::default()
+        };
+
+        let conformance = conformance_node(&node);
+
+        assert_eq!(
+            conformance.effective_capacity.milli_cpu,
+            node.allocatable.milli_cpu
+        );
+        assert_eq!(
+            conformance.effective_capacity.memory_bytes,
+            node.allocatable.memory_bytes
+        );
+        assert_eq!(
+            conformance.effective_capacity.ephemeral_storage,
+            node.allocatable.ephemeral_storage
+        );
+        assert_eq!(conformance.effective_capacity.pods, node.allocatable.pods);
+        assert_eq!(conformance.reserved.milli_cpu, 0);
+        assert_eq!(conformance.reserved.memory_bytes, 0);
+        assert_eq!(conformance.reserved.ephemeral_storage, 0);
+        assert_eq!(conformance.reserved.pods, 0);
+    }
+
+    #[test]
     fn unmodeled_constructs_detects_expected_divergence() {
         // Plain pod: modeled.
         assert!(!pod_has_unmodeled_constructs(&pod_named("ns", "plain")));
@@ -470,7 +626,9 @@ mod tests {
             }),
             ..Default::default()
         });
+        let aa_reasons = pod_expected_divergence_reasons(&aa);
         assert!(pod_has_unmodeled_constructs(&aa));
+        assert_eq!(aa_reasons, vec!["requiredPodAntiAffinity".to_string()]);
 
         // matchFields node affinity: now MODELED (metadata.name) => NOT bucketed.
         let mut mf = pod_named("ns", "mf");
@@ -492,10 +650,93 @@ mod tests {
         });
         assert!(!pod_has_unmodeled_constructs(&mf));
 
+        // Supported hard topology spread: now modeled => NOT bucketed.
+        let mut modeled_spread = pod_named("ns", "spread-modeled");
+        modeled_spread
+            .spec
+            .as_mut()
+            .unwrap()
+            .topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+            label_selector: Some(
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_expressions: Some(vec![
+                        k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                            key: "app".to_string(),
+                            operator: "In".to_string(),
+                            values: Some(vec!["trainer".to_string()]),
+                        },
+                    ]),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }]);
+        assert!(!pod_has_unmodeled_constructs(&modeled_spread));
+
+        // Advanced hard topology spread fields are not modeled exactly => bucketed.
+        let mut advanced_spread = pod_named("ns", "spread-advanced");
+        advanced_spread
+            .spec
+            .as_mut()
+            .unwrap()
+            .topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+            min_domains: Some(2),
+            label_selector: Some(
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_labels: Some(std::collections::BTreeMap::from([(
+                        "app".to_string(),
+                        "trainer".to_string(),
+                    )])),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }]);
+        assert!(pod_has_unmodeled_constructs(&advanced_spread));
+
+        // Unsupported hard topology spread: still expected divergence.
+        let mut unsupported_spread = pod_named("ns", "spread-unsupported");
+        unsupported_spread
+            .spec
+            .as_mut()
+            .unwrap()
+            .topology_spread_constraints = Some(vec![corev1::TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+            label_selector: Some(
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                    match_expressions: Some(vec![
+                        k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                            key: "app".to_string(),
+                            operator: "Gt".to_string(),
+                            values: Some(vec!["trainer".to_string()]),
+                        },
+                    ]),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }]);
+        assert_eq!(
+            pod_expected_divergence_reasons(&unsupported_spread),
+            vec!["topologySpreadConstraints/DoNotSchedule".to_string()]
+        );
+
         // priorityClassName: unmodeled.
         let mut pr = pod_named("ns", "pr");
         pr.spec.as_mut().unwrap().priority_class_name = Some("high".to_string());
         assert!(pod_has_unmodeled_constructs(&pr));
+        assert_eq!(
+            pod_expected_divergence_reasons(&pr),
+            vec!["priorityClassName".to_string()]
+        );
     }
 
     #[test]
@@ -558,5 +799,51 @@ mod tests {
         m.record(Verdict::FalseNegative);
         assert_eq!(m.false_negative, 1);
         assert_eq!(m.total(), 5);
+    }
+
+    #[test]
+    fn render_separates_strict_and_expected_divergence_mismatches() {
+        let mut report = ConformanceReport::default();
+        assert!(!report.has_strict_false_positives());
+        assert_eq!(report.strict_gate_status(), "pass");
+        report.strict.record(Verdict::FalsePositive);
+        report.expected_divergence.record(Verdict::FalseNegative);
+        report
+            .expected_divergence_reason_counts
+            .insert("requiredPodAntiAffinity".to_string(), 3);
+        report
+            .expected_divergence_reason_counts
+            .insert("topologySpreadConstraints/DoNotSchedule".to_string(), 2);
+        report.mismatches.push(Mismatch {
+            pod: "ns/strict".to_string(),
+            node: "n1".to_string(),
+            verdict: Verdict::FalsePositive,
+            ours_reasons: Vec::new(),
+            scheduler_reason: Some("scheduler rejected strict pod".to_string()),
+            expected_divergence_reasons: Vec::new(),
+        });
+        report.expected_divergence_mismatches.push(Mismatch {
+            pod: "ns/expected".to_string(),
+            node: "n2".to_string(),
+            verdict: Verdict::FalseNegative,
+            ours_reasons: vec!["required pod anti-affinity not modeled".to_string()],
+            scheduler_reason: None,
+            expected_divergence_reasons: vec!["requiredPodAntiAffinity".to_string()],
+        });
+
+        let rendered = report.render();
+
+        assert!(rendered.contains("strict: agree=0 false_positive=1 false_negative=0"));
+        assert!(rendered.contains("strict-gate: fail"));
+        assert!(rendered.contains("expected-divergence: agree=0 false_positive=0 false_negative=1"));
+        assert!(rendered.contains(
+            "expected-divergence reasons: requiredPodAntiAffinity=3, topologySpreadConstraints/DoNotSchedule=2"
+        ));
+        assert!(rendered.contains("FALSE-POSITIVE (we feasible, scheduler rejects): ns/strict@n1"));
+        assert!(rendered.contains("expected-divergence mismatches"));
+        assert!(rendered.contains("false-negative in expected-divergence bucket: ns/expected@n2"));
+        assert!(rendered.contains("expected=[requiredPodAntiAffinity]"));
+        assert!(report.has_strict_false_positives());
+        assert_eq!(report.strict_gate_status(), "fail");
     }
 }

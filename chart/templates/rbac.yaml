@@ -1,4 +1,26 @@
 {{- if .Values.rbac.create -}}
+{{- $bindingRolloutCanCreate := eq (include "solver.bindingRolloutCanWrite" .Values.scheduler.bindingRolloutMode) "true" -}}
+{{- if and .Values.rbac.allowBindingMutations (ne .Values.runtime.mode "shadow") -}}
+{{- fail "rbac.allowBindingMutations requires runtime.mode=shadow" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowBindingMutations (or (not $bindingRolloutCanCreate) .Values.scheduler.bindingKillSwitch) -}}
+{{- fail "rbac.allowBindingMutations requires binding rollout mode dry-run, bind-low-risk, or bind-all, and scheduler.bindingKillSwitch=false" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowEventWrites (ne .Values.runtime.mode "shadow") -}}
+{{- fail "rbac.allowEventWrites requires runtime.mode=shadow" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowEventWrites (not .Values.scheduler.enableKubernetesEvents) -}}
+{{- fail "rbac.allowEventWrites requires scheduler.enableKubernetesEvents=true" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowEventWrites .Values.scheduler.bindingKillSwitch -}}
+{{- fail "rbac.allowEventWrites requires scheduler.bindingKillSwitch=false" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowLeaderElection (ne .Values.runtime.mode "shadow") -}}
+{{- fail "rbac.allowLeaderElection requires runtime.mode=shadow" -}}
+{{- end -}}
+{{- if and .Values.rbac.allowLeaderElection (not .Values.scheduler.enableLeaderElection) -}}
+{{- fail "rbac.allowLeaderElection requires scheduler.enableLeaderElection=true" -}}
+{{- end -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -24,6 +46,16 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]
+  {{- if .Values.rbac.allowBindingMutations }}
+  - apiGroups: [""]
+    resources: ["pods/binding"]
+    verbs: ["create"]
+  {{- end }}
+  {{- if .Values.rbac.allowEventWrites }}
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -39,4 +71,34 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "solver.serviceAccountName" . }}
     namespace: {{ .Values.namespace | default .Release.Namespace }}
+{{- if .Values.rbac.allowLeaderElection }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "solver.fullname" . }}-leader-election
+  namespace: {{ .Values.scheduler.leaderElectionNamespace | default (.Values.namespace | default .Release.Namespace) }}
+  labels:
+    {{- include "solver.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "solver.fullname" . }}-leader-election
+  namespace: {{ .Values.scheduler.leaderElectionNamespace | default (.Values.namespace | default .Release.Namespace) }}
+  labels:
+    {{- include "solver.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "solver.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "solver.serviceAccountName" . }}
+    namespace: {{ .Values.namespace | default .Release.Namespace }}
+{{- end }}
 {{- end -}}

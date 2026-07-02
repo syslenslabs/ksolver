@@ -70,10 +70,31 @@
   .job.warn { background: #3a2a12; color: #ffcf8f; }
   .unplaced-list { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
   .board-score { color: #9aa4b2; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .repair { border: 1px solid #4e3a1d; background: #14120f; border-radius: 8px; padding: 12px 14px;
+            margin: 0 0 18px; }
+  .repair-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .repair-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .repair-badge { display: inline-block; border: 1px solid #765727; color: #ffcf8f; background: #2a1f10;
+                  border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+  .repair-empty, .repair-note { color: #9aa4b2; font-size: 12px; margin-top: 8px; }
+  .repair-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+  .repair-card { border: 1px solid #303746; background: #0f1115; border-radius: 8px; padding: 10px; min-width: 0; }
+  .repair-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .repair-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .repair-math { color: #7ee2a0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .repair-explain { color: #9aa4b2; font-size: 12px; margin: 4px 0 8px; }
+  .repair-actions { margin: 0; padding-left: 18px; color: #e6e8eb; }
+  .repair-actions li { margin: 4px 0; }
+  .repair-action { color: #9fd0ff; }
+  .repair-action.preempt { color: #ff9f9f; }
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c2027; font-size: 13px; }
   th { color: #9aa4b2; font-weight: 500; position: sticky; top: 0; background: #0f1115; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pod-main { color: #e6e8eb; }
+  .pod-meta { color: #9aa4b2; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+  .pod-meta.deadline-ok { color: #7ee2a0; }
+  .pod-meta.deadline-risk { color: #ffcf8f; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
   .placed { background: #12331d; color: #7ee2a0; }
   .unplaced { background: #3a2a12; color: #ffcf8f; }
@@ -117,6 +138,10 @@
       <input id="weight-gang" type="number" min="0" step="1" value="2" />
     </div>
     <div class="control">
+      <label for="weight-priority">Priority</label>
+      <input id="weight-priority" type="number" min="0" step="1" value="0" />
+    </div>
+    <div class="control">
       <label for="weight-fragmentation">Fragmentation</label>
       <input id="weight-fragmentation" type="number" min="0" step="1" value="0" />
     </div>
@@ -139,9 +164,17 @@
       <div class="unplaced-list" id="ksolver-unplaced"></div>
     </div>
   </section>
+  <section class="repair" id="repair-section" aria-label="Dry-run repair plans">
+    <div class="repair-head">
+      <h2>Repair plans <span class="sub">dry-run preview</span></h2>
+      <span class="repair-badge">SIMULATED - no changes applied</span>
+    </div>
+    <div id="repair-plans"></div>
+  </section>
   <table>
     <thead><tr>
       <th>Namespace</th><th>Pod</th><th class="num">GPUs</th>
+      <th class="num">Priority</th><th>Class</th>
       <th>Placement</th><th>Node</th><th>Caveats</th>
     </tr></thead>
     <tbody id="decisions"></tbody>
@@ -180,10 +213,12 @@
   var elKubeScore = document.getElementById("kube-score");
   var elKsolverScore = document.getElementById("ksolver-score");
   var elKubeNote = document.getElementById("kube-note");
+  var elRepairPlans = document.getElementById("repair-plans");
   var elObjectiveProfile = document.getElementById("objective-profile");
   var elWeightAdmission = document.getElementById("weight-admission");
   var elWeightGpuDemand = document.getElementById("weight-gpu-demand");
   var elWeightGang = document.getElementById("weight-gang");
+  var elWeightPriority = document.getElementById("weight-priority");
   var elWeightFragmentation = document.getElementById("weight-fragmentation");
   var elResolveNow = document.getElementById("resolve-now");
   var elObjectiveStatus = document.getElementById("objective-status");
@@ -220,6 +255,7 @@
     q.set("admission", String(numberValue(elWeightAdmission, 1)));
     q.set("gpu_demand", String(numberValue(elWeightGpuDemand, 1)));
     q.set("gang_complete", String(numberValue(elWeightGang, 2)));
+    q.set("priority", String(numberValue(elWeightPriority, 0)));
     q.set("gpu_fragmentation", String(numberValue(elWeightFragmentation, 0)));
     return q;
   }
@@ -291,6 +327,7 @@
         elWeightAdmission.value = w.admission == null ? 1 : w.admission;
         elWeightGpuDemand.value = w.gpu_demand == null ? 1 : w.gpu_demand;
         elWeightGang.value = w.gang_complete == null ? 2 : w.gang_complete;
+        elWeightPriority.value = w.priority == null ? 0 : w.priority;
         elWeightFragmentation.value = w.gpu_fragmentation == null ? 0 : w.gpu_fragmentation;
         controlsReady = true;
       })
@@ -356,9 +393,9 @@
       var jobs = document.createElement("div"); jobs.className = "jobs";
       n.jobs.forEach(function (j) {
         var tag = document.createElement("span");
-        tag.className = "job" + (isBigJob(j) ? " big" : "");
-        tag.textContent = shortName(j.name) + " " + j.gpu_request + "g";
-        tag.title = j.namespace + "/" + j.name;
+        tag.className = "job" + (isBigJob(j) ? " big" : "") + (deadlineRisk(j) ? " warn" : "");
+        tag.textContent = shortName(j.name) + " " + gpuCellText(j);
+        tag.title = j.namespace + "/" + j.name + priorityTitle(j) + deadlineTitle(j) + gpuFlexTitle(j);
         jobs.appendChild(tag);
       });
       card.appendChild(jobs);
@@ -367,10 +404,86 @@
     plan.unplaced.forEach(function (j) {
       var tag = document.createElement("span");
       tag.className = "job warn";
-      tag.textContent = shortName(j.name) + " " + j.gpu_request + "g";
-      tag.title = j.placement && j.placement.reason ? j.placement.reason : "unplaced";
+      tag.textContent = shortName(j.name) + " " + gpuCellText(j);
+      tag.title = (j.placement && j.placement.reason ? j.placement.reason : "unplaced") + priorityTitle(j) + deadlineTitle(j) + gpuFlexTitle(j);
       unplacedContainer.appendChild(tag);
     });
+  }
+  function priorityTitle(j) {
+    var p = j.priority == null ? 0 : Number(j.priority || 0);
+    var c = j.priority_class_name || "";
+    if (!p && !c) return "";
+    return " | priority " + p + (c ? " (" + c + ")" : "");
+  }
+  function fmtDuration(seconds, showZero) {
+    seconds = Number(seconds || 0);
+    if (!isFinite(seconds) || (seconds === 0 && !showZero)) return "";
+    var negative = seconds < 0;
+    seconds = Math.abs(Math.round(seconds));
+    var days = Math.floor(seconds / 86400);
+    seconds -= days * 86400;
+    var hours = Math.floor(seconds / 3600);
+    seconds -= hours * 3600;
+    var minutes = Math.floor(seconds / 60);
+    seconds -= minutes * 60;
+    var parts = [];
+    if (days) parts.push(days + "d");
+    if (hours) parts.push(hours + "h");
+    if (minutes && parts.length < 2) parts.push(minutes + "m");
+    if (!parts.length) parts.push(seconds + "s");
+    return (negative ? "-" : "") + parts.join(" ");
+  }
+  function fmtDeadline(seconds) {
+    seconds = Number(seconds || 0);
+    if (!isFinite(seconds) || seconds <= 0) return "";
+    return new Date(seconds * 1000).toLocaleString();
+  }
+  function predictedFinish(d) {
+    var runtime = Number(d.predicted_runtime_seconds || 0);
+    var deadline = Number(d.deadline_unix_seconds || 0);
+    var slack = Number(d.deadline_slack_seconds || 0);
+    if (deadline > 0 && isFinite(slack)) {
+      return fmtDeadline(deadline - slack);
+    }
+    if (runtime > 0) {
+      return new Date(Date.now() + runtime * 1000).toLocaleString();
+    }
+    return "";
+  }
+  function deadlineRisk(d) {
+    return Number(d && d.deadline_unix_seconds || 0) > 0 && Number(d.deadline_slack_seconds || 0) < 0;
+  }
+  function deadlineSummary(d) {
+    var parts = [];
+    var deadline = fmtDeadline(d.deadline_unix_seconds);
+    var runtime = fmtDuration(d.predicted_runtime_seconds);
+    var finish = predictedFinish(d);
+    var slack = fmtDuration(d.deadline_slack_seconds, !!deadline);
+    if (deadline) parts.push("due " + deadline);
+    if (finish) parts.push("finish " + finish);
+    if (runtime) parts.push("runtime " + runtime);
+    if (deadline && slack) parts.push("slack " + slack);
+    return parts.join(" · ");
+  }
+  function deadlineTitle(d) {
+    var summary = deadlineSummary(d);
+    return summary ? " | " + summary : "";
+  }
+  function gpuCellText(d) {
+    var request = Number(d.gpu_request || 0);
+    if (!d.flexible) return request + "g";
+    var min = Number(d.min_gpus || 0);
+    var preferred = Number(d.preferred_gpus || 0);
+    var max = Number(d.max_gpus || 0);
+    if (!min && !preferred && !max) return request + "g flex";
+    if (!min) min = request;
+    if (!max) max = request;
+    if (!preferred) preferred = request;
+    return min + "-" + max + "g pref " + preferred;
+  }
+  function gpuFlexTitle(d) {
+    if (!d.flexible) return "";
+    return " | flexible GPUs " + gpuCellText(d) + " (request " + Number(d.gpu_request || 0) + "g)";
   }
   function planStats(plan) {
     var activeNodes = plan.nodes.filter(function (n) { return n.used > n.base; });
@@ -400,6 +513,20 @@
   }
   function money(n) {
     return "$" + Number(n || 0).toFixed(2);
+  }
+  function compactValue(n) {
+    n = Number(n || 0);
+    if (n >= 1000000) return "$" + (n / 1000000).toFixed(1) + "m";
+    if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k";
+    return n > 0 ? "$" + n : "";
+  }
+  function policySummary(d) {
+    var parts = [];
+    if (d.team) parts.push("team " + d.team);
+    if (d.queue) parts.push("queue " + d.queue);
+    var value = compactValue(d.business_value);
+    if (value) parts.push("value " + value);
+    return parts.join(" · ");
   }
   function costCell(label, value, detail, cls) {
     var cell = document.createElement("div"); cell.className = "cost-cell";
@@ -477,11 +604,63 @@
     renderNodeBoard(elKsolverNodes, elKsolverUnplaced, elKsolverScore, ksolverBoardPlan);
     renderCostCompare(kubeBoardPlan, ksolverBoardPlan, statusField(trace.solver_status, "objective_profile"));
   }
+  function renderRepairPlans(trace) {
+    clear(elRepairPlans);
+    var plans = (trace && trace.repair_plans) || [];
+    if (!plans.length) {
+      var empty = document.createElement("div");
+      empty.className = "repair-empty";
+      empty.textContent = "No repair plan needed or available for this trace.";
+      elRepairPlans.appendChild(empty);
+      return;
+    }
+    var cards = document.createElement("div");
+    cards.className = "repair-cards";
+    plans.forEach(function (p) {
+      var card = document.createElement("div");
+      card.className = "repair-card";
+      var title = document.createElement("div");
+      title.className = "repair-title";
+      var target = document.createElement("div");
+      target.className = "repair-target";
+      target.textContent = p.target + " - " + p.target_gpu_request + " GPUs - priority " + p.target_priority;
+      target.title = p.target;
+      var math = document.createElement("div");
+      math.className = "repair-math";
+      math.textContent = "would free " + p.freed_gpu + " GPU on " + p.node;
+      title.appendChild(target);
+      title.appendChild(math);
+      card.appendChild(title);
+      var explain = document.createElement("div");
+      explain.className = "repair-explain";
+      explain.textContent = p.explanation || "Dry-run repair would make room for this pending workload.";
+      card.appendChild(explain);
+      var list = document.createElement("ol");
+      list.className = "repair-actions";
+      (p.actions || []).forEach(function (a) {
+        var li = document.createElement("li");
+        var verb = document.createElement("span");
+        verb.className = "repair-action " + (a.action || "");
+        verb.textContent = "would " + (a.action || "repair");
+        li.appendChild(verb);
+        li.appendChild(document.createTextNode(" " + a.namespace + "/" + a.pod + " (" + a.gpu_request + " GPU) on " + a.node));
+        if (a.reason) li.appendChild(document.createTextNode(" - " + a.reason));
+        list.appendChild(li);
+      });
+      card.appendChild(list);
+      cards.appendChild(card);
+    });
+    elRepairPlans.appendChild(cards);
+    var note = document.createElement("div");
+    note.className = "repair-note";
+    note.textContent = "Actions describe what the scheduler would do to make room. Nothing here is executed.";
+    elRepairPlans.appendChild(note);
+  }
 
   function render(data, cluster, kubePlan) {
     var traces = (data && data.traces) || [];
     if (!traces.length) {
-      clear(elSummary); clear(elDecisions); clear(elCostStrip);
+      clear(elSummary); clear(elDecisions); clear(elCostStrip); clear(elRepairPlans);
       elSummary.appendChild(kv("status", "no traces yet"));
       return;
     }
@@ -494,6 +673,7 @@
     elSummary.appendChild(kv("solve core (ms)", t.solve_core_millis));
     elSummary.appendChild(kv("snapshot age (ms)", t.snapshot_age_millis));
     renderPlacementCompare(t, cluster, kubePlan);
+    renderRepairPlans(t);
 
     clear(elDecisions);
     (t.decisions || []).forEach(function (d) {
@@ -503,8 +683,33 @@
         td.textContent = text; return td;
       }
       tr.appendChild(cell(d.namespace));
-      tr.appendChild(cell(d.name));
-      tr.appendChild(cell(d.gpu_request, "num"));
+      var podTd = document.createElement("td");
+      var podName = document.createElement("div");
+      podName.className = "pod-main";
+      podName.textContent = d.name;
+      podTd.appendChild(podName);
+      var meta = policySummary(d);
+      if (meta) {
+        var podMeta = document.createElement("div");
+        podMeta.className = "pod-meta";
+        podMeta.textContent = meta;
+        podMeta.title = meta;
+        podTd.appendChild(podMeta);
+      }
+      tr.appendChild(podTd);
+      var deadline = deadlineSummary(d);
+      if (deadline) {
+        var deadlineMeta = document.createElement("div");
+        deadlineMeta.className = "pod-meta " + (deadlineRisk(d) ? "deadline-risk" : "deadline-ok");
+        deadlineMeta.textContent = deadline;
+        deadlineMeta.title = deadline;
+        podTd.appendChild(deadlineMeta);
+      }
+      var gpuTd = cell(gpuCellText(d), "num");
+      gpuTd.title = gpuFlexTitle(d).replace(/^ \| /, "") || (Number(d.gpu_request || 0) + " GPU request");
+      tr.appendChild(gpuTd);
+      tr.appendChild(cell(d.priority == null ? "" : d.priority, "num"));
+      tr.appendChild(cell(d.priority_class_name || ""));
       var p = d.placement || {};
       var placeTd = document.createElement("td");
       var pill = document.createElement("span");
@@ -514,7 +719,9 @@
       tr.appendChild(placeTd);
       tr.appendChild(cell(p.kind === "placed" ? (p.node || "") : (p.reason || "")));
       var cav = (d.caveats || []).join(", ");
-      tr.appendChild(cell(cav, "caveat"));
+      var cavTd = cell(cav, "caveat");
+      cavTd.title = cav;
+      tr.appendChild(cavTd);
       elDecisions.appendChild(tr);
     });
 
@@ -596,7 +803,7 @@
       .finally(function () { inFlight = false; });
   }
 
-  [elObjectiveProfile, elWeightAdmission, elWeightGpuDemand, elWeightGang, elWeightFragmentation]
+  [elObjectiveProfile, elWeightAdmission, elWeightGpuDemand, elWeightGang, elWeightPriority, elWeightFragmentation]
     .forEach(function (el) {
       el.addEventListener("change", scheduleResolve);
       el.addEventListener("input", scheduleResolve);
