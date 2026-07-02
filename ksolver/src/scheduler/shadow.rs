@@ -503,28 +503,29 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
                 let would_bind = plan.len();
                 if let Some(bc) = &bind_client {
                     let outcomes = crate::scheduler::binder::apply_bindings(bc, &plan, &cfg).await;
+                    use crate::scheduler::binder::BindResult;
+                    // Count only ACTUALLY-persisted binds toward the bound metric; server-side
+                    // dry-run validations are reported separately so they never imply real mutation.
                     let bound = outcomes
                         .iter()
-                        .filter(|o| {
-                            matches!(o.result, crate::scheduler::binder::BindResult::Bound { .. })
-                        })
+                        .filter(|o| matches!(o.result, BindResult::Bound { dry_run: false }))
+                        .count() as u64;
+                    let validated = outcomes
+                        .iter()
+                        .filter(|o| matches!(o.result, BindResult::Bound { dry_run: true }))
                         .count() as u64;
                     let failed = outcomes
                         .iter()
-                        .filter(|o| {
-                            matches!(
-                                o.result,
-                                crate::scheduler::binder::BindResult::Failed { .. }
-                            )
-                        })
+                        .filter(|o| matches!(o.result, BindResult::Failed { .. }))
                         .count() as u64;
-                    let skipped = outcomes.len() as u64 - bound - failed;
+                    let skipped = outcomes.len() as u64 - bound - validated - failed;
                     metrics::inc_shadow_bound(bound);
                     metrics::inc_shadow_bind_skipped(skipped);
                     metrics::inc_shadow_bind_failed(failed);
                     info!(
                         sequence = trace.sequence,
                         bound,
+                        validated,
                         skipped,
                         failed,
                         dry_run = cfg.real_binding_dry_run,
