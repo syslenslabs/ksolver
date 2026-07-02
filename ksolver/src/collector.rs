@@ -298,6 +298,11 @@ impl KubeCollector {
                 .collect(),
             warnings: daemonset_warnings(daemonset_count, pdb_count),
         };
+        let mut snapshot = snapshot;
+        // DRA (Dynamic Resource Allocation) F3a: augment nodes with synthetic per-DeviceClass
+        // capacity and pods with per-class demand, so DRA workloads ride the generic extended-
+        // resource solver path. Non-fatal: clusters without the resource.k8s.io API are unaffected.
+        self.augment_with_dra(&mut snapshot).await;
         info!(
             cluster = %self.cluster_name,
             nodes = snapshot.nodes.len(),
@@ -312,6 +317,140 @@ impl KubeCollector {
             "snapshot collection complete"
         );
         Ok(snapshot)
+    }
+
+    /// DRA F3a augmentation (non-fatal): list ResourceSlices/DeviceClasses/ResourceClaims/Templates
+    /// (resource.k8s.io/v1alpha3), compute per-node per-class availability + per-pod demand via the
+    /// pure `crate::dra` module, and fold them into node `extended_resources` and pod
+    /// `extended_resource_requests` (keyed `dra.ksolver/<class>`). Any listing error (API absent /
+    /// feature-gate off / RBAC) ⇒ skip DRA entirely, leaving the snapshot unchanged.
+    async fn augment_with_dra(&self, snapshot: &mut ClusterSnapshot) {
+        use k8s_openapi::api::resource::v1alpha3 as dra;
+        let slices_api: Api<dra::ResourceSlice> = Api::all(self.client.clone());
+        let classes_api: Api<dra::DeviceClass> = Api::all(self.client.clone());
+        let claims_api: Api<dra::ResourceClaim> = Api::all(self.client.clone());
+        let templates_api: Api<dra::ResourceClaimTemplate> = Api::all(self.client.clone());
+        let lp = ListParams::default();
+        let (slices, classes, claims, templates) = tokio::join!(
+            slices_api.list(&lp),
+            classes_api.list(&lp),
+            claims_api.list(&lp),
+            templates_api.list(&lp),
+        );
+        let (slices, classes, claims) = match (slices, classes, claims) {
+            (Ok(s), Ok(c), Ok(cl)) => (s.items, c.items, cl.items),
+            _ => {
+                debug!("DRA API not available (resource.k8s.io/v1alpha3); skipping DRA augmentation");
+                return;
+            }
+        };
+        if slices.is_empty() && classes.is_empty() {
+            return; // no DRA in use
+        }
+        let templates = templates.map(|t| t.items).unwrap_or_default();
+
+        // Node capacity: synthetic dra.ksolver/<class> = unallocated matching devices.
+        let avail = crate::dra::compute_availability(&slices, &classes, &claims);
+        let mut nodes_aug = 0usize;
+        let mut total_capacity = 0i64;
+        for node in &mut snapshot.nodes {
+            let mut touched = false;
+            for ((n, class), count) in &avail.by_node_class {
+                if n == &node.name && *count > 0 {
+                    node.extended_resources
+                        .insert(crate::dra::class_resource_key(class), *count);
+                    total_capacity += *count;
+                    touched = true;
+                }
+            }
+            if touched {
+                nodes_aug += 1;
+            }
+        }
+        if avail.overlapping_classes {
+            snapshot
+                .warnings
+                .push("DRA: overlapping DeviceClasses may overestimate node capacity".to_string());
+        }
+
+        // Pod demand: resolve each pod's spec.resourceClaims to a ResourceClaim or Template, sum
+        // per-class demand, and add as extended requests keyed dra.ksolver/<class>.
+        let claim_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaim> = claims
+            .iter()
+            .filter_map(|c| {
+                let ns = c.metadata.namespace.clone()?;
+                let name = c.metadata.name.clone()?;
+                Some(((ns, name), c))
+            })
+            .collect();
+        let template_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaimTemplate> = templates
+            .iter()
+            .filter_map(|t| {
+                let ns = t.metadata.namespace.clone()?;
+                let name = t.metadata.name.clone()?;
+                Some(((ns, name), t))
+            })
+            .collect();
+        // Raw pod specs (the model Pod drops resourceClaims), keyed by (ns, name).
+        let raw_pod_claims: BTreeMap<(String, String), Vec<corev1::PodResourceClaim>> = {
+            let pods_api: Api<corev1::Pod> = Api::all(self.client.clone());
+            match pods_api.list(&lp).await {
+                Ok(list) => list
+                    .items
+                    .into_iter()
+                    .filter_map(|p| {
+                        let ns = p.metadata.namespace.clone()?;
+                        let name = p.metadata.name.clone()?;
+                        let rc = p.spec.as_ref().and_then(|s| s.resource_claims.clone())?;
+                        Some(((ns, name), rc))
+                    })
+                    .collect(),
+                Err(_) => BTreeMap::new(),
+            }
+        };
+        let mut pods_aug = 0usize;
+        for pod in &mut snapshot.pods {
+            let Some(refs) = raw_pod_claims.get(&(pod.namespace.clone(), pod.name.clone())) else {
+                continue;
+            };
+            let before = pod.extended_resource_requests.len();
+            for pod_claim in refs {
+                let demand = if let Some(cn) = pod_claim.resource_claim_name.as_ref() {
+                    claim_by_ns_name
+                        .get(&(pod.namespace.clone(), cn.clone()))
+                        .map(|c| crate::dra::claim_demand(c))
+                } else if let Some(tn) = pod_claim.resource_claim_template_name.as_ref() {
+                    template_by_ns_name
+                        .get(&(pod.namespace.clone(), tn.clone()))
+                        .and_then(|t| t.spec.spec.devices.as_ref())
+                        .map(crate::dra::demand_from_device_claim)
+                } else {
+                    None
+                };
+                if let Some(demand) = demand {
+                    for (class, count) in demand.by_class {
+                        if count > 0 {
+                            *pod.extended_resource_requests
+                                .entry(crate::dra::class_resource_key(&class))
+                                .or_default() += count;
+                        }
+                    }
+                }
+            }
+            if pod.extended_resource_requests.len() > before {
+                pods_aug += 1;
+            }
+        }
+        info!(
+            slices = slices.len(),
+            device_classes = classes.len(),
+            claims = claims.len(),
+            nodes_augmented = nodes_aug,
+            total_dra_capacity = total_capacity,
+            pods_with_dra_demand = pods_aug,
+            unevaluable_classes = avail.unevaluable_classes.len(),
+            "DRA F3a augmentation applied"
+        );
     }
 
     pub async fn refresh_usage(&self, snapshot: &mut ClusterSnapshot) -> bool {

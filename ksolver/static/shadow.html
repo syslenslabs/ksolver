@@ -19,6 +19,28 @@
   .kv { display: flex; flex-direction: column; }
   .kv .k { color: #9aa4b2; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .kv .v { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 18px; }
+  .board { border: 1px solid #232833; background: #131722; border-radius: 8px; padding: 14px; min-width: 0; }
+  .board h2 { margin: 0; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; gap: 12px; }
+  .board .note { color: #9aa4b2; font-size: 12px; margin: 4px 0 12px; }
+  .nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(138px, 1fr)); gap: 10px; }
+  .node { border: 1px solid #252b36; border-radius: 8px; padding: 10px; background: #0f1115; min-height: 118px; }
+  .node.hot { border-color: #2c6f47; box-shadow: 0 0 0 1px rgba(126,226,160,.08); }
+  .node.blocked { border-color: #66431c; }
+  .node-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+  .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e6e8eb; }
+  .node-gpu { color: #9fd0ff; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; }
+  .slot { height: 18px; border-radius: 4px; background: #222833; border: 1px solid #303746; }
+  .slot.used { background: #2f6f48; border-color: #40915f; }
+  .slot.base { background: #31435f; border-color: #42608d; }
+  .slot.waste { background: #45351d; border-color: #765727; }
+  .jobs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .job { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 999px; padding: 2px 7px; background: #17324d; color: #9fd0ff; font-size: 11px; }
+  .job.big { background: #2d244f; color: #d7c5ff; }
+  .job.warn { background: #3a2a12; color: #ffcf8f; }
+  .unplaced-list { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .board-score { color: #9aa4b2; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c2027; font-size: 13px; }
   th { color: #9aa4b2; font-weight: 500; position: sticky; top: 0; background: #0f1115; }
@@ -30,6 +52,7 @@
   .history { margin-top: 18px; color: #9aa4b2; font-size: 12px; }
   .history span { margin-right: 12px; font-variant-numeric: tabular-nums; }
   code { color: #9fd0ff; }
+  @media (max-width: 980px) { .compare { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -41,6 +64,20 @@
 <div id="banner"></div>
 <main>
   <div class="summary" id="summary"></div>
+  <section class="compare" id="placement-compare">
+    <div class="board">
+      <h2>Kube-style sequential placement <span class="board-score" id="kube-score"></span></h2>
+      <div class="note">Greedy spread simulation over the same pending jobs. This intentionally shows how local one-at-a-time placement can fragment 4-GPU nodes.</div>
+      <div class="nodes" id="kube-nodes"></div>
+      <div class="unplaced-list" id="kube-unplaced"></div>
+    </div>
+    <div class="board">
+      <h2>ksolver batch placement <span class="board-score" id="ksolver-score"></span></h2>
+      <div class="note">Live shadow decision trace. The solver sees the whole pending GPU queue and can reject gangs all at once.</div>
+      <div class="nodes" id="ksolver-nodes"></div>
+      <div class="unplaced-list" id="ksolver-unplaced"></div>
+    </div>
+  </section>
   <table>
     <thead><tr>
       <th>Namespace</th><th>Pod</th><th class="num">GPUs</th>
@@ -73,6 +110,12 @@
   var elUpdated = document.getElementById("updated");
   var elBindings = document.getElementById("bindings");
   var elBindingNote = document.getElementById("bindingnote");
+  var elKubeNodes = document.getElementById("kube-nodes");
+  var elKsolverNodes = document.getElementById("ksolver-nodes");
+  var elKubeUnplaced = document.getElementById("kube-unplaced");
+  var elKsolverUnplaced = document.getElementById("ksolver-unplaced");
+  var elKubeScore = document.getElementById("kube-score");
+  var elKsolverScore = document.getElementById("ksolver-score");
   var inFlight = false;
 
   function kv(k, v) {
@@ -83,8 +126,113 @@
   }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
   function firstToken(s) { return (s || "").split(";")[0].trim(); }
+  function shortName(name) { return (name || "").replace(/^kwok-/, "").replace(/^train-/, ""); }
+  function isBigJob(j) { return Number(j.gpu_request || 0) >= 2 || /^gang-/.test(j.name || ""); }
+  function naturalNodeSort(a, b) {
+    return String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true });
+  }
+  function cloneNodes(cluster) {
+    return ((cluster && cluster.nodes) || [])
+      .filter(function (n) { return Number(n.gpu_capacity || 0) > 0; })
+      .sort(naturalNodeSort)
+      .map(function (n) {
+        var cap = Number(n.gpu_capacity || 0);
+        var base = Math.min(cap, Number(n.running_gpu || 0));
+        return { name: n.name, capacity: cap, used: base, base: base, jobs: [] };
+      });
+  }
+  function placementNode(p) {
+    return p && p.kind === "placed" ? p.node : "";
+  }
+  function planFromKsolver(nodes, decisions) {
+    var byName = {};
+    nodes.forEach(function (n) { byName[n.name] = n; });
+    var unplaced = [];
+    decisions.forEach(function (d) {
+      var nodeName = placementNode(d.placement);
+      var qty = Number(d.gpu_request || 0);
+      if (nodeName && byName[nodeName]) {
+        byName[nodeName].used += qty;
+        byName[nodeName].jobs.push(d);
+      } else {
+        unplaced.push(d);
+      }
+    });
+    return { nodes: nodes, unplaced: unplaced };
+  }
+  function planFromSequentialSpread(nodes, decisions) {
+    var unplaced = [];
+    decisions.slice().sort(function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true });
+    }).forEach(function (d) {
+      var qty = Number(d.gpu_request || 0);
+      var best = null;
+      nodes.forEach(function (n) {
+        var free = n.capacity - n.used;
+        if (free < qty) return;
+        if (!best || free > (best.capacity - best.used) || (free === (best.capacity - best.used) && naturalNodeSort(n, best) < 0)) {
+          best = n;
+        }
+      });
+      if (best) {
+        best.used += qty;
+        best.jobs.push(d);
+      } else {
+        unplaced.push(d);
+      }
+    });
+    return { nodes: nodes, unplaced: unplaced };
+  }
+  function renderNodeBoard(container, unplacedContainer, scoreEl, plan) {
+    clear(container); clear(unplacedContainer);
+    var usedNodes = plan.nodes.filter(function (n) { return n.used > n.base; }).length;
+    var usedGpu = plan.nodes.reduce(function (sum, n) { return sum + Math.max(0, n.used - n.base); }, 0);
+    var totalGpu = plan.nodes.reduce(function (sum, n) { return sum + n.capacity; }, 0);
+    scoreEl.textContent = usedGpu + "/" + totalGpu + " GPUs, " + usedNodes + " active nodes, " + plan.unplaced.length + " unplaced";
+    plan.nodes.forEach(function (n) {
+      var card = document.createElement("div");
+      card.className = "node" + (n.used > n.base ? " hot" : "") + (n.used > n.capacity ? " blocked" : "");
+      var head = document.createElement("div"); head.className = "node-head";
+      var name = document.createElement("span"); name.className = "node-name"; name.textContent = shortName(n.name); name.title = n.name;
+      var gpu = document.createElement("span"); gpu.className = "node-gpu"; gpu.textContent = Math.min(n.used, n.capacity) + "/" + n.capacity;
+      head.appendChild(name); head.appendChild(gpu); card.appendChild(head);
+      var slots = document.createElement("div"); slots.className = "slots";
+      slots.style.gridTemplateColumns = "repeat(" + Math.max(1, Math.min(4, n.capacity)) + ", 1fr)";
+      for (var i = 0; i < n.capacity; i++) {
+        var s = document.createElement("div");
+        s.className = "slot" + (i < n.base ? " base" : (i < n.used ? " used" : " waste"));
+        slots.appendChild(s);
+      }
+      card.appendChild(slots);
+      var jobs = document.createElement("div"); jobs.className = "jobs";
+      n.jobs.forEach(function (j) {
+        var tag = document.createElement("span");
+        tag.className = "job" + (isBigJob(j) ? " big" : "");
+        tag.textContent = shortName(j.name) + " " + j.gpu_request + "g";
+        tag.title = j.namespace + "/" + j.name;
+        jobs.appendChild(tag);
+      });
+      card.appendChild(jobs);
+      container.appendChild(card);
+    });
+    plan.unplaced.forEach(function (j) {
+      var tag = document.createElement("span");
+      tag.className = "job warn";
+      tag.textContent = shortName(j.name) + " " + j.gpu_request + "g";
+      tag.title = j.placement && j.placement.reason ? j.placement.reason : "unplaced";
+      unplacedContainer.appendChild(tag);
+    });
+  }
+  function renderPlacementCompare(trace, cluster) {
+    var decisions = (trace && trace.decisions) || [];
+    var nodesA = cloneNodes(cluster);
+    var nodesB = cloneNodes(cluster);
+    if (!nodesA.length || !decisions.length) return;
+    renderNodeBoard(elKubeNodes, elKubeUnplaced, elKubeScore, planFromSequentialSpread(nodesA, decisions));
+    renderNodeBoard(elKsolverNodes, elKsolverUnplaced, elKsolverScore, planFromKsolver(nodesB, decisions));
+  }
 
-  function render(data) {
+  function render(data, cluster) {
     var traces = (data && data.traces) || [];
     if (!traces.length) {
       clear(elSummary); clear(elDecisions);
@@ -98,6 +246,7 @@
     elSummary.appendChild(kv("solver", firstToken(t.solver_status)));
     elSummary.appendChild(kv("solve core (ms)", t.solve_core_millis));
     elSummary.appendChild(kv("snapshot age (ms)", t.snapshot_age_millis));
+    renderPlacementCompare(t, cluster);
 
     clear(elDecisions);
     (t.decisions || []).forEach(function (d) {
@@ -169,8 +318,14 @@
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (data) {
         elBanner.style.display = "none";
-        render(data);
-        elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
+        return fetch("/api/scheduler/cluster", { cache: "no-store" })
+          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(function (cluster) {
+            render(data, cluster);
+            elUpdated.textContent = "updated " + new Date().toLocaleTimeString();
+          });
+      })
+      .then(function () {
         // Dry-run binding plan (read-only; never applied). Best-effort — failure here must not
         // disrupt the main trace view.
         return fetch("/api/scheduler/binding-plan", { cache: "no-store" })

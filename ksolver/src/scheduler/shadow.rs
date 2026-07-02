@@ -67,6 +67,76 @@ async fn traces_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Va
     Json(serde_json::json!({ "traces": s.traces.recent() }))
 }
 
+async fn cluster_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
+    let Some(cluster) = s.latest_cluster.lock().ok().and_then(|g| g.clone()) else {
+        return Json(serde_json::json!({
+            "ready": false,
+            "nodes": [],
+            "running_gpu": [],
+        }));
+    };
+
+    let mut running_gpu_by_node: std::collections::BTreeMap<String, i64> =
+        std::collections::BTreeMap::new();
+    let mut running_gpu = Vec::new();
+    for w in &cluster.workloads {
+        if w.current_node.is_empty() {
+            continue;
+        }
+        let gpu: i64 = w
+            .extended_resource_requests
+            .iter()
+            .filter(|(name, _)| name.as_str() == "nvidia.com/gpu" || name.starts_with("nvidia.com/mig-"))
+            .map(|(_, qty)| *qty)
+            .sum();
+        if gpu < 1 {
+            continue;
+        }
+        *running_gpu_by_node.entry(w.current_node.clone()).or_default() += gpu;
+        running_gpu.push(serde_json::json!({
+            "namespace": w.namespace,
+            "name": w.name,
+            "node": w.current_node,
+            "gpu_request": gpu,
+        }));
+    }
+
+    let nodes: Vec<_> = cluster
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let gpu_capacity: i64 = n
+                .extended_resources
+                .iter()
+                .filter(|(name, _)| name.as_str() == "nvidia.com/gpu" || name.starts_with("nvidia.com/mig-"))
+                .map(|(_, qty)| *qty)
+                .sum();
+            let gpu_labeled = n
+                .labels
+                .get("eks.amazonaws.com/nodegroup")
+                .map(|v| v == "gpu")
+                .unwrap_or(false);
+            if gpu_capacity < 1 && !gpu_labeled {
+                return None;
+            }
+            Some(serde_json::json!({
+                "name": n.name,
+                "pool": n.pool,
+                "instance_type": n.instance_type,
+                "gpu_capacity": gpu_capacity,
+                "running_gpu": running_gpu_by_node.get(&n.name).copied().unwrap_or(0),
+                "current_pods": n.current_pods,
+            }))
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "ready": true,
+        "nodes": nodes,
+        "running_gpu": running_gpu,
+    }))
+}
+
 async fn metrics_handler() -> (
     axum::http::StatusCode,
     [(&'static str, &'static str); 1],
@@ -119,6 +189,7 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
     };
     let app = Router::new()
         .route("/api/scheduler/traces", get(traces_handler))
+        .route("/api/scheduler/cluster", get(cluster_handler))
         .route("/api/scheduler/binding-plan", get(binding_plan_handler))
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz))
@@ -374,6 +445,7 @@ mod tests {
         // The embedded dashboard must poll the traces API and render the decisions table, plus
         // the read-only dry-run binding-plan view.
         assert!(SHADOW_HTML.contains("/api/scheduler/traces"));
+        assert!(SHADOW_HTML.contains("/api/scheduler/cluster"));
         assert!(SHADOW_HTML.contains("id=\"decisions\""));
         assert!(SHADOW_HTML.contains("/api/scheduler/binding-plan"));
         assert!(SHADOW_HTML.contains("id=\"bindings\""));

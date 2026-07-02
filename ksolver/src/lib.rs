@@ -1,6 +1,7 @@
 pub mod collector;
 pub mod conformance;
 pub mod cpsat_rust;
+pub mod dra;
 pub mod explainability;
 pub mod historical_usage;
 pub mod metrics;

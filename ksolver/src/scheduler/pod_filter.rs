@@ -102,7 +102,15 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
         }
     }
     let gpu = effective_gpu_request(pod, cfg);
-    if gpu < 1 {
+    // DRA pods request GPUs via `spec.resourceClaims` (not container limits); keep them in scope so
+    // shadow schedules them. Their actual per-DeviceClass demand rides the NormalizedWorkload's
+    // extended_resource_requests (injected by the collector's DRA augmentation), so `gpu` may be 0.
+    let uses_dra = spec
+        .resource_claims
+        .as_ref()
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+    if gpu < 1 && !uses_dra {
         return None;
     }
     let gang_key = if cfg.gang_label_key.is_empty() {
@@ -123,7 +131,12 @@ pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> 
             .and_then(|l| l.get(&cfg.gang_colocate_label))
             .map(|v| v == "true")
             .unwrap_or(false);
-    let unmodeled_constraints = unmodeled_constraints(spec);
+    let mut unmodeled_constraints = unmodeled_constraints(spec);
+    if uses_dra {
+        // Disclose that DRA device matching is a scalar approximation (exact per-device assignment
+        // and full CEL selectors are not modeled — see the `dra` module contract).
+        unmodeled_constraints.push("DRA: device demand modeled as scalar approximation".to_string());
+    }
     let all = modeled_anti_affinity_selectors(spec);
     let anti_affinity_host_selectors = all
         .iter()
@@ -385,6 +398,30 @@ mod tests {
         let got = classify(&p, &cfg()).expect("classify");
         assert_eq!(got.uid, "uid-123");
         assert_eq!(got.gpu_request, 4);
+    }
+
+    #[test]
+    fn classifies_dra_pod_without_container_gpu() {
+        // A DRA pod requests GPUs via spec.resourceClaims, not container limits — it must still be
+        // in scope (gpu=0) and carry the scalar-approximation caveat.
+        let mut p = pod("ksolver", None, Some("Pending"), vec![container("m", None, None)], vec![]);
+        p.spec.as_mut().unwrap().resource_claims = Some(vec![corev1::PodResourceClaim {
+            name: "gpu".to_string(),
+            resource_claim_template_name: Some("gpu-template".to_string()),
+            ..Default::default()
+        }]);
+        let got = classify(&p, &cfg()).expect("DRA pod must be classified");
+        assert_eq!(got.gpu_request, 0);
+        assert!(got
+            .unmodeled_constraints
+            .iter()
+            .any(|c| c.contains("DRA")));
+    }
+
+    #[test]
+    fn non_gpu_non_dra_pod_is_skipped() {
+        let p = pod("ksolver", None, Some("Pending"), vec![container("m", None, None)], vec![]);
+        assert!(classify(&p, &cfg()).is_none());
     }
 
     #[test]

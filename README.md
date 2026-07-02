@@ -4,6 +4,31 @@ Kubernetes cluster cost optimizer. Connects to a live cluster (or a saved snapsh
 
 ![KSolver Dashboard](docs/screenshots/dashboard.png)
 
+## Why this exists
+
+The default Kubernetes scheduler is excellent at general-purpose placement: it checks whether a
+pod can run on a node, respects the core scheduling rules, and picks a node quickly. That is the
+right default for most services.
+
+KSolver exists because some workloads need a different optimization objective. GPU and other
+scarce compute fleets are expensive, shape-sensitive, and easy to fragment. A locally reasonable
+placement can still waste capacity: a 1-GPU job can strand an 8-GPU node, a low-priority job can
+block a high-priority training gang, or a workload can request an H100 when a smaller GPU class
+would have been enough.
+
+For those cases, the question is not just "can this pod run?" It is:
+
+- Will this placement leave enough contiguous GPU capacity for the next large job?
+- Is this workload using the right GPU class, memory size, and node topology?
+- Can a lower-urgency job finish by its deadline using fewer or cheaper resources?
+- Which constraints are preventing consolidation, admission, or scale-down?
+- What is the dollar and capacity cost of the current placement rules?
+
+KSolver is built for SRE and platform teams who need that explanation and control. It uses the
+same Kubernetes constraints as input, but evaluates placement globally so teams can reduce
+fragmentation, expose why workloads are pending, quantify waste, and decide when a specialized
+GPU scheduler is worth using instead of the default scheduler.
+
 ## What it does
 
 KSolver answers one question: **how much are you overspending on compute, and what's blocking you from spending less?**
