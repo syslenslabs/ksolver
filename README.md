@@ -162,6 +162,8 @@ Filter phase. For each pending pod and each (non-cordoned) node it gets two verd
 - Pods carrying constructs we intentionally don't model (pod affinity/anti-affinity, `DoNotSchedule` topology spread, priority, `matchFields` node affinity) are bucketed as **expected divergence**; only plain pods must match exactly. `FALSE-POSITIVE` results (we say feasible, the scheduler rejects) are listed first — those are the dangerous ones.
 - Read-only on the real cluster; only the simulator (a sandbox) is scheduled against. With no simulator URL configured, `conform` prints a skip notice and exits 0.
 
+**Live-verified** (2026-07-01) against a self-built arm64 kube-scheduler-simulator (v0.4.0 publishes amd64-only images that crash under emulation on Apple Silicon — build them from source with `docker buildx --platform=linux/arm64`). `conform` ran end-to-end and produced a confusion matrix (agree / false-positive / false-negative) with **zero false-negatives**. Note: the single-node import path can yield spurious false-positives when the imported node isn't marked Ready inside the simulator (its own KWOK re-manages imported node status) — a harness-fidelity caveat, not a Filter-modeling gap.
+
 ## License
 
 MIT
