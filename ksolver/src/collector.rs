@@ -351,12 +351,20 @@ impl KubeCollector {
 
         // Node capacity: synthetic dra.ksolver/<class> = unallocated matching devices.
         let avail = crate::dra::compute_availability(&slices, &classes, &claims);
+        let mut nodes_aug = 0usize;
+        let mut total_capacity = 0i64;
         for node in &mut snapshot.nodes {
+            let mut touched = false;
             for ((n, class), count) in &avail.by_node_class {
                 if n == &node.name && *count > 0 {
                     node.extended_resources
                         .insert(crate::dra::class_resource_key(class), *count);
+                    total_capacity += *count;
+                    touched = true;
                 }
+            }
+            if touched {
+                nodes_aug += 1;
             }
         }
         if avail.overlapping_classes {
@@ -400,10 +408,12 @@ impl KubeCollector {
                 Err(_) => BTreeMap::new(),
             }
         };
+        let mut pods_aug = 0usize;
         for pod in &mut snapshot.pods {
             let Some(refs) = raw_pod_claims.get(&(pod.namespace.clone(), pod.name.clone())) else {
                 continue;
             };
+            let before = pod.extended_resource_requests.len();
             for pod_claim in refs {
                 let demand = if let Some(cn) = pod_claim.resource_claim_name.as_ref() {
                     claim_by_ns_name
@@ -427,7 +437,20 @@ impl KubeCollector {
                     }
                 }
             }
+            if pod.extended_resource_requests.len() > before {
+                pods_aug += 1;
+            }
         }
+        info!(
+            slices = slices.len(),
+            device_classes = classes.len(),
+            claims = claims.len(),
+            nodes_augmented = nodes_aug,
+            total_dra_capacity = total_capacity,
+            pods_with_dra_demand = pods_aug,
+            unevaluable_classes = avail.unevaluable_classes.len(),
+            "DRA F3a augmentation applied"
+        );
     }
 
     pub async fn refresh_usage(&self, snapshot: &mut ClusterSnapshot) -> bool {
