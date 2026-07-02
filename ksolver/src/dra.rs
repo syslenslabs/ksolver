@@ -322,11 +322,17 @@ pub struct ClaimDemand {
 /// 1); `All`/unknown ⇒ caveat + not counted. Request selectors / device constraints ⇒ caveat
 /// (placement is optimistic — the scalar model ignores which specific devices are eligible).
 pub fn claim_demand(claim: &dra::ResourceClaim) -> ClaimDemand {
+    match claim.spec.devices.as_ref() {
+        Some(devices) => demand_from_device_claim(devices),
+        None => ClaimDemand::default(),
+    }
+}
+
+/// Same as [`claim_demand`] but over a `DeviceClaim` directly — so a pending pod's
+/// `ResourceClaimTemplate` (whose embedded `spec.devices` has no materialized claim yet) can be
+/// scored identically to a live `ResourceClaim`.
+pub fn demand_from_device_claim(devices: &dra::DeviceClaim) -> ClaimDemand {
     let mut out = ClaimDemand::default();
-    let spec = &claim.spec;
-    let Some(devices) = spec.devices.as_ref() else {
-        return out;
-    };
     if devices
         .constraints
         .as_ref()
