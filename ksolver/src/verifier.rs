@@ -213,8 +213,19 @@ pub(crate) struct SimulatorImportPayload {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SimulatorExportPayload {
-    #[serde(default)]
+    // The simulator returns `null` (not `[]`) for an empty list, and `#[serde(default)]` only
+    // covers an ABSENT key — so null must be mapped to the default explicitly.
+    #[serde(default, deserialize_with = "null_to_default")]
     pub(crate) pods: Vec<corev1::Pod>,
+}
+
+/// Deserialize helper: treat JSON `null` (and an absent field) as the type's default.
+fn null_to_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn normalize_backend_name(value: &str) -> &str {
@@ -629,6 +640,18 @@ mod tests {
     };
     use k8s_openapi::api::core::v1 as corev1;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn export_payload_tolerates_null_pods() {
+        // The live simulator (v0.4.0) returns `"pods": null` for an empty result; the decoder must
+        // treat that as an empty list (regression for "invalid type: null, expected a sequence").
+        let p: super::SimulatorExportPayload =
+            serde_json::from_str(r#"{"pods":null}"#).expect("null pods decodes");
+        assert!(p.pods.is_empty());
+        let p2: super::SimulatorExportPayload =
+            serde_json::from_str(r#"{}"#).expect("absent pods decodes");
+        assert!(p2.pods.is_empty());
+    }
 
     #[test]
     fn verifies_move_against_normalized_feasible_set() {
