@@ -1690,6 +1690,43 @@ fn split_quantity(value: &str) -> (&str, &str) {
         .unwrap_or(value.len());
     value.split_at(idx)
 }
+// @lineage
+// reads: autoscaling.k8s.io/v1{,v1beta2}/verticalpodautoscalers
+fn vpa_api(client: Client, version: &str) -> Api<DynamicObject> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "autoscaling.k8s.io",
+        version,
+        "VerticalPodAutoscaler",
+    ));
+    Api::all_with(client, &ar)
+}
+
+// @lineage
+// reads: autoscaling.k8s.io/v1{,v1beta2}/verticalpodautoscalers
+async fn list_vertical_pod_autoscalers(
+    client: &Client,
+    list_params: &ListParams,
+) -> Result<ObjectList<DynamicObject>> {
+    let versions = ["v1", "v1beta2"];
+    let mut last_error = None;
+    for version in versions {
+        let result = run_list_with_retry("vertical pod autoscalers", || async {
+            debug!(version, "listing vertical pod autoscalers");
+            vpa_api(client.clone(), version)
+                .list(list_params)
+                .await
+                .with_context(|| format!("list vertical pod autoscalers ({version})"))
+        })
+        .await;
+        match result {
+            Ok(items) => return Ok(items),
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("list vertical pod autoscalers failed")))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1776,41 +1813,4 @@ mod tests {
         );
         assert_eq!(parse_vpa_safety_margin_arg("--not-this=1"), None);
     }
-}
-// @lineage
-// reads: autoscaling.k8s.io/v1{,v1beta2}/verticalpodautoscalers
-fn vpa_api(client: Client, version: &str) -> Api<DynamicObject> {
-    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
-        "autoscaling.k8s.io",
-        version,
-        "VerticalPodAutoscaler",
-    ));
-    Api::all_with(client, &ar)
-}
-
-// @lineage
-// reads: autoscaling.k8s.io/v1{,v1beta2}/verticalpodautoscalers
-async fn list_vertical_pod_autoscalers(
-    client: &Client,
-    list_params: &ListParams,
-) -> Result<ObjectList<DynamicObject>> {
-    let versions = ["v1", "v1beta2"];
-    let mut last_error = None;
-    for version in versions {
-        let result = run_list_with_retry("vertical pod autoscalers", || async {
-            debug!(version, "listing vertical pod autoscalers");
-            vpa_api(client.clone(), version)
-                .list(list_params)
-                .await
-                .with_context(|| format!("list vertical pod autoscalers ({version})"))
-        })
-        .await;
-        match result {
-            Ok(items) => return Ok(items),
-            Err(err) => {
-                last_error = Some(err);
-            }
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("list vertical pod autoscalers failed")))
 }

@@ -1867,7 +1867,7 @@ mod tests {
             ..Default::default()
         };
 
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, Some(&plan));
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, Some(&plan));
 
         assert_eq!(report.inflation_drivers.len(), 3);
         assert!(report
@@ -1939,7 +1939,7 @@ mod tests {
             ..Default::default()
         };
 
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, Some(&plan));
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, Some(&plan));
 
         assert!((report.memory_risk.current.max_pressure_percent - 60.0).abs() < 0.001);
         assert_eq!(report.memory_risk.current.risk, "low");
@@ -2002,7 +2002,7 @@ mod tests {
             active_nodes: vec!["node-a".to_string(), "node-b".to_string()],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(
+        let report = ExplainabilityBuilder.build(
             &ClusterSnapshot::default(),
             &normalized,
             Some(&plan),
@@ -2058,7 +2058,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, None);
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, None);
         assert_eq!(report.pdb_impacts.len(), 1);
         assert_eq!(report.pdb_impacts[0].matched_pods, 3);
         assert_eq!(report.pdb_impacts[0].disruption_budget, 1);
@@ -2107,7 +2107,7 @@ mod tests {
             ..Default::default()
         };
         let report =
-            ExplainabilityBuilder::default().build(&ClusterSnapshot::default(), &normalized, None);
+            ExplainabilityBuilder.build(&ClusterSnapshot::default(), &normalized, None);
         assert!(!report.workload_cost_table.is_empty());
         let row = &report.workload_cost_table[0];
         assert_eq!(row.current_memory_bytes, 1024 * 1024 * 1024);
@@ -2138,7 +2138,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(
+        let report = ExplainabilityBuilder.build(
             &ClusterSnapshot::default(),
             &normalized,
             Some(&plan),
@@ -2199,7 +2199,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, None);
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, None);
         assert_eq!(report.vpa_overview.total_workloads, 3);
         assert_eq!(report.vpa_overview.workloads_with_vpa, 2);
         assert_eq!(report.vpa_overview.update_mode_counts.get("Auto"), Some(&1));
@@ -2240,7 +2240,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, None);
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, None);
         assert_eq!(report.vpa_update_mode_impacts.len(), 1);
         assert_eq!(report.vpa_update_mode_impacts[0].update_mode, "Off");
         assert!(report.vpa_update_mode_impacts[0]
@@ -2278,7 +2278,7 @@ mod tests {
             ..Default::default()
         };
         let report =
-            ExplainabilityBuilder::default().build(&snapshot, &NormalizedCluster::default(), None);
+            ExplainabilityBuilder.build(&snapshot, &NormalizedCluster::default(), None);
         assert_eq!(report.vpa_policy_gaps.len(), 1);
         assert_eq!(report.vpa_policy_gaps[0].bound_type, "max");
         assert!(report.vpa_policy_gaps[0].summary.contains("capped"));
@@ -2325,7 +2325,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder::default().build(&snapshot, &normalized, None);
+        let report = ExplainabilityBuilder.build(&snapshot, &normalized, None);
         assert_eq!(report.missing_vpa_opportunities.overprovisioned_count, 1);
         assert!(report.missing_vpa_opportunities.total_waste.monthly > 0.0);
     }

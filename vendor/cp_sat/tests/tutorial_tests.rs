@@ -23,9 +23,9 @@ fn presentation_problem() {
     println!("z = {}", z_val);
 
     assert!(x_val != y_val);
-    assert!(0 <= x_val && x_val <= 2);
-    assert!(0 <= y_val && y_val <= 2);
-    assert!(0 <= z_val && z_val <= 2);
+    assert!((0..=2).contains(&x_val));
+    assert!((0..=2).contains(&y_val));
+    assert!((0..=2).contains(&z_val));
 }
 
 #[test]

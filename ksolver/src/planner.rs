@@ -623,7 +623,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = Planner::default().build_plan(
+        let plan = Planner.build_plan(
             &cluster,
             &input,
             &solution,
