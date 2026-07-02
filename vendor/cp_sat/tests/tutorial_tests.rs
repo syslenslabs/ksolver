@@ -68,8 +68,10 @@ fn solve_with_time_limit_sample_sat() {
 
     model.add_ne(x, y);
 
-    let mut params = SatParameters::default();
-    params.max_time_in_seconds = Some(10.);
+    let params = SatParameters {
+        max_time_in_seconds: Some(10.),
+        ..SatParameters::default()
+    };
 
     let response = model.solve_with_parameters(&params);
     println!("{:?}", response);
