@@ -2,3 +2,10 @@ target/
 .claude/
 __pycache__/
 *.pyc
+
+# Local review/demo scratch (screenshots captured during UI iteration)
+/*.png
+# MCP browser-automation scratch
+/.playwright-mcp/
+# Generated whitepaper PDF (source lives in docs/*.md + docs/*.tex)
+docs/*.pdf
