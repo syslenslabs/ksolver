@@ -1,0 +1,35 @@
+apiVersion: kubeflow.org/v1
+kind: TFJob
+metadata:
+  name: vram-demo-kubeflow-tfjob
+  annotations:
+    ksolver.ai/vram-family: cnn
+    ksolver.ai/vram-precision: fp32
+    ksolver.ai/vram-batch-size: "24"
+    ksolver.ai/vram-image-size: "256"
+    ksolver.ai/vram-hidden-size: "128"
+    ksolver.ai/vram-layers: "8"
+    ksolver.ai/vram-param-count: "33688"
+    ksolver.ai/vram-optimizer: sgd
+spec:
+  tfReplicaSpecs:
+    Chief:
+      replicas: 1
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: tensorflow
+              image: tensorflow/tensorflow:latest-gpu
+              command: ["python", "train.py"]
+              args: ["--batch_size=24", "--image_size=256"]
+    Worker:
+      replicas: 1
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: tensorflow
+              image: tensorflow/tensorflow:latest-gpu
+              command: ["python", "train.py"]
+              args: ["--batch_size=24", "--image_size=256"]

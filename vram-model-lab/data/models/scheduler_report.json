@@ -1,0 +1,384 @@
+{
+  "csv_export_stdout": "wrote vram-model-lab/data/training_rows.csv with 228 rows",
+  "evaluation": {
+    "fallback_family_models": {},
+    "global": {
+      "alpha": 25.0,
+      "feature_mode": "interactions",
+      "fit": "ridge_linear_interactions",
+      "in_sample_mae_mib": 956.5303954046154,
+      "loo_mae_mib": 1015.5839231774986,
+      "loo_max_abs_error_mib": 7212.2092358979535,
+      "loo_p95_abs_error_mib": 2627.810435173519,
+      "name": "global",
+      "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+      "training_rows": 228,
+      "usable_for_prediction": true
+    },
+    "model": "data/models/peak_vram_linear.json",
+    "ready_for_scheduler_demo": true,
+    "schema_version": 1,
+    "selection": "use family model when available, otherwise global",
+    "usable_family_models": {
+      "cnn": {
+        "alpha": 25.0,
+        "feature_mode": "base",
+        "fit": "ridge_linear_base",
+        "in_sample_mae_mib": 421.06935436034286,
+        "loo_mae_mib": 453.67169648752355,
+        "loo_max_abs_error_mib": 2506.362566426883,
+        "loo_p95_abs_error_mib": 1354.4124138200468,
+        "name": "family:cnn",
+        "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+        "training_rows": 75,
+        "usable_for_prediction": true
+      },
+      "mlp": {
+        "alpha": 10.0,
+        "feature_mode": "interactions",
+        "fit": "ridge_linear_interactions",
+        "in_sample_mae_mib": 647.7921951217521,
+        "loo_mae_mib": 826.8883133270703,
+        "loo_max_abs_error_mib": 3670.8689837708043,
+        "loo_p95_abs_error_mib": 3317.635710965188,
+        "name": "family:mlp",
+        "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+        "training_rows": 42,
+        "usable_for_prediction": true
+      },
+      "transformer": {
+        "alpha": 10.0,
+        "feature_mode": "interactions",
+        "fit": "ridge_linear_interactions",
+        "in_sample_mae_mib": 621.3268934607422,
+        "loo_mae_mib": 679.9787444206416,
+        "loo_max_abs_error_mib": 3050.2938027591517,
+        "loo_p95_abs_error_mib": 1816.8017162242922,
+        "name": "family:transformer",
+        "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+        "training_rows": 111,
+        "usable_for_prediction": true
+      }
+    }
+  },
+  "evidence_gate_verifier_ok": true,
+  "evidence_gate_verifier_stdout": "verified-hf-trainer-fingerprint-smoke: verified_real_framework=true customer_workload_fingerprint=true\nverified-vision-framework-smoke: verified_real_framework=true customer_workload_fingerprint=false\nverified 2 evidence-gate scenario manifest(s)",
+  "finished_at_unix": 1783310858,
+  "fit_stdout": "wrote vram-model-lab/data/models/peak_vram_linear.json\nrows=228 global_in_sample_mae=956.5 MiB global_loo_mae=1015.6 MiB family_models=cnn,mlp,transformer",
+  "kube": {
+    "context": "default",
+    "leftover_probe_resources": 0,
+    "node_count": 1,
+    "nodes": [
+      {
+        "allocatable": {
+          "cpu": "4",
+          "ephemeral-storage": "1027046117185",
+          "hugepages-1Gi": "0",
+          "hugepages-2Mi": "0",
+          "memory": "8133224Ki",
+          "pods": "110"
+        },
+        "capacity": {
+          "cpu": "4",
+          "ephemeral-storage": "1055762868Ki",
+          "hugepages-1Gi": "0",
+          "hugepages-2Mi": "0",
+          "memory": "8133224Ki",
+          "pods": "110"
+        },
+        "name": "andres-desktop",
+        "ready": true,
+        "runtime": "containerd://2.3.2-k3s2"
+      }
+    ]
+  },
+  "kube_before": {
+    "context": "default",
+    "leftover_probe_resources": 0,
+    "node_count": 1,
+    "nodes": [
+      {
+        "allocatable": {
+          "cpu": "4",
+          "ephemeral-storage": "1027046117185",
+          "hugepages-1Gi": "0",
+          "hugepages-2Mi": "0",
+          "memory": "8133224Ki",
+          "pods": "110"
+        },
+        "capacity": {
+          "cpu": "4",
+          "ephemeral-storage": "1055762868Ki",
+          "hugepages-1Gi": "0",
+          "hugepages-2Mi": "0",
+          "memory": "8133224Ki",
+          "pods": "110"
+        },
+        "name": "andres-desktop",
+        "ready": true,
+        "runtime": "containerd://2.3.2-k3s2"
+      }
+    ]
+  },
+  "manifest": "vram-model-lab/examples/annotated-training-manifests.yaml",
+  "manifest_predictions": [
+    {
+      "fingerprint": {
+        "api_version": "batch/v1",
+        "args": [
+          "train.py",
+          "--batch-size",
+          "6",
+          "--seq-len",
+          "1536"
+        ],
+        "command": [
+          "torchrun"
+        ],
+        "command_hash": "4eed8dc0b3d85a9dd734773f8a09e88fdc4cff59de620faa56bb2916f4d17afa",
+        "container_name": "trainer",
+        "document_index": 0,
+        "env": {},
+        "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
+        "kind": "Job",
+        "manifest_hash": "4b961a69c7581d1f00a246f409e21ca1e406592091d7b796d4ce121836f4a42f",
+        "name": "annotated-transformer-job",
+        "namespace": null,
+        "pod_template_hash": "c31c7b6ad74c2d03e124e44681a621d35a534ac0d8f0074c74b04b8cbe09a006",
+        "runtime_class_name": "nvidia",
+        "scheduler_name": null,
+        "source": "vram-model-lab/examples/annotated-training-manifests.yaml",
+        "template_index": 0
+      },
+      "hints": {
+        "batch_size": "6",
+        "family": "transformer",
+        "heads": "16",
+        "hidden_size": "1024",
+        "layers": "8",
+        "optimizer": "adamw",
+        "param_count": "166337792",
+        "precision": "fp16",
+        "seq_len": "1536"
+      },
+      "missing_hints": [],
+      "prediction": {
+        "conservative_estimate_mib": 8492.4,
+        "decision": "fits",
+        "gpu_total_mib": 24563,
+        "input": {
+          "activation_checkpointing": false,
+          "batch_size": 6,
+          "family": "transformer",
+          "heads": 16,
+          "hidden_size": 1024,
+          "image_size": null,
+          "layers": 8,
+          "optimizer": "adamw",
+          "param_count": 166337792,
+          "precision": "fp16",
+          "reserve_extra_mib": 0,
+          "seq_len": 1536
+        },
+        "point_estimate_mib": 6675.6,
+        "safety_margin_mib": 1816.8,
+        "selected_model": "family:transformer",
+        "selected_model_rows": 111
+      },
+      "status": "predicted"
+    },
+    {
+      "fingerprint": {
+        "api_version": "batch/v1",
+        "args": [
+          "--batch-size=16",
+          "--image-size=384",
+          "--precision=fp16",
+          "--optimizer=adamw"
+        ],
+        "command": [
+          "python",
+          "train.py"
+        ],
+        "command_hash": "5e2e9e5000cccabb8787e0d85823502d5585e66e170f99c7dc1bd81978d51b3b",
+        "container_name": "trainer",
+        "document_index": 1,
+        "env": {},
+        "image": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
+        "kind": "Job",
+        "manifest_hash": "69d36fed5940f01e69711856931891526da7bfd362a9149df8b0fcfb2072b5ed",
+        "name": "annotated-cnn-job",
+        "namespace": null,
+        "pod_template_hash": "6424a28c9e7efb25a42d210e36e227e20ca7ffb9e6e12a4a9afd7e8a889c0c8c",
+        "runtime_class_name": "nvidia",
+        "scheduler_name": null,
+        "source": "vram-model-lab/examples/annotated-training-manifests.yaml",
+        "template_index": 0
+      },
+      "hints": {
+        "batch_size": "16",
+        "family": "cnn",
+        "hidden_size": "192",
+        "image_size": "384",
+        "layers": "12",
+        "optimizer": "adamw",
+        "param_count": "82960",
+        "precision": "fp16"
+      },
+      "missing_hints": [],
+      "prediction": {
+        "conservative_estimate_mib": 5145.9,
+        "decision": "fits",
+        "gpu_total_mib": 24563,
+        "input": {
+          "activation_checkpointing": false,
+          "batch_size": 16,
+          "family": "cnn",
+          "heads": null,
+          "hidden_size": 192,
+          "image_size": 384,
+          "layers": 12,
+          "optimizer": "adamw",
+          "param_count": 82960,
+          "precision": "fp16",
+          "reserve_extra_mib": 0,
+          "seq_len": null
+        },
+        "point_estimate_mib": 3791.4,
+        "safety_margin_mib": 1354.4,
+        "selected_model": "family:cnn",
+        "selected_model_rows": 75
+      },
+      "status": "predicted"
+    },
+    {
+      "fingerprint": {
+        "api_version": "kubeflow.org/v1",
+        "args": [
+          "--batch-size",
+          "128",
+          "--seq-len",
+          "1024"
+        ],
+        "command": [
+          "python",
+          "train.py"
+        ],
+        "command_hash": "3884177aa0b4c54b44d214d29b55b6cc43473fda9e710b3a96ad8b7158790e13",
+        "container_name": "pytorch",
+        "document_index": 2,
+        "env": {},
+        "image": "ghcr.io/example/mlp-trainer:latest",
+        "kind": "PyTorchJob",
+        "manifest_hash": "adbe0f63d531508b2d0087e2238e08fc6ea13c1e7fc014c7be8c1cd6d756e561",
+        "name": "annotated-mlp-pytorchjob",
+        "namespace": null,
+        "pod_template_hash": "dbf7cd58d5e8cedbf16468d2d083df64190d11d102661bc506d096465d837eea",
+        "runtime_class_name": "nvidia",
+        "scheduler_name": null,
+        "source": "vram-model-lab/examples/annotated-training-manifests.yaml",
+        "template_index": 0
+      },
+      "hints": {
+        "batch_size": "128",
+        "family": "mlp",
+        "hidden_size": "1024",
+        "layers": "4",
+        "param_count": "262912",
+        "precision": "fp16",
+        "reserve_extra_mib": "8192",
+        "seq_len": "1024"
+      },
+      "missing_hints": [],
+      "prediction": {
+        "conservative_estimate_mib": 12386.3,
+        "decision": "fits",
+        "gpu_total_mib": 24563,
+        "input": {
+          "activation_checkpointing": false,
+          "batch_size": 128,
+          "family": "mlp",
+          "heads": null,
+          "hidden_size": 1024,
+          "image_size": null,
+          "layers": 4,
+          "optimizer": "adamw",
+          "param_count": 262912,
+          "precision": "fp16",
+          "reserve_extra_mib": 8192,
+          "seq_len": 1024
+        },
+        "point_estimate_mib": 9068.6,
+        "safety_margin_mib": 3317.6,
+        "selected_model": "family:mlp",
+        "selected_model_rows": 42
+      },
+      "status": "predicted"
+    }
+  ],
+  "oom_classifier": {
+    "coefficients": [
+      -0.7157316229215775,
+      0.6729507810296094,
+      -0.1233160614760723,
+      -0.5823469497829232,
+      -0.5326576095391923,
+      -0.22079942405200362,
+      -0.9264978393919756,
+      1.6943777660404518,
+      -0.7798129488809501,
+      -0.1890008328167905,
+      0.08118017614306053,
+      -0.22160609818230773
+    ],
+    "feature_scale": [
+      1.0,
+      117.67504577862276,
+      2079.3644996304038,
+      72.76626475183502,
+      2.3754120343690963,
+      0.6276287226386881,
+      0.9794361478646397,
+      5.891008898465298,
+      0.4107614786044632,
+      0.3068922049918578,
+      0.4998268398216475,
+      0.46983081766729334
+    ],
+    "features": [
+      "intercept",
+      "param_count_m",
+      "activation_units_m",
+      "batch_size",
+      "layers",
+      "hidden_size_k",
+      "precision_bytes",
+      "reserve_extra_gib",
+      "adamw",
+      "checkpointed",
+      "family_transformer",
+      "family_cnn"
+    ],
+    "fit": "logistic_regression_base_features",
+    "metrics": {
+      "accuracy": 0.9868421052631579,
+      "fn": 1,
+      "fp": 2,
+      "negative_rows": 217,
+      "positive_rows": 11,
+      "precision": 0.8333333333333334,
+      "recall": 0.9090909090909091,
+      "tn": 215,
+      "tp": 10
+    },
+    "schema_version": 1,
+    "target": "oom_or_peak_vram_fraction_ge_0.90",
+    "training_rows": 228
+  },
+  "probe_commands": [],
+  "ready_for_scheduler_demo": true,
+  "schema_version": 1,
+  "started_at_unix": 1783310857,
+  "timeseries_export_stdout": "wrote vram-model-lab/data/memory_timeseries.csv with 4615 samples from 228 runs"
+}

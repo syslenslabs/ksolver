@@ -1,0 +1,36 @@
+apiVersion: kubeflow.org/v2beta1
+kind: MPIJob
+metadata:
+  name: vram-demo-mpijob
+  annotations:
+    ksolver.ai/vram-family: transformer
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-batch-size: "2"
+    ksolver.ai/vram-seq-len: "1024"
+    ksolver.ai/vram-hidden-size: "1024"
+    ksolver.ai/vram-layers: "8"
+    ksolver.ai/vram-heads: "16"
+    ksolver.ai/vram-param-count: "166337792"
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  slotsPerWorker: 1
+  runPolicy:
+    cleanPodPolicy: Running
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: launcher
+              image: ghcr.io/example/mpi-launcher:latest
+              command: ["mpirun"]
+              args: ["-np", "2", "python", "train.py", "--batch-size", "2", "--seq-len", "1024"]
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: worker
+              image: ghcr.io/example/mpi-worker:latest

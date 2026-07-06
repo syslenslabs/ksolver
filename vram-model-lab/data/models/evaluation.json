@@ -1,0 +1,581 @@
+{
+  "fallback_family_models": {},
+  "global": {
+    "alpha": 25.0,
+    "feature_mode": "interactions",
+    "fit": "ridge_linear_interactions",
+    "in_sample_mae_mib": 956.5303954046154,
+    "loo_mae_mib": 1015.5839231774986,
+    "loo_max_abs_error_mib": 7212.2092358979535,
+    "loo_p95_abs_error_mib": 2627.810435173519,
+    "name": "global",
+    "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+    "top_driver_labels": [
+      "synthetic VRAM headroom probe allocation",
+      "parameter count multiplied by precision bytes",
+      "batch * sequence/image shape * hidden/layers activation footprint",
+      "parameter count in millions",
+      "model depth"
+    ],
+    "top_feature_impacts": [
+      {
+        "abs_impact_mib_per_std": 4988.849808211625,
+        "coefficient_mib_per_unit": 846.8583046125257,
+        "description": "synthetic VRAM headroom probe allocation",
+        "direction": "positive_model_weight",
+        "feature": "reserve_extra_gib",
+        "feature_mean": 2.307017543859649,
+        "feature_std": 5.891008898465298,
+        "group": "synthetic headroom",
+        "impact_mib_per_std": 4988.849808211625
+      },
+      {
+        "abs_impact_mib_per_std": 2328.3950180319234,
+        "coefficient_mib_per_unit": 8.788125328639559,
+        "description": "parameter count multiplied by precision bytes",
+        "direction": "positive_model_weight",
+        "feature": "param_x_precision",
+        "feature_mean": 232.5041344561402,
+        "feature_std": 264.94786213891757,
+        "group": "parameters",
+        "impact_mib_per_std": 2328.3950180319234
+      },
+      {
+        "abs_impact_mib_per_std": 1015.453589047746,
+        "coefficient_mib_per_unit": -0.48834804538994375,
+        "description": "batch * sequence/image shape * hidden/layers activation footprint",
+        "direction": "negative_model_weight",
+        "feature": "activation_units_m",
+        "feature_mean": 524.4979738947367,
+        "feature_std": 2079.3644996304038,
+        "group": "activations",
+        "impact_mib_per_std": -1015.453589047746
+      },
+      {
+        "abs_impact_mib_per_std": 747.5352379658383,
+        "coefficient_mib_per_unit": -6.352538322969049,
+        "description": "parameter count in millions",
+        "direction": "negative_model_weight",
+        "feature": "param_count_m",
+        "feature_mean": 93.39850985964908,
+        "feature_std": 117.67504577862276,
+        "group": "parameters",
+        "impact_mib_per_std": -747.5352379658383
+      },
+      {
+        "abs_impact_mib_per_std": 625.7564582238658,
+        "coefficient_mib_per_unit": 263.43070135622395,
+        "description": "model depth",
+        "direction": "positive_model_weight",
+        "feature": "layers",
+        "feature_mean": 8.359649122807017,
+        "feature_std": 2.3754120343690963,
+        "group": "architecture",
+        "impact_mib_per_std": 625.7564582238658
+      },
+      {
+        "abs_impact_mib_per_std": 567.9391123748034,
+        "coefficient_mib_per_unit": 7.804978231488528,
+        "description": "training batch size",
+        "direction": "positive_model_weight",
+        "feature": "batch_size",
+        "feature_mean": 35.57017543859649,
+        "feature_std": 72.76626475183502,
+        "group": "input shape",
+        "impact_mib_per_std": 567.9391123748034
+      },
+      {
+        "abs_impact_mib_per_std": 556.3229531512192,
+        "coefficient_mib_per_unit": 0.000553143285927414,
+        "description": "activation footprint multiplied by batch size",
+        "direction": "positive_model_weight",
+        "feature": "activation_x_batch",
+        "feature_mean": 149299.11146891254,
+        "feature_std": 1005748.3608762856,
+        "group": "activations",
+        "impact_mib_per_std": 556.3229531512192
+      },
+      {
+        "abs_impact_mib_per_std": 174.53593156714493,
+        "coefficient_mib_per_unit": -0.037430740447497564,
+        "description": "activation footprint multiplied by precision bytes",
+        "direction": "negative_model_weight",
+        "feature": "activation_x_precision",
+        "feature_mean": 1375.9383803508772,
+        "feature_std": 4662.903524763522,
+        "group": "activations",
+        "impact_mib_per_std": -174.53593156714493
+      }
+    ],
+    "top_group_impacts": [
+      {
+        "abs_impact_mib_per_std_sum": 5023.077765365425,
+        "group": "synthetic headroom"
+      },
+      {
+        "abs_impact_mib_per_std_sum": 3075.930255997762,
+        "group": "parameters"
+      },
+      {
+        "abs_impact_mib_per_std_sum": 1746.31247376611,
+        "group": "activations"
+      },
+      {
+        "abs_impact_mib_per_std_sum": 693.9653079721842,
+        "group": "architecture"
+      },
+      {
+        "abs_impact_mib_per_std_sum": 567.9391123748034,
+        "group": "input shape"
+      },
+      {
+        "abs_impact_mib_per_std_sum": 97.26264522836382,
+        "group": "model family"
+      }
+    ],
+    "top_organic_driver_labels": [
+      "parameter count multiplied by precision bytes",
+      "batch * sequence/image shape * hidden/layers activation footprint",
+      "parameter count in millions",
+      "model depth",
+      "training batch size"
+    ],
+    "training_rows": 228,
+    "usable_for_prediction": true
+  },
+  "model": "data/models/peak_vram_linear.json",
+  "ready_for_scheduler_demo": true,
+  "schema_version": 1,
+  "selection": "use family model when available, otherwise global",
+  "usable_family_models": {
+    "cnn": {
+      "alpha": 25.0,
+      "feature_mode": "base",
+      "fit": "ridge_linear_base",
+      "in_sample_mae_mib": 421.06935436034286,
+      "loo_mae_mib": 453.67169648752355,
+      "loo_max_abs_error_mib": 2506.362566426883,
+      "loo_p95_abs_error_mib": 1354.4124138200468,
+      "name": "family:cnn",
+      "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+      "top_driver_labels": [
+        "synthetic VRAM headroom probe allocation",
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "bytes per tensor element from fp32/fp16/bf16/int8",
+        "model depth",
+        "AdamW optimizer state indicator"
+      ],
+      "top_feature_impacts": [
+        {
+          "abs_impact_mib_per_std": 2572.0046673345446,
+          "coefficient_mib_per_unit": 889.6315510427203,
+          "description": "synthetic VRAM headroom probe allocation",
+          "direction": "positive_model_weight",
+          "feature": "reserve_extra_gib",
+          "feature_mean": 0.96,
+          "feature_std": 2.8910897599348253,
+          "group": "synthetic headroom",
+          "impact_mib_per_std": 2572.0046673345446
+        },
+        {
+          "abs_impact_mib_per_std": 642.4318301552291,
+          "coefficient_mib_per_unit": 114.54349072724024,
+          "description": "batch * sequence/image shape * hidden/layers activation footprint",
+          "direction": "positive_model_weight",
+          "feature": "activation_units_m",
+          "feature_mean": 17.457479679999977,
+          "feature_std": 5.608628007374397,
+          "group": "activations",
+          "impact_mib_per_std": 642.4318301552291
+        },
+        {
+          "abs_impact_mib_per_std": 146.84368782309,
+          "coefficient_mib_per_unit": 147.91251971252507,
+          "description": "bytes per tensor element from fp32/fp16/bf16/int8",
+          "direction": "positive_model_weight",
+          "feature": "precision_bytes",
+          "feature_mean": 2.88,
+          "feature_std": 0.9927738916792683,
+          "group": "precision",
+          "impact_mib_per_std": 146.84368782309
+        },
+        {
+          "abs_impact_mib_per_std": 98.50816949287463,
+          "coefficient_mib_per_unit": 51.900426166997995,
+          "description": "model depth",
+          "direction": "positive_model_weight",
+          "feature": "layers",
+          "feature_mean": 10.586666666666666,
+          "feature_std": 1.8980223625892532,
+          "group": "architecture",
+          "impact_mib_per_std": 98.50816949287463
+        },
+        {
+          "abs_impact_mib_per_std": 36.71092195577729,
+          "coefficient_mib_per_unit": -73.95625985627218,
+          "description": "AdamW optimizer state indicator",
+          "direction": "negative_model_weight",
+          "feature": "adamw",
+          "feature_mean": 0.56,
+          "feature_std": 0.49638694583963416,
+          "group": "optimizer",
+          "impact_mib_per_std": -36.71092195577729
+        },
+        {
+          "abs_impact_mib_per_std": 3.3880398718661775,
+          "coefficient_mib_per_unit": 0.1808287875704985,
+          "description": "training batch size",
+          "direction": "positive_model_weight",
+          "feature": "batch_size",
+          "feature_mean": 27.68,
+          "feature_std": 18.73617534788428,
+          "group": "input shape",
+          "impact_mib_per_std": 3.3880398718661775
+        },
+        {
+          "abs_impact_mib_per_std": 0.6218856069968546,
+          "coefficient_mib_per_unit": 16.320340595826487,
+          "description": "hidden size in thousands",
+          "direction": "positive_model_weight",
+          "feature": "hidden_size_k",
+          "feature_mean": 0.16298666666666678,
+          "feature_std": 0.03810494047874749,
+          "group": "architecture",
+          "impact_mib_per_std": 0.6218856069968546
+        },
+        {
+          "abs_impact_mib_per_std": 0.050744156658484744,
+          "coefficient_mib_per_unit": -1.4473615792577685,
+          "description": "parameter count in millions",
+          "direction": "negative_model_weight",
+          "feature": "param_count_m",
+          "feature_mean": 0.07303797333333331,
+          "feature_std": 0.03505976487541365,
+          "group": "parameters",
+          "impact_mib_per_std": -0.050744156658484744
+        }
+      ],
+      "top_group_impacts": [
+        {
+          "abs_impact_mib_per_std_sum": 2572.0046673345446,
+          "group": "synthetic headroom"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 642.4318301552291,
+          "group": "activations"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 146.84368782309,
+          "group": "precision"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 99.13005509987148,
+          "group": "architecture"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 36.71092195577729,
+          "group": "optimizer"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 3.3880398718661775,
+          "group": "input shape"
+        }
+      ],
+      "top_organic_driver_labels": [
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "bytes per tensor element from fp32/fp16/bf16/int8",
+        "model depth",
+        "AdamW optimizer state indicator",
+        "training batch size"
+      ],
+      "training_rows": 75,
+      "usable_for_prediction": true
+    },
+    "mlp": {
+      "alpha": 10.0,
+      "feature_mode": "interactions",
+      "fit": "ridge_linear_interactions",
+      "in_sample_mae_mib": 647.7921951217521,
+      "loo_mae_mib": 826.8883133270703,
+      "loo_max_abs_error_mib": 3670.8689837708043,
+      "loo_p95_abs_error_mib": 3317.635710965188,
+      "name": "family:mlp",
+      "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+      "top_driver_labels": [
+        "synthetic VRAM headroom probe allocation",
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "parameter count in millions",
+        "activation footprint multiplied by batch size",
+        "activation footprint multiplied by precision bytes"
+      ],
+      "top_feature_impacts": [
+        {
+          "abs_impact_mib_per_std": 5791.056262175554,
+          "coefficient_mib_per_unit": 740.6570057019673,
+          "description": "synthetic VRAM headroom probe allocation",
+          "direction": "positive_model_weight",
+          "feature": "reserve_extra_gib",
+          "feature_mean": 3.238095238095238,
+          "feature_std": 7.818809810199535,
+          "group": "synthetic headroom",
+          "impact_mib_per_std": 5791.056262175554
+        },
+        {
+          "abs_impact_mib_per_std": 4522.63000235148,
+          "coefficient_mib_per_unit": 1.0853616351592938,
+          "description": "batch * sequence/image shape * hidden/layers activation footprint",
+          "direction": "positive_model_weight",
+          "feature": "activation_units_m",
+          "feature_mean": 2756.6563718095217,
+          "feature_std": 4166.933725907598,
+          "group": "activations",
+          "impact_mib_per_std": 4522.63000235148
+        },
+        {
+          "abs_impact_mib_per_std": 2288.385350023516,
+          "coefficient_mib_per_unit": -158.18177876889095,
+          "description": "parameter count in millions",
+          "direction": "negative_model_weight",
+          "feature": "param_count_m",
+          "feature_mean": 22.63096685714285,
+          "feature_std": 14.46680754151163,
+          "group": "parameters",
+          "impact_mib_per_std": -2288.385350023516
+        },
+        {
+          "abs_impact_mib_per_std": 2158.749993512998,
+          "coefficient_mib_per_unit": -0.0009695985723734076,
+          "description": "activation footprint multiplied by batch size",
+          "direction": "negative_model_weight",
+          "feature": "activation_x_batch",
+          "feature_mean": 809409.5956845717,
+          "feature_std": 2226436.8523447346,
+          "group": "activations",
+          "impact_mib_per_std": -2158.749993512998
+        },
+        {
+          "abs_impact_mib_per_std": 2003.6369095552773,
+          "coefficient_mib_per_unit": -0.22979618526802043,
+          "description": "activation footprint multiplied by precision bytes",
+          "direction": "negative_model_weight",
+          "feature": "activation_x_precision",
+          "feature_mean": 7229.382265904759,
+          "feature_std": 8719.191344357418,
+          "group": "activations",
+          "impact_mib_per_std": -2003.6369095552773
+        },
+        {
+          "abs_impact_mib_per_std": 1717.226453879583,
+          "coefficient_mib_per_unit": 31.39628837263777,
+          "description": "parameter count multiplied by precision bytes",
+          "direction": "positive_model_weight",
+          "feature": "param_x_precision",
+          "feature_mean": 70.46534095238091,
+          "feature_std": 54.6952057994271,
+          "group": "parameters",
+          "impact_mib_per_std": 1717.226453879583
+        },
+        {
+          "abs_impact_mib_per_std": 455.76035942576755,
+          "coefficient_mib_per_unit": -456.2779749922739,
+          "description": "bytes per tensor element from fp32/fp16/bf16/int8",
+          "direction": "negative_model_weight",
+          "feature": "precision_bytes",
+          "feature_mean": 2.9523809523809526,
+          "feature_std": 0.9988655696858584,
+          "group": "precision",
+          "impact_mib_per_std": -455.76035942576755
+        },
+        {
+          "abs_impact_mib_per_std": 398.7202591511829,
+          "coefficient_mib_per_unit": 213.92336185112893,
+          "description": "model depth",
+          "direction": "positive_model_weight",
+          "feature": "layers",
+          "feature_mean": 6.380952380952381,
+          "feature_std": 1.8638462657886599,
+          "group": "architecture",
+          "impact_mib_per_std": 398.7202591511829
+        }
+      ],
+      "top_group_impacts": [
+        {
+          "abs_impact_mib_per_std_sum": 8685.016905419754,
+          "group": "activations"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 5791.056262175554,
+          "group": "synthetic headroom"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 4005.611803903099,
+          "group": "parameters"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 483.1091261949281,
+          "group": "architecture"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 455.76035942576755,
+          "group": "precision"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 350.8991301929618,
+          "group": "input shape"
+        }
+      ],
+      "top_organic_driver_labels": [
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "parameter count in millions",
+        "activation footprint multiplied by batch size",
+        "activation footprint multiplied by precision bytes",
+        "parameter count multiplied by precision bytes"
+      ],
+      "training_rows": 42,
+      "usable_for_prediction": true
+    },
+    "transformer": {
+      "alpha": 10.0,
+      "feature_mode": "interactions",
+      "fit": "ridge_linear_interactions",
+      "in_sample_mae_mib": 621.3268934607422,
+      "loo_mae_mib": 679.9787444206416,
+      "loo_max_abs_error_mib": 3050.2938027591517,
+      "loo_p95_abs_error_mib": 1816.8017162242922,
+      "name": "family:transformer",
+      "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
+      "top_driver_labels": [
+        "synthetic headroom probe on transformer rows",
+        "synthetic VRAM headroom probe allocation",
+        "activation footprint multiplied by precision bytes",
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "parameter count in millions"
+      ],
+      "top_feature_impacts": [
+        {
+          "abs_impact_mib_per_std": 2858.491291796589,
+          "coefficient_mib_per_unit": 448.39757000072,
+          "description": "synthetic headroom probe on transformer rows",
+          "direction": "positive_model_weight",
+          "feature": "reserve_x_transformer",
+          "feature_mean": 2.864864864864865,
+          "feature_std": 6.374903619107479,
+          "group": "synthetic headroom",
+          "impact_mib_per_std": 2858.491291796589
+        },
+        {
+          "abs_impact_mib_per_std": 2858.491291796587,
+          "coefficient_mib_per_unit": 448.3975700007197,
+          "description": "synthetic VRAM headroom probe allocation",
+          "direction": "positive_model_weight",
+          "feature": "reserve_extra_gib",
+          "feature_mean": 2.864864864864865,
+          "feature_std": 6.374903619107479,
+          "group": "synthetic headroom",
+          "impact_mib_per_std": 2858.491291796587
+        },
+        {
+          "abs_impact_mib_per_std": 2100.14062852919,
+          "coefficient_mib_per_unit": 41.394703417110215,
+          "description": "activation footprint multiplied by precision bytes",
+          "direction": "positive_model_weight",
+          "feature": "activation_x_precision",
+          "feature_mean": 57.18990183783781,
+          "feature_std": 50.73452531758233,
+          "group": "activations",
+          "impact_mib_per_std": 2100.14062852919
+        },
+        {
+          "abs_impact_mib_per_std": 756.5432495035371,
+          "coefficient_mib_per_unit": -43.93745388418065,
+          "description": "batch * sequence/image shape * hidden/layers activation footprint",
+          "direction": "negative_model_weight",
+          "feature": "activation_units_m",
+          "feature_mean": 22.492427531531522,
+          "feature_std": 17.21864110509883,
+          "group": "activations",
+          "impact_mib_per_std": -756.5432495035371
+        },
+        {
+          "abs_impact_mib_per_std": 678.7114427070405,
+          "coefficient_mib_per_unit": 6.067169861765369,
+          "description": "parameter count in millions",
+          "direction": "positive_model_weight",
+          "feature": "param_count_m",
+          "feature_mean": 183.2331692972972,
+          "feature_std": 111.86623387358983,
+          "group": "parameters",
+          "impact_mib_per_std": 678.7114427070405
+        },
+        {
+          "abs_impact_mib_per_std": 357.9627878236141,
+          "coefficient_mib_per_unit": 1.6167809273010312,
+          "description": "parameter count multiplied by precision bytes",
+          "direction": "positive_model_weight",
+          "feature": "param_x_precision",
+          "feature_mean": 450.7735778018016,
+          "feature_std": 221.40463298338034,
+          "group": "parameters",
+          "impact_mib_per_std": 357.9627878236141
+        },
+        {
+          "abs_impact_mib_per_std": 270.48620561065417,
+          "coefficient_mib_per_unit": 2.216647446894194,
+          "description": "activation footprint multiplied by batch size",
+          "direction": "positive_model_weight",
+          "feature": "activation_x_batch",
+          "feature_mean": 83.7349339099099,
+          "feature_std": 122.02491018120172,
+          "group": "activations",
+          "impact_mib_per_std": 270.48620561065417
+        },
+        {
+          "abs_impact_mib_per_std": 117.38951673601784,
+          "coefficient_mib_per_unit": 48.710568317897,
+          "description": "training batch size",
+          "direction": "positive_model_weight",
+          "feature": "batch_size",
+          "feature_mean": 3.3333333333333335,
+          "feature_std": 2.4099393784507983,
+          "group": "input shape",
+          "impact_mib_per_std": 117.38951673601784
+        }
+      ],
+      "top_group_impacts": [
+        {
+          "abs_impact_mib_per_std_sum": 5716.982583593176,
+          "group": "synthetic headroom"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 3127.170083643381,
+          "group": "activations"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 1036.6742305306548,
+          "group": "parameters"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 117.38951673601784,
+          "group": "input shape"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 100.19000888907485,
+          "group": "precision"
+        },
+        {
+          "abs_impact_mib_per_std_sum": 35.16089931937913,
+          "group": "training strategy"
+        }
+      ],
+      "top_organic_driver_labels": [
+        "activation footprint multiplied by precision bytes",
+        "batch * sequence/image shape * hidden/layers activation footprint",
+        "parameter count in millions",
+        "parameter count multiplied by precision bytes",
+        "activation footprint multiplied by batch size"
+      ],
+      "training_rows": 111,
+      "usable_for_prediction": true
+    }
+  }
+}

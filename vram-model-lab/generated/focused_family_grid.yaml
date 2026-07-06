@@ -1,0 +1,136 @@
+scenarios:
+  - name: focus-cnn-fp32-b48-i224
+    family: cnn
+    precision: fp32
+    batch_size: 48
+    image_size: 224
+    hidden_size: 128
+    layers: 10
+    steps: 3
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: focus-cnn-fp32-b16-i320
+    family: cnn
+    precision: fp32
+    batch_size: 16
+    image_size: 320
+    hidden_size: 192
+    layers: 12
+    steps: 3
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: focus-cnn-fp16-b32-i224
+    family: cnn
+    precision: fp16
+    batch_size: 32
+    image_size: 224
+    hidden_size: 128
+    layers: 10
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: focus-cnn-fp16-b12-i320
+    family: cnn
+    precision: fp16
+    batch_size: 12
+    image_size: 320
+    hidden_size: 192
+    layers: 12
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: focus-cnn-fp16-b16-i384-pad6g
+    family: cnn
+    precision: fp16
+    batch_size: 16
+    image_size: 384
+    hidden_size: 192
+    layers: 12
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 6144
+
+  - name: focus-cnn-fp16-b16-i384-pad10g
+    family: cnn
+    precision: fp16
+    batch_size: 16
+    image_size: 384
+    hidden_size: 192
+    layers: 12
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 10240
+
+  - name: focus-mlp-fp32-b64-s1024-h2048
+    family: mlp
+    precision: fp32
+    batch_size: 64
+    seq_len: 1024
+    hidden_size: 2048
+    layers: 6
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: focus-mlp-fp16-b256-s1024-h2048
+    family: mlp
+    precision: fp16
+    batch_size: 256
+    seq_len: 1024
+    hidden_size: 2048
+    layers: 6
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: focus-mlp-fp32-b128-s2048-h2048
+    family: mlp
+    precision: fp32
+    batch_size: 128
+    seq_len: 2048
+    hidden_size: 2048
+    layers: 8
+    steps: 3
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: focus-mlp-fp16-b512-s2048-h2048
+    family: mlp
+    precision: fp16
+    batch_size: 512
+    seq_len: 2048
+    hidden_size: 2048
+    layers: 8
+    steps: 3
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: focus-mlp-fp16-b128-s1024-pad8g
+    family: mlp
+    precision: fp16
+    batch_size: 128
+    seq_len: 1024
+    hidden_size: 1024
+    layers: 4
+    steps: 2
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 8192
+
+  - name: focus-mlp-fp16-b128-s1024-pad16g
+    family: mlp
+    precision: fp16
+    batch_size: 128
+    seq_len: 1024
+    hidden_size: 1024
+    layers: 4
+    steps: 2
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 16384

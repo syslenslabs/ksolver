@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ksolver-vram-profile-sidecar-example
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        ksolver.ai/vram-family: mlp
+        ksolver.ai/vram-precision: fp16
+        ksolver.ai/vram-batch-size: "64"
+        ksolver.ai/vram-seq-len: "1024"
+        ksolver.ai/vram-hidden-size: "4096"
+        ksolver.ai/vram-layers: "2"
+        ksolver.ai/vram-optimizer: adamw
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      volumes:
+        - name: ksolver-profile
+          emptyDir: {}
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["python", "-u", "/work/train.py"]
+          volumeMounts:
+            - name: ksolver-profile
+              mountPath: /ksolver/profile
+        - name: ksolver-vram-sidecar
+          image: python:3.12-slim
+          command: ["python", "-u", "/ksolver/ksolver_vram_sidecar.py"]
+          args: ["--profile", "/ksolver/profile/vram-profile.json"]
+          volumeMounts:
+            - name: ksolver-profile
+              mountPath: /ksolver/profile

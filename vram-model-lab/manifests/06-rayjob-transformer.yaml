@@ -1,0 +1,33 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: vram-demo-rayjob-transformer
+  annotations:
+    ksolver.ai/vram-family: transformer
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-batch-size: "2"
+    ksolver.ai/vram-seq-len: "1536"
+    ksolver.ai/vram-hidden-size: "1024"
+    ksolver.ai/vram-layers: "8"
+    ksolver.ai/vram-heads: "16"
+    ksolver.ai/vram-param-count: "166337792"
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  entrypoint: python train.py --batch-size 2 --seq-len 1536 --precision fp16
+  rayClusterSpec:
+    headGroupSpec:
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: ray-head
+              image: rayproject/ray-ml:latest-gpu
+    workerGroupSpecs:
+      - groupName: gpu-workers
+        replicas: 1
+        template:
+          spec:
+            runtimeClassName: nvidia
+            containers:
+              - name: ray-worker
+                image: rayproject/ray-ml:latest-gpu

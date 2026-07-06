@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vram-demo-cronjob-cnn
+  annotations:
+    ksolver.ai/vram-family: cnn
+    ksolver.ai/vram-hidden-size: "192"
+    ksolver.ai/vram-layers: "12"
+    ksolver.ai/vram-param-count: "82960"
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  schedule: "0 0 31 2 *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          runtimeClassName: nvidia
+          restartPolicy: Never
+          containers:
+            - name: trainer
+              image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+              command: ["python", "train_cnn.py"]
+              args: ["--batch-size=16", "--image-size=384", "--precision=fp16", "--optimizer=adamw"]

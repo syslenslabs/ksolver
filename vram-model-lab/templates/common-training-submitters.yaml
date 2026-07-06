@@ -1,0 +1,124 @@
+# These are reference shapes for the most common Kubernetes training submitters.
+# They are not meant to be applied as-is. The collector's fingerprint fields map
+# these higher-level APIs down to the pod template that eventually runs.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: plain-kubernetes-training-job
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  template:
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["python", "train.py"]
+          args: ["--model", "bert-base", "--batch-size", "8", "--seq-len", "2048"]
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+---
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: kubeflow-pytorch-training-job
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: pytorch
+              image: ghcr.io/example/trainer:latest
+              command: ["torchrun"]
+              args: ["--nproc_per_node=1", "train.py", "--precision=bf16"]
+    Worker:
+      replicas: 3
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: pytorch
+              image: ghcr.io/example/trainer:latest
+              command: ["torchrun"]
+              args: ["--nproc_per_node=1", "train.py", "--precision=bf16"]
+---
+apiVersion: kubeflow.org/v1
+kind: TFJob
+metadata:
+  name: kubeflow-tf-training-job
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  tfReplicaSpecs:
+    Chief:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: tensorflow
+              image: tensorflow/tensorflow:latest-gpu
+              command: ["python", "train.py"]
+              args: ["--batch_size=64"]
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          containers:
+            - name: tensorflow
+              image: tensorflow/tensorflow:latest-gpu
+              command: ["python", "train.py"]
+              args: ["--batch_size=64"]
+---
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: ray-training-job
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  entrypoint: python train.py --model llama --batch-size 2
+  rayClusterSpec:
+    headGroupSpec:
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray-ml:latest-gpu
+    workerGroupSpecs:
+      - groupName: gpu-workers
+        replicas: 4
+        template:
+          spec:
+            containers:
+              - name: ray-worker
+                image: rayproject/ray-ml:latest-gpu
+---
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: volcano-gang-training-job
+  annotations:
+    ksolver.ai/profile: "true"
+spec:
+  minAvailable: 4
+  tasks:
+    - name: trainer
+      replicas: 4
+      template:
+        spec:
+          schedulerName: volcano
+          runtimeClassName: nvidia
+          containers:
+            - name: trainer
+              image: ghcr.io/example/distributed-trainer:latest
+              command: ["torchrun"]
+              args: ["--nnodes=4", "--nproc_per_node=1", "train.py"]

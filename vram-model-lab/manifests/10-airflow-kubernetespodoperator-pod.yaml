@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vram-demo-airflow-kpo-pod
+  labels:
+    airflow.apache.org/kpo: "true"
+  annotations:
+    ksolver.ai/vram-family: mlp
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-batch-size: "128"
+    ksolver.ai/vram-seq-len: "1024"
+    ksolver.ai/vram-hidden-size: "1024"
+    ksolver.ai/vram-layers: "4"
+    ksolver.ai/vram-param-count: "262912"
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  containers:
+    - name: base
+      image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+      command: ["python", "train.py"]
+      args: ["--batch-size", "128", "--seq-len", "1024", "--precision", "fp16"]

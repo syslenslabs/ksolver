@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: vram-demo-argo-cnn-
+  annotations:
+    ksolver.ai/vram-family: cnn
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-batch-size: "16"
+    ksolver.ai/vram-image-size: "384"
+    ksolver.ai/vram-hidden-size: "192"
+    ksolver.ai/vram-layers: "12"
+    ksolver.ai/vram-param-count: "82960"
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  entrypoint: train
+  templates:
+    - name: train
+      container:
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+        command: ["python", "train_cnn.py"]
+        args: ["--batch-size=16", "--image-size=384", "--precision=fp16"]
+      podSpecPatch: |
+        runtimeClassName: nvidia

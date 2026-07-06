@@ -1,0 +1,28 @@
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: vram-demo-volcano-transformer
+  annotations:
+    ksolver.ai/vram-family: transformer
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-batch-size: "2"
+    ksolver.ai/vram-seq-len: "1024"
+    ksolver.ai/vram-hidden-size: "1536"
+    ksolver.ai/vram-layers: "10"
+    ksolver.ai/vram-heads: "16"
+    ksolver.ai/vram-param-count: "381651200"
+    ksolver.ai/vram-optimizer: adamw
+spec:
+  minAvailable: 2
+  tasks:
+    - name: trainer
+      replicas: 2
+      template:
+        spec:
+          schedulerName: volcano
+          runtimeClassName: nvidia
+          containers:
+            - name: trainer
+              image: ghcr.io/example/tiny-transformer-trainer:latest
+              command: ["torchrun"]
+              args: ["--nnodes=2", "--nproc_per_node=1", "train.py", "--batch-size", "2", "--seq-len", "1024"]

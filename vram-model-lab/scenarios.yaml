@@ -1,0 +1,237 @@
+scenarios:
+  - name: smoke-mlp
+    family: mlp
+    precision: fp32
+    batch_size: 64
+    seq_len: 256
+    hidden_size: 1024
+    layers: 4
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: mlp-batch128-fp32
+    family: mlp
+    precision: fp32
+    batch_size: 128
+    seq_len: 512
+    hidden_size: 1536
+    layers: 6
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: mlp-batch256-fp16
+    family: mlp
+    precision: fp16
+    batch_size: 256
+    seq_len: 512
+    hidden_size: 1536
+    layers: 6
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-small-fp32
+    family: transformer
+    precision: fp32
+    batch_size: 4
+    seq_len: 512
+    hidden_size: 768
+    layers: 6
+    heads: 12
+    steps: 5
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-small-sgd-fp32
+    family: transformer
+    precision: fp32
+    batch_size: 4
+    seq_len: 512
+    hidden_size: 768
+    layers: 6
+    heads: 12
+    steps: 5
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: transformer-small-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 8
+    seq_len: 512
+    hidden_size: 768
+    layers: 6
+    heads: 12
+    steps: 5
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-batch16-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 16
+    seq_len: 512
+    hidden_size: 768
+    layers: 6
+    heads: 12
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-seq1024-fp32
+    family: transformer
+    precision: fp32
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1024
+    layers: 8
+    heads: 16
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-longseq-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 2048
+    hidden_size: 1024
+    layers: 8
+    heads: 16
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-wide-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1536
+    layers: 10
+    heads: 16
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: transformer-checkpointed-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 4
+    seq_len: 2048
+    hidden_size: 1024
+    layers: 8
+    heads: 16
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: true
+
+  - name: transformer-wide-checkpointed-fp16
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1536
+    layers: 10
+    heads: 16
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: true
+
+  - name: transformer-wide-fp16-pad12g
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1536
+    layers: 10
+    heads: 16
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 12288
+
+  - name: transformer-wide-fp16-pad16g
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1536
+    layers: 10
+    heads: 16
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 16384
+
+  - name: transformer-wide-fp16-oom-pad22g
+    family: transformer
+    precision: fp16
+    batch_size: 2
+    seq_len: 1024
+    hidden_size: 1536
+    layers: 10
+    heads: 16
+    steps: 3
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 22528
+
+  - name: mlp-forced-oom-pad32g
+    family: mlp
+    precision: fp16
+    batch_size: 32
+    seq_len: 256
+    hidden_size: 512
+    layers: 2
+    steps: 1
+    optimizer: sgd
+    activation_checkpointing: false
+    reserve_extra_mib: 32768
+
+  - name: cnn-vision-fp32
+    family: cnn
+    precision: fp32
+    batch_size: 32
+    image_size: 224
+    hidden_size: 128
+    layers: 10
+    steps: 5
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: cnn-vision-batch64-fp32
+    family: cnn
+    precision: fp32
+    batch_size: 64
+    image_size: 224
+    hidden_size: 128
+    layers: 10
+    steps: 4
+    optimizer: sgd
+    activation_checkpointing: false
+
+  - name: cnn-vision-384-fp16
+    family: cnn
+    precision: fp16
+    batch_size: 16
+    image_size: 384
+    hidden_size: 192
+    layers: 12
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+
+  - name: cnn-vision-384-fp16-pad12g
+    family: cnn
+    precision: fp16
+    batch_size: 16
+    image_size: 384
+    hidden_size: 192
+    layers: 12
+    steps: 4
+    optimizer: adamw
+    activation_checkpointing: false
+    reserve_extra_mib: 12288

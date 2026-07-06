@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vram-demo-job-pytorch-transformer
+  annotations:
+    ksolver.ai/vram-family: transformer
+    ksolver.ai/vram-batch-size: "6"
+    ksolver.ai/vram-seq-len: "768"
+    ksolver.ai/vram-hidden-size: "768"
+    ksolver.ai/vram-layers: "6"
+    ksolver.ai/vram-heads: "12"
+    ksolver.ai/vram-param-count: "91711232"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        ksolver.ai/vram-precision: fp16
+        ksolver.ai/vram-optimizer: adamw
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["python", "-u", "-c"]
+          args:
+            - |
+              import torch, torch.nn as nn, torch.nn.functional as F
+              device='cuda'
+              layer=nn.TransformerEncoderLayer(d_model=768,nhead=12,dim_feedforward=3072,batch_first=True,dropout=0.0).to(device).half()
+              emb=nn.Embedding(32000,768).to(device)
+              head=nn.Linear(768,32000).to(device).half()
+              opt=torch.optim.AdamW(list(layer.parameters())+list(emb.parameters())+list(head.parameters()),lr=1e-4)
+              for _ in range(3):
+                x=torch.randint(0,32000,(6,768),device=device)
+                y=torch.randint(0,32000,(6,768),device=device)
+                out=head(layer(emb(x).half()))
+                loss=F.cross_entropy(out.reshape(-1,out.shape[-1]),y.reshape(-1))
+                opt.zero_grad(); loss.backward(); opt.step(); torch.cuda.synchronize()
+              print('done')

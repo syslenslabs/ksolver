@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: annotated-transformer-job
+  annotations:
+    ksolver.ai/vram-family: transformer
+    ksolver.ai/vram-hidden-size: "1024"
+    ksolver.ai/vram-layers: "8"
+    ksolver.ai/vram-heads: "16"
+    ksolver.ai/vram-param-count: "166337792"
+spec:
+  template:
+    metadata:
+      annotations:
+        ksolver.ai/vram-precision: fp16
+        ksolver.ai/vram-optimizer: adamw
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["torchrun"]
+          args: ["train.py", "--batch-size", "6", "--seq-len", "1536"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: annotated-cnn-job
+  annotations:
+    ksolver.ai/vram-family: cnn
+    ksolver.ai/vram-hidden-size: "192"
+    ksolver.ai/vram-layers: "12"
+    ksolver.ai/vram-param-count: "82960"
+spec:
+  template:
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          command: ["python", "train.py"]
+          args: ["--batch-size=16", "--image-size=384", "--precision=fp16", "--optimizer=adamw"]
+---
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: annotated-mlp-pytorchjob
+  annotations:
+    ksolver.ai/vram-family: mlp
+    ksolver.ai/vram-precision: fp16
+    ksolver.ai/vram-hidden-size: "1024"
+    ksolver.ai/vram-layers: "4"
+    ksolver.ai/vram-param-count: "262912"
+    ksolver.ai/vram-reserve-extra-mib: "8192"
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: pytorch
+              image: ghcr.io/example/mlp-trainer:latest
+              command: ["python", "train.py"]
+              args: ["--batch-size", "128", "--seq-len", "1024"]
