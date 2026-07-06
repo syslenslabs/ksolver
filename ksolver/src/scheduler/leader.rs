@@ -188,7 +188,7 @@ fn lease_object(
             ..Default::default()
         },
         spec: Some(LeaseSpec {
-            acquire_time: acquire_time.or_else(|| Some(MicroTime(now))),
+            acquire_time: acquire_time.or(Some(MicroTime(now))),
             holder_identity: Some(identity.to_string()),
             lease_duration_seconds: Some(DEFAULT_LEASE_DURATION_SECONDS),
             lease_transitions: Some(transitions),

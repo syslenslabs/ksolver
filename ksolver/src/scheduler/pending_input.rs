@@ -2281,6 +2281,7 @@ mod tests {
         assert!(scores["l40"] > scores["h100"]);
     }
 
+    #[cfg(feature = "rust-cp-sat")]
     #[test]
     fn predicted_vram_rightsizing_drives_soft_solver_tiebreak() {
         let mut l40 = node("l40", 16000, 64, 110, 8);

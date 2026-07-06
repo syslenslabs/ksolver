@@ -2002,11 +2002,8 @@ mod tests {
             active_nodes: vec!["node-a".to_string(), "node-b".to_string()],
             ..Default::default()
         };
-        let report = ExplainabilityBuilder.build(
-            &ClusterSnapshot::default(),
-            &normalized,
-            Some(&plan),
-        );
+        let report =
+            ExplainabilityBuilder.build(&ClusterSnapshot::default(), &normalized, Some(&plan));
         assert_eq!(report.node_drainability.len(), 2);
         let node_a = report
             .node_drainability
@@ -2107,8 +2104,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let report =
-            ExplainabilityBuilder.build(&ClusterSnapshot::default(), &normalized, None);
+        let report = ExplainabilityBuilder.build(&ClusterSnapshot::default(), &normalized, None);
         assert!(!report.workload_cost_table.is_empty());
         let row = &report.workload_cost_table[0];
         assert_eq!(row.current_memory_bytes, 1024 * 1024 * 1024);
@@ -2139,11 +2135,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = ExplainabilityBuilder.build(
-            &ClusterSnapshot::default(),
-            &normalized,
-            Some(&plan),
-        );
+        let report =
+            ExplainabilityBuilder.build(&ClusterSnapshot::default(), &normalized, Some(&plan));
         assert!(report.savings_waterfall.layers.len() >= 2);
         assert_eq!(report.savings_waterfall.layers[0].key, "placement");
         assert_eq!(report.savings_waterfall.layers[0].savings.monthly, 200.0);
@@ -2278,8 +2271,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let report =
-            ExplainabilityBuilder.build(&snapshot, &NormalizedCluster::default(), None);
+        let report = ExplainabilityBuilder.build(&snapshot, &NormalizedCluster::default(), None);
         assert_eq!(report.vpa_policy_gaps.len(), 1);
         assert_eq!(report.vpa_policy_gaps[0].bound_type, "max");
         assert!(report.vpa_policy_gaps[0].summary.contains("capped"));

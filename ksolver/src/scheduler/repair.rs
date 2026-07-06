@@ -51,9 +51,7 @@ fn node_gpu_capacity(cluster: &NormalizedCluster) -> BTreeMap<String, i64> {
         .collect()
 }
 
-fn running_gpu_by_node<'a>(
-    cluster: &'a NormalizedCluster,
-) -> BTreeMap<String, Vec<&'a NormalizedWorkload>> {
+fn running_gpu_by_node(cluster: &NormalizedCluster) -> BTreeMap<String, Vec<&NormalizedWorkload>> {
     let mut out: BTreeMap<String, Vec<&NormalizedWorkload>> = BTreeMap::new();
     for w in &cluster.workloads {
         if w.current_node.is_empty() || workload_gpu(w) <= 0 {
@@ -513,9 +511,7 @@ fn summarize_repair_metrics(plans: &[RepairPlan], notes: &[String]) -> RepairMet
     metrics
 }
 
-fn pending_workload_by_scope<'a>(
-    cluster: &'a NormalizedCluster,
-) -> BTreeMap<String, &'a NormalizedWorkload> {
+fn pending_workload_by_scope(cluster: &NormalizedCluster) -> BTreeMap<String, &NormalizedWorkload> {
     cluster
         .workloads
         .iter()

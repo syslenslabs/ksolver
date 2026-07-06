@@ -398,10 +398,11 @@ pub async fn apply_bindings(
                     .filter(|(candidate, _)| binding_group(candidate) == Some(group))
                 {
                     let key = (member.namespace.clone(), member.pod_name.clone());
-                    if !live_cache.contains_key(&key) {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = live_cache.entry(key)
+                    {
                         match fetch_live_pod(client, &member.namespace, &member.pod_name).await {
                             Ok(live) => {
-                                live_cache.insert(key, live);
+                                entry.insert(live);
                             }
                             Err(e) => {
                                 fetch_failed = Some(format!(
