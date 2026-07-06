@@ -227,9 +227,91 @@ async fn main() -> Result<()> {
             let simulator_url = flag("--simulator")
                 .or_else(|| std::env::var("KSOLVER_SCHEDULER_SIMULATOR_URL").ok())
                 .or_else(|| std::env::var("SCHEDULER_SIMULATOR_URL").ok());
+            let simulator_urls = flag("--simulator-pool")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_POOL").ok())
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let simulator_cache_path = flag("--simulator-cache")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_CACHE").ok())
+                .map(std::path::PathBuf::from);
+            let simulator_cache_dir = flag("--simulator-cache-dir")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_CACHE_DIR").ok())
+                .map(std::path::PathBuf::from);
+            let refresh_simulator_cache = rest.iter().any(|a| a == "--refresh-simulator-cache");
+            let simulator_batch_timeout = flag("--simulator-timeout-ms")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_TIMEOUT_MS").ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(std::time::Duration::from_millis)
+                .unwrap_or_else(|| {
+                    ksolver::scheduler::gpu_scenarios::BenchmarkOptions::default()
+                        .simulator_batch_timeout
+                });
+            let simulator_progress =
+                refresh_simulator_cache || rest.iter().any(|a| a == "--simulator-progress");
+            let simulator_max_live_baselines = match flag("--simulator-max-live-baselines")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_MAX_LIVE_BASELINES").ok())
+            {
+                Some(v)
+                    if matches!(v.trim().to_ascii_lowercase().as_str(), "all" | "unlimited") =>
+                {
+                    None
+                }
+                Some(v) if v.trim().eq_ignore_ascii_case("none") => Some(0),
+                Some(v) => v.parse::<usize>().ok(),
+                None => {
+                    Some(ksolver::scheduler::gpu_scenarios::DEFAULT_SIMULATOR_LIVE_BASELINE_LIMIT)
+                }
+            };
+            let simulator_live_scenarios = flag("--simulator-live-scenarios")
+                .or_else(|| std::env::var("KSOLVER_GPU_SCENARIO_SIMULATOR_LIVE_SCENARIOS").ok())
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .filter(|scenarios| !scenarios.is_empty());
             let json = rest.iter().any(|a| a == "--json");
+            let options = ksolver::scheduler::gpu_scenarios::BenchmarkOptions {
+                simulator_url: simulator_url.clone(),
+                simulator_urls: simulator_urls.clone(),
+                simulator_cache_path: simulator_cache_path.clone(),
+                simulator_cache_dir: simulator_cache_dir.clone(),
+                refresh_simulator_cache,
+                simulator_batch_timeout,
+                simulator_progress,
+                simulator_max_live_baselines,
+                simulator_live_scenarios,
+            };
+            if rest.iter().any(|a| a == "--refresh-simulator-cache-only") {
+                let refreshed =
+                    ksolver::scheduler::gpu_scenarios::refresh_simulator_cache_only(options)
+                        .await?;
+                if json {
+                    serde_json::to_writer_pretty(
+                        std::io::stdout(),
+                        &serde_json::json!({
+                            "ok": true,
+                            "refreshed_baselines": refreshed,
+                        }),
+                    )?;
+                    println!();
+                } else {
+                    println!("refreshed {refreshed} kube-scheduler-simulator baseline(s)");
+                }
+                return Ok(());
+            }
             let report =
-                ksolver::scheduler::gpu_scenarios::run_benchmark(simulator_url.as_deref()).await?;
+                ksolver::scheduler::gpu_scenarios::run_benchmark_with_options(options).await?;
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &report)?;
                 println!();
@@ -241,10 +323,48 @@ async fn main() -> Result<()> {
                     .is_empty()
                 {
                     println!(
-                        "no kube-scheduler-simulator URL configured; using deterministic greedy-spread baseline"
+                        "no kube-scheduler-simulator URL configured; using cached kube-scheduler-simulator baselines only"
                     );
+                }
+                if let Some(path) = simulator_cache_path {
                     println!(
-                        "pass --simulator <url> or set KSOLVER_SCHEDULER_SIMULATOR_URL for actual simulator results\n"
+                        "kube-scheduler-simulator cache: {}{}",
+                        path.display(),
+                        if refresh_simulator_cache {
+                            " (refreshed)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                if let Some(path) = simulator_cache_dir {
+                    println!(
+                        "kube-scheduler-simulator cache dir: {}{}",
+                        path.display(),
+                        if refresh_simulator_cache {
+                            " (refreshed)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                if !simulator_urls.is_empty() {
+                    println!(
+                        "kube-scheduler-simulator pool: {}",
+                        simulator_urls.join(",")
+                    );
+                }
+                println!(
+                    "kube-scheduler-simulator batch timeout: {} ms",
+                    report.simulator_batch_timeout_millis
+                );
+                if let Some(limit) = report.simulator_live_baseline_limit {
+                    println!("kube-scheduler-simulator live baseline limit: {limit}");
+                }
+                if let Some(scenarios) = &report.simulator_live_scenarios {
+                    println!(
+                        "kube-scheduler-simulator live scenarios: {}",
+                        scenarios.join(",")
                     );
                 }
                 ksolver::scheduler::gpu_scenarios::print_table(&report);
@@ -328,7 +448,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver version"
             );
         }
     }

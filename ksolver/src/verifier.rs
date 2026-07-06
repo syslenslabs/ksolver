@@ -12,7 +12,8 @@ use kube::Api;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use tokio::time::{sleep, Duration, Instant};
+use std::future::Future;
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{info, warn};
 
 const SELECTED_NODE_ANNOTATION: &str = "kube-scheduler-simulator.sigs.k8s.io/selected-node";
@@ -20,6 +21,10 @@ pub(crate) const FILTER_RESULT_ANNOTATION: &str =
     "kube-scheduler-simulator.sigs.k8s.io/filter-result";
 const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(350);
+const SIMULATOR_RESET_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SIMULATOR_RESET_STABLE_POLLS: usize = 1;
+#[allow(dead_code)]
+const SIMULATOR_BATCH_STABLE_POLLS: usize = 3;
 
 #[derive(Default)]
 pub struct Verifier;
@@ -198,7 +203,7 @@ pub(crate) struct SimulatorResources {
     pub(crate) namespaces: Vec<corev1::Namespace>,
 }
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SimulatorImportPayload {
     pub(crate) pods: Vec<corev1::Pod>,
@@ -209,13 +214,32 @@ pub(crate) struct SimulatorImportPayload {
     pub(crate) priority_classes: Vec<schedulingv1::PriorityClass>,
     pub(crate) namespaces: Vec<corev1::Namespace>,
     #[serde(default = "default_scheduler_config")]
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     pub(crate) scheduler_config: serde_json::Value,
+}
+
+impl Default for SimulatorImportPayload {
+    fn default() -> Self {
+        Self {
+            pods: Vec::new(),
+            nodes: Vec::new(),
+            pvs: Vec::new(),
+            pvcs: Vec::new(),
+            storage_classes: Vec::new(),
+            priority_classes: Vec::new(),
+            namespaces: Vec::new(),
+            scheduler_config: default_scheduler_config(),
+        }
+    }
 }
 
 pub(crate) fn default_scheduler_config() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kubescheduler.config.k8s.io/v1",
-        "kind": "KubeSchedulerConfiguration"
+        "kind": "KubeSchedulerConfiguration",
+        "leaderElection": {
+            "leaderElect": false
+        }
     })
 }
 
@@ -226,6 +250,9 @@ pub(crate) fn binpack_scheduler_config() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "kubescheduler.config.k8s.io/v1",
         "kind": "KubeSchedulerConfiguration",
+        "leaderElection": {
+            "leaderElect": false
+        },
         "profiles": [{
             "schedulerName": "default-scheduler",
             "pluginConfig": [{
@@ -254,6 +281,67 @@ pub(crate) struct SimulatorExportPayload {
     // covers an ABSENT key — so null must be mapped to the default explicitly.
     #[serde(default, deserialize_with = "null_to_default")]
     pub(crate) pods: Vec<corev1::Pod>,
+}
+
+pub(crate) struct SimulatorBatchReport {
+    pub(crate) export: SimulatorExportPayload,
+    pub(crate) diagnostics: SimulatorBatchDiagnostics,
+}
+
+#[derive(Debug)]
+pub(crate) struct SimulatorBatchTimeoutError {
+    message: String,
+    pub(crate) diagnostics: SimulatorBatchDiagnostics,
+}
+
+impl SimulatorBatchTimeoutError {
+    fn new(message: impl Into<String>, diagnostics: SimulatorBatchDiagnostics) -> Self {
+        Self {
+            message: message.into(),
+            diagnostics,
+        }
+    }
+}
+
+impl std::fmt::Display for SimulatorBatchTimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.message, self.diagnostics.summary())
+    }
+}
+
+impl std::error::Error for SimulatorBatchTimeoutError {}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SimulatorBatchDiagnostics {
+    pub(crate) elapsed_millis: u128,
+    pub(crate) phase: String,
+    pub(crate) state: SimulatorBatchState,
+    pub(crate) stable_polls: usize,
+    pub(crate) timed_out: bool,
+    pub(crate) phase_timings: Vec<SimulatorPhaseTiming>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SimulatorPhaseTiming {
+    pub(crate) phase: String,
+    pub(crate) duration_millis: u64,
+    pub(crate) cumulative_millis: u64,
+}
+
+impl SimulatorBatchDiagnostics {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "phase={}, elapsed={}ms, targets={}, present={}, terminal_present={}, missing={}, stable_polls={}, timed_out={}",
+            self.phase,
+            self.elapsed_millis,
+            self.state.target_count,
+            self.state.present_targets,
+            self.state.terminal_present_targets,
+            self.state.missing_targets(),
+            self.stable_polls,
+            self.timed_out
+        )
+    }
 }
 
 /// Deserialize helper: treat JSON `null` (and an absent field) as the type's default.
@@ -389,8 +477,54 @@ pub(crate) async fn reset_simulator(client: &reqwest::Client, base_url: &str) ->
         );
     }
 
-    sleep(Duration::from_millis(250)).await;
-    Ok(())
+    let deadline = Instant::now() + VERIFICATION_TIMEOUT;
+    let mut empty_polls = 0_usize;
+    loop {
+        let response = client
+            .get(format!("{base_url}/api/v1/export"))
+            .send()
+            .await
+            .context("send scheduler-simulator export request after reset")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "scheduler-simulator export after reset failed with status {}",
+                response.status()
+            );
+        }
+        let latest = response
+            .json::<serde_json::Value>()
+            .await
+            .context("decode scheduler-simulator export response after reset")?;
+        let pod_count = json_array_len(&latest, "pods");
+        let node_count = json_array_len(&latest, "nodes");
+        let namespace_count = json_array_len(&latest, "namespaces");
+        if pod_count == 0 && node_count == 0 && namespace_count == 0 {
+            empty_polls += 1;
+            if empty_polls >= SIMULATOR_RESET_STABLE_POLLS {
+                return Ok(());
+            }
+        } else {
+            empty_polls = 0;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "scheduler-simulator reset did not drain existing objects within {:?}: pods={}, nodes={}, namespaces={}",
+                VERIFICATION_TIMEOUT,
+                pod_count,
+                node_count,
+                namespace_count
+            );
+        }
+        sleep(SIMULATOR_RESET_POLL_INTERVAL).await;
+    }
+}
+
+fn json_array_len(value: &serde_json::Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
 }
 
 pub(crate) async fn import_snapshot(
@@ -406,10 +540,12 @@ pub(crate) async fn import_snapshot(
         .context("send scheduler-simulator import request")?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "scheduler-simulator import failed with status {}",
-            response.status()
-        );
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|err| format!("<failed to read response body: {err}>"));
+        anyhow::bail!("scheduler-simulator import failed with status {status}: {body}",);
     }
 
     Ok(())
@@ -466,6 +602,394 @@ async fn wait_for_export(
 
         sleep(VERIFICATION_POLL_INTERVAL).await;
     }
+}
+
+/// Reset the simulator, import a snapshot ONCE, and poll the export until target pods have
+/// resolved (assigned a node or a filter-result annotation), the target set is stable, or the
+/// timeout elapses. Returns the final export plus batch diagnostics. This is the batch equivalent
+/// of `schedule_snapshot`: one reset+import+poll for the whole scenario instead of one per pod.
+/// Missing stable targets are accepted because simulator preemption can remove victim pods from the
+/// export.
+#[allow(dead_code)]
+pub(crate) async fn schedule_all_snapshot_report_with_timeout(
+    simulator_url: &str,
+    payload: &SimulatorImportPayload,
+    target_scopes: &std::collections::BTreeSet<String>,
+    timeout: Duration,
+) -> Result<SimulatorBatchReport> {
+    schedule_all_snapshot_report_with_timeout_and_stable_polls(
+        simulator_url,
+        payload,
+        target_scopes,
+        timeout,
+        SIMULATOR_BATCH_STABLE_POLLS,
+    )
+    .await
+}
+
+pub(crate) async fn schedule_all_snapshot_report_with_timeout_and_stable_polls(
+    simulator_url: &str,
+    payload: &SimulatorImportPayload,
+    target_scopes: &std::collections::BTreeSet<String>,
+    timeout: Duration,
+    required_stable_polls: usize,
+) -> Result<SimulatorBatchReport> {
+    let client = reqwest::Client::new();
+    let base_url = simulator_url.trim_end_matches('/');
+    let started = Instant::now();
+    let deadline = Instant::now() + timeout;
+    let mut phase_timings = Vec::new();
+    let phase_started = Instant::now();
+    with_batch_deadline(
+        deadline,
+        &started,
+        "reset",
+        target_scopes.len(),
+        reset_simulator(&client, base_url),
+    )
+    .await?;
+    phase_timings.push(simulator_phase_timing("reset", phase_started, &started));
+    if !payload.priority_classes.is_empty() {
+        // The simulator applies pods before PriorityClasses in a full snapshot, so priority pods
+        // can be rejected unless their classes already exist. Keep this import config-free to
+        // avoid an extra scheduler restart before the real snapshot import.
+        let priority_payload = SimulatorImportPayload {
+            priority_classes: payload.priority_classes.clone(),
+            ..Default::default()
+        };
+        let phase_started = Instant::now();
+        with_batch_deadline(
+            deadline,
+            &started,
+            "priority class import",
+            target_scopes.len(),
+            import_snapshot(&client, base_url, &priority_payload),
+        )
+        .await?;
+        phase_timings.push(simulator_phase_timing(
+            "priority class import",
+            phase_started,
+            &started,
+        ));
+    }
+    let phase_started = Instant::now();
+    with_batch_deadline(
+        deadline,
+        &started,
+        "snapshot import",
+        target_scopes.len(),
+        import_snapshot(&client, base_url, payload),
+    )
+    .await?;
+    phase_timings.push(simulator_phase_timing(
+        "snapshot import",
+        phase_started,
+        &started,
+    ));
+
+    let mut last_signature = BTreeMap::new();
+    let mut stable_polls = 0_usize;
+    let mut last_state = SimulatorBatchState {
+        target_count: target_scopes.len(),
+        ..Default::default()
+    };
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(SimulatorBatchTimeoutError::new(
+                "scheduler-simulator batch timed out before export poll",
+                SimulatorBatchDiagnostics {
+                    elapsed_millis: started.elapsed().as_millis(),
+                    phase: "export".to_string(),
+                    state: last_state.clone(),
+                    stable_polls,
+                    timed_out: true,
+                    phase_timings,
+                },
+            )
+            .into());
+        }
+        let export_started = Instant::now();
+        let response = match tokio::time::timeout(
+            deadline - now,
+            client.get(format!("{base_url}/api/v1/export")).send(),
+        )
+        .await
+        {
+            Ok(result) => {
+                phase_timings.push(simulator_phase_timing(
+                    "export request",
+                    export_started,
+                    &started,
+                ));
+                result.context("send scheduler-simulator export request")?
+            }
+            Err(_) => {
+                phase_timings.push(simulator_phase_timing(
+                    "export request",
+                    export_started,
+                    &started,
+                ));
+                return Err(SimulatorBatchTimeoutError::new(
+                    "scheduler-simulator batch timed out during export request",
+                    SimulatorBatchDiagnostics {
+                        elapsed_millis: started.elapsed().as_millis(),
+                        phase: "export".to_string(),
+                        state: last_state.clone(),
+                        stable_polls,
+                        timed_out: true,
+                        phase_timings,
+                    },
+                )
+                .into());
+            }
+        };
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "scheduler-simulator export failed with status {}",
+                response.status()
+            );
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(SimulatorBatchTimeoutError::new(
+                "scheduler-simulator batch timed out before export decode",
+                SimulatorBatchDiagnostics {
+                    elapsed_millis: started.elapsed().as_millis(),
+                    phase: "export-decode".to_string(),
+                    state: last_state.clone(),
+                    stable_polls,
+                    timed_out: true,
+                    phase_timings,
+                },
+            )
+            .into());
+        }
+        let decode_started = Instant::now();
+        let latest =
+            match tokio::time::timeout(deadline - now, response.json::<SimulatorExportPayload>())
+                .await
+            {
+                Ok(result) => {
+                    phase_timings.push(simulator_phase_timing(
+                        "export decode",
+                        decode_started,
+                        &started,
+                    ));
+                    result.context("decode scheduler-simulator export response")?
+                }
+                Err(_) => {
+                    phase_timings.push(simulator_phase_timing(
+                        "export decode",
+                        decode_started,
+                        &started,
+                    ));
+                    return Err(SimulatorBatchTimeoutError::new(
+                        "scheduler-simulator batch timed out during export decode",
+                        SimulatorBatchDiagnostics {
+                            elapsed_millis: started.elapsed().as_millis(),
+                            phase: "export-decode".to_string(),
+                            state: last_state.clone(),
+                            stable_polls,
+                            timed_out: true,
+                            phase_timings,
+                        },
+                    )
+                    .into());
+                }
+            };
+
+        let stable = simulator_batch_is_stable(
+            &latest,
+            target_scopes,
+            &mut last_signature,
+            &mut stable_polls,
+            required_stable_polls,
+        );
+
+        let state = simulator_batch_state(&latest, target_scopes);
+        last_state = state.clone();
+        let timed_out = Instant::now() >= deadline;
+        if state.all_targets_resolved() || (state.visible_targets_terminal() && stable) {
+            return Ok(SimulatorBatchReport {
+                export: latest,
+                diagnostics: SimulatorBatchDiagnostics {
+                    elapsed_millis: started.elapsed().as_millis(),
+                    phase: "poll".to_string(),
+                    state,
+                    stable_polls,
+                    timed_out: false,
+                    phase_timings,
+                },
+            });
+        }
+        if timed_out {
+            return Err(SimulatorBatchTimeoutError::new(
+                "scheduler-simulator batch timed out during poll",
+                SimulatorBatchDiagnostics {
+                    elapsed_millis: started.elapsed().as_millis(),
+                    phase: "poll".to_string(),
+                    state,
+                    stable_polls,
+                    timed_out: true,
+                    phase_timings,
+                },
+            )
+            .into());
+        }
+        sleep(VERIFICATION_POLL_INTERVAL).await;
+    }
+}
+
+fn simulator_phase_timing(
+    phase: &str,
+    phase_started: Instant,
+    batch_started: &Instant,
+) -> SimulatorPhaseTiming {
+    SimulatorPhaseTiming {
+        phase: phase.to_string(),
+        duration_millis: phase_started.elapsed().as_millis() as u64,
+        cumulative_millis: batch_started.elapsed().as_millis() as u64,
+    }
+}
+
+async fn with_batch_deadline<T, Fut>(
+    deadline: Instant,
+    started: &Instant,
+    phase: &str,
+    target_count: usize,
+    fut: Fut,
+) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(SimulatorBatchTimeoutError::new(
+            format!("scheduler-simulator batch timed out before {phase}"),
+            SimulatorBatchDiagnostics {
+                elapsed_millis: started.elapsed().as_millis(),
+                phase: phase.to_string(),
+                state: SimulatorBatchState {
+                    target_count,
+                    ..Default::default()
+                },
+                timed_out: true,
+                ..Default::default()
+            },
+        )
+        .into());
+    }
+    match timeout(deadline - now, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(SimulatorBatchTimeoutError::new(
+            format!("scheduler-simulator batch timed out during {phase}"),
+            SimulatorBatchDiagnostics {
+                elapsed_millis: started.elapsed().as_millis(),
+                phase: phase.to_string(),
+                state: SimulatorBatchState {
+                    target_count,
+                    ..Default::default()
+                },
+                timed_out: true,
+                ..Default::default()
+            },
+        )
+        .into()),
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SimulatorBatchState {
+    pub(crate) target_count: usize,
+    pub(crate) present_targets: usize,
+    pub(crate) terminal_present_targets: usize,
+}
+
+impl SimulatorBatchState {
+    pub(crate) fn missing_targets(&self) -> usize {
+        self.target_count.saturating_sub(self.present_targets)
+    }
+
+    fn all_targets_resolved(&self) -> bool {
+        self.target_count > 0 && self.terminal_present_targets == self.target_count
+    }
+
+    fn visible_targets_terminal(&self) -> bool {
+        self.present_targets > 0 && self.present_targets == self.terminal_present_targets
+    }
+}
+
+fn simulator_batch_state(
+    latest: &SimulatorExportPayload,
+    target_scopes: &BTreeSet<String>,
+) -> SimulatorBatchState {
+    let mut state = SimulatorBatchState {
+        target_count: target_scopes.len(),
+        ..Default::default()
+    };
+    for pod in &latest.pods {
+        let scope = pod_scope(pod);
+        if !target_scopes.contains(&scope) {
+            continue;
+        }
+        state.present_targets += 1;
+        if pod_is_terminal_in_simulator(pod) {
+            state.terminal_present_targets += 1;
+        }
+    }
+    state
+}
+
+fn pod_is_terminal_in_simulator(pod: &corev1::Pod) -> bool {
+    pod_assigned_node(pod).is_some()
+        || pod
+            .metadata
+            .annotations
+            .as_ref()
+            .map(|a| a.contains_key(FILTER_RESULT_ANNOTATION))
+            .unwrap_or(false)
+}
+
+fn simulator_batch_is_stable(
+    latest: &SimulatorExportPayload,
+    target_scopes: &BTreeSet<String>,
+    last_signature: &mut BTreeMap<String, (Option<String>, bool)>,
+    stable_polls: &mut usize,
+    required_stable_polls: usize,
+) -> bool {
+    let target_signature = simulator_target_signature(latest, target_scopes);
+    // Preemption in kube-scheduler-simulator can remove victim pods from the export entirely.
+    // For benchmark snapshots, a stable missing target is a terminal "not placed" outcome.
+    if target_signature == *last_signature {
+        *stable_polls += 1;
+    } else {
+        *stable_polls = 0;
+        *last_signature = target_signature;
+    }
+    *stable_polls >= required_stable_polls
+}
+
+fn simulator_target_signature(
+    latest: &SimulatorExportPayload,
+    target_scopes: &BTreeSet<String>,
+) -> BTreeMap<String, (Option<String>, bool)> {
+    latest
+        .pods
+        .iter()
+        .filter_map(|pod| {
+            let scope = pod_scope(pod);
+            target_scopes.contains(&scope).then(|| {
+                let has_filter_result = pod
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .map(|a| a.contains_key(FILTER_RESULT_ANNOTATION))
+                    .unwrap_or(false);
+                (scope, (pod_assigned_node(pod), has_filter_result))
+            })
+        })
+        .collect()
 }
 
 /// Reset the simulator, import a snapshot, and poll the export until the pod at `pod_scope`
@@ -677,7 +1201,7 @@ mod tests {
         ScenarioConfig,
     };
     use k8s_openapi::api::core::v1 as corev1;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn export_payload_tolerates_null_pods() {
@@ -689,6 +1213,27 @@ mod tests {
         let p2: super::SimulatorExportPayload =
             serde_json::from_str(r#"{}"#).expect("absent pods decodes");
         assert!(p2.pods.is_empty());
+    }
+
+    #[test]
+    fn simulator_import_payload_includes_valid_default_scheduler_config() {
+        let value = serde_json::to_value(super::SimulatorImportPayload::default())
+            .expect("serialize default simulator import payload");
+        let scheduler_config = value
+            .get("schedulerConfig")
+            .expect("imports should include a valid scheduler config");
+        assert_eq!(
+            scheduler_config
+                .get("apiVersion")
+                .and_then(serde_json::Value::as_str),
+            Some("kubescheduler.config.k8s.io/v1")
+        );
+        assert_eq!(
+            scheduler_config
+                .get("kind")
+                .and_then(serde_json::Value::as_str),
+            Some("KubeSchedulerConfiguration")
+        );
     }
 
     #[test]
@@ -821,5 +1366,182 @@ mod tests {
         let report = super::build_simulator_report(&plan, exported);
         assert_eq!(report.verified_moves, 1);
         assert_eq!(report.rejected_moves, 0);
+    }
+
+    #[test]
+    fn simulator_batch_stability_treats_missing_preempted_targets_as_terminal() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            super::SELECTED_NODE_ANNOTATION.to_string(),
+            "node-a".to_string(),
+        );
+        let exported = super::SimulatorExportPayload {
+            pods: vec![corev1::Pod {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("survivor".to_string()),
+                    namespace: Some("bench".to_string()),
+                    annotations: Some(annotations),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        };
+        let target_scopes = BTreeSet::from([
+            "bench/survivor".to_string(),
+            "bench/preempted-victim".to_string(),
+        ]);
+        let mut last_signature = BTreeMap::new();
+        let mut stable_polls = 0_usize;
+
+        assert!(!super::simulator_batch_is_stable(
+            &exported,
+            &target_scopes,
+            &mut last_signature,
+            &mut stable_polls,
+            super::SIMULATOR_BATCH_STABLE_POLLS,
+        ));
+        for _ in 1..super::SIMULATOR_BATCH_STABLE_POLLS {
+            assert!(!super::simulator_batch_is_stable(
+                &exported,
+                &target_scopes,
+                &mut last_signature,
+                &mut stable_polls,
+                super::SIMULATOR_BATCH_STABLE_POLLS,
+            ));
+        }
+        assert!(super::simulator_batch_is_stable(
+            &exported,
+            &target_scopes,
+            &mut last_signature,
+            &mut stable_polls,
+            super::SIMULATOR_BATCH_STABLE_POLLS,
+        ));
+    }
+
+    #[test]
+    fn simulator_batch_stability_can_use_fewer_polls_for_benchmark_refresh() {
+        let exported = super::SimulatorExportPayload {
+            pods: vec![corev1::Pod {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("survivor".to_string()),
+                    namespace: Some("bench".to_string()),
+                    annotations: Some(BTreeMap::from([(
+                        super::SELECTED_NODE_ANNOTATION.to_string(),
+                        "node-a".to_string(),
+                    )])),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        };
+        let target_scopes = BTreeSet::from([
+            "bench/survivor".to_string(),
+            "bench/preempted-victim".to_string(),
+        ]);
+        let mut last_signature = BTreeMap::new();
+        let mut stable_polls = 0_usize;
+
+        assert!(!super::simulator_batch_is_stable(
+            &exported,
+            &target_scopes,
+            &mut last_signature,
+            &mut stable_polls,
+            1,
+        ));
+        assert!(super::simulator_batch_is_stable(
+            &exported,
+            &target_scopes,
+            &mut last_signature,
+            &mut stable_polls,
+            1,
+        ));
+    }
+
+    #[test]
+    fn simulator_batch_state_requires_all_targets_for_full_resolution() {
+        let mut selected = BTreeMap::new();
+        selected.insert(
+            super::SELECTED_NODE_ANNOTATION.to_string(),
+            "node-a".to_string(),
+        );
+        let mut rejected = BTreeMap::new();
+        rejected.insert(
+            super::FILTER_RESULT_ANNOTATION.to_string(),
+            r#"{"node-a":{"NodeResourcesFit":"Insufficient nvidia.com/gpu"}}"#.to_string(),
+        );
+        let exported = super::SimulatorExportPayload {
+            pods: vec![
+                corev1::Pod {
+                    metadata: kube::api::ObjectMeta {
+                        name: Some("placed".to_string()),
+                        namespace: Some("bench".to_string()),
+                        annotations: Some(selected),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                corev1::Pod {
+                    metadata: kube::api::ObjectMeta {
+                        name: Some("rejected".to_string()),
+                        namespace: Some("bench".to_string()),
+                        annotations: Some(rejected),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let complete_targets =
+            BTreeSet::from(["bench/placed".to_string(), "bench/rejected".to_string()]);
+        let complete = super::simulator_batch_state(&exported, &complete_targets);
+        assert_eq!(complete.target_count, 2);
+        assert_eq!(complete.present_targets, 2);
+        assert_eq!(complete.terminal_present_targets, 2);
+        assert!(complete.all_targets_resolved());
+        assert!(complete.visible_targets_terminal());
+
+        let partial_targets = BTreeSet::from([
+            "bench/placed".to_string(),
+            "bench/rejected".to_string(),
+            "bench/not-yet-exported".to_string(),
+        ]);
+        let partial = super::simulator_batch_state(&exported, &partial_targets);
+        assert_eq!(partial.target_count, 3);
+        assert_eq!(partial.present_targets, 2);
+        assert_eq!(partial.terminal_present_targets, 2);
+        assert!(!partial.all_targets_resolved());
+        assert!(partial.visible_targets_terminal());
+    }
+
+    #[test]
+    fn simulator_batch_diagnostics_summary_exposes_target_state() {
+        let diagnostics = super::SimulatorBatchDiagnostics {
+            elapsed_millis: 2500,
+            phase: "poll".to_string(),
+            state: super::SimulatorBatchState {
+                target_count: 6,
+                present_targets: 2,
+                terminal_present_targets: 2,
+            },
+            stable_polls: 3,
+            timed_out: true,
+            phase_timings: vec![super::SimulatorPhaseTiming {
+                phase: "snapshot import".to_string(),
+                duration_millis: 25,
+                cumulative_millis: 100,
+            }],
+        };
+
+        let summary = diagnostics.summary();
+
+        assert!(summary.contains("phase=poll"));
+        assert!(summary.contains("elapsed=2500ms"));
+        assert!(summary.contains("targets=6"));
+        assert!(summary.contains("present=2"));
+        assert!(summary.contains("terminal_present=2"));
+        assert!(summary.contains("missing=4"));
+        assert!(summary.contains("stable_polls=3"));
+        assert!(summary.contains("timed_out=true"));
     }
 }
