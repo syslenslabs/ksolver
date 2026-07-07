@@ -1,0 +1,64 @@
+# A 4-pod CO-LOCATED training gang (each pod 1 GPU, must land on ONE node).
+# The real kube scheduler doesn't understand ksolver's co-location label, so it
+# SPREADS the gang across both nodes (2+2) -> "split gang" liability: the gang's
+# NVLink co-location is broken and it won't train correctly. ksolver keeps it
+# together or declines it. This is what proves ksolver is *smarter*, not just different.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gang-teamb-0
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", scheduling.x-k8s.io/pod-group: teamb-train, scheduling.x-k8s.io/gang-colocate: "true" }
+  annotations: { ksolver.dev/predicted-peak-vram-gib: "16", ksolver.dev/min-gpus: "4" }
+spec:
+  schedulerName: ksolver
+  tolerations: [{ key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }]
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources: { requests: { cpu: "1", memory: 2Gi, nvidia.com/gpu: "1" }, limits: { nvidia.com/gpu: "1" } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gang-teamb-1
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", scheduling.x-k8s.io/pod-group: teamb-train, scheduling.x-k8s.io/gang-colocate: "true" }
+  annotations: { ksolver.dev/predicted-peak-vram-gib: "16", ksolver.dev/min-gpus: "4" }
+spec:
+  schedulerName: ksolver
+  tolerations: [{ key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }]
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources: { requests: { cpu: "1", memory: 2Gi, nvidia.com/gpu: "1" }, limits: { nvidia.com/gpu: "1" } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gang-teamb-2
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", scheduling.x-k8s.io/pod-group: teamb-train, scheduling.x-k8s.io/gang-colocate: "true" }
+  annotations: { ksolver.dev/predicted-peak-vram-gib: "16", ksolver.dev/min-gpus: "4" }
+spec:
+  schedulerName: ksolver
+  tolerations: [{ key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }]
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources: { requests: { cpu: "1", memory: 2Gi, nvidia.com/gpu: "1" }, limits: { nvidia.com/gpu: "1" } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gang-teamb-3
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", scheduling.x-k8s.io/pod-group: teamb-train, scheduling.x-k8s.io/gang-colocate: "true" }
+  annotations: { ksolver.dev/predicted-peak-vram-gib: "16", ksolver.dev/min-gpus: "4" }
+spec:
+  schedulerName: ksolver
+  tolerations: [{ key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }]
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources: { requests: { cpu: "1", memory: 2Gi, nvidia.com/gpu: "1" }, limits: { nvidia.com/gpu: "1" } }

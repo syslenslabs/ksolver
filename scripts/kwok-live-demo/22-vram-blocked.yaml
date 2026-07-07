@@ -1,0 +1,21 @@
+# 1-GPU job whose predicted peak VRAM (40 GiB) exceeds every node's 24 GiB/GPU.
+# GPU COUNT fits (nodes have free GPUs) but device MEMORY does not -> ksolver must
+# mark it VRAM-blocked and emit NO repair (freeing slots on 24 GiB GPUs can't help).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vram-huge-40g
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", app: oversized-vram-train }
+  annotations:
+    ksolver.dev/predicted-peak-vram-gib: "40"
+spec:
+  schedulerName: ksolver
+  tolerations:
+  - { key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources:
+      requests: { cpu: "1", memory: 2Gi, nvidia.com/gpu: "1" }
+      limits: { nvidia.com/gpu: "1" }

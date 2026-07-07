@@ -1,0 +1,21 @@
+# Single 4-GPU training job: needs a contiguous 4-GPU island on ONE node.
+# No node has 4 free (each has 3), so BOTH kube and ksolver leave it pending —
+# but ksolver additionally produces a dry-run repair to free an island.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bigjob-4gpu
+  namespace: ksolver-demo
+  labels: { ksolver-demo: "true", app: single-node-4gpu-train }
+  annotations:
+    ksolver.dev/predicted-peak-vram-gib: "20"
+spec:
+  schedulerName: ksolver
+  tolerations:
+  - { key: kwok.x-k8s.io/node, value: fake, effect: NoSchedule }
+  containers:
+  - name: trainer
+    image: registry.k8s.io/pause:3.9
+    resources:
+      requests: { cpu: "4", memory: 8Gi, nvidia.com/gpu: "4" }
+      limits: { nvidia.com/gpu: "4" }
