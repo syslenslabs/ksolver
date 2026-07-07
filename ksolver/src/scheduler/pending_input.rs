@@ -376,7 +376,7 @@ fn parse_vram_label_bytes(raw: &str) -> i64 {
     (parsed * multiplier).round() as i64
 }
 
-fn node_peak_vram_bytes(labels: &BTreeMap<String, String>) -> i64 {
+pub(crate) fn node_peak_vram_bytes(labels: &BTreeMap<String, String>) -> i64 {
     [
         "ksolver.dev/gpu-vram-bytes",
         "ksolver.dev/gpu-vram-gib",

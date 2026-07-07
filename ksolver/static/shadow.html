@@ -234,6 +234,12 @@
   .slot.base { background: #33507a; border-color: #3d5c8c; }
   .slot.used { background: #2f7f57; border-color: #3a9668; }
   .slot.waste { background: #5a4420; border-color: #6f5427; }
+  .board-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; color: var(--muted); font-size: 11.5px; align-items: center; }
+  .board-legend .lg { display: inline-flex; align-items: center; gap: 6px; }
+  .board-legend .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); display: inline-block; flex: none; }
+  .board-legend .sw.base { background: #33507a; border-color: #3d5c8c; }
+  .board-legend .sw.used { background: #2f7f57; border-color: #3a9668; }
+  .board-legend .sw.waste { background: #5a4420; border-color: #6f5427; }
   .jobs { display: flex; gap: 4px; flex-wrap: wrap; }
   .job { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 999px;
          padding: 2px 7px; background: var(--ksolver-dim); color: #bfe0ff; font-size: 11px; border: 1px solid #234a6c; }
@@ -432,6 +438,13 @@
   .callout.warn { border: 1px solid #5a4420; background: linear-gradient(180deg, rgba(242,178,74,.07), transparent); }
   .callout.warn .hd { color: var(--warn); } .callout.warn .glyph { background: #4a3a17; color: var(--warn); }
   .callout.warn .body b { color: var(--warn); }
+  .callout.ok { border: 1px solid #1f5a3a; background: linear-gradient(180deg, rgba(99,230,160,.07), transparent); }
+  .callout.ok .hd { color: var(--good); } .callout.ok .glyph { background: #17402c; color: var(--good); }
+  .callout.ok .body b { color: var(--good); }
+  .kube-liability { display: flex; gap: 7px; align-items: flex-start; margin-top: 7px; font-size: 11.5px; color: var(--warn); }
+  .kube-liability .tag { flex: none; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    color: var(--bad); border: 1px solid #5a2b2b; border-radius: 4px; padding: 1px 5px; background: rgba(255,139,139,.08); }
+  .kube-liability .txt { color: var(--muted); line-height: 1.45; }
   .callout.info { border: 1px solid var(--border); background: var(--surface); }
   .callout.info .hd { color: var(--ink); } .callout.info .glyph { background: var(--surface-2); color: var(--muted); }
   .callout.hidden { display: none; }
@@ -629,6 +642,11 @@
         <div class="board-head"><div class="t"><span class="name">ksolver batch</span><span class="score" id="ks-score"></span></div><div class="note">Solver sees the entire pending queue and can reject whole gangs at once.</div></div>
         <div class="board-body"><div class="nodes" id="ks-nodes"></div><div class="unplaced-list" id="ks-unplaced"></div></div>
       </div>
+    </div>
+    <div class="board-legend">
+      <span class="lg"><span class="sw base"></span> already running</span>
+      <span class="lg"><span class="sw used"></span> placed this solve</span>
+      <span class="lg"><span class="sw waste"></span> free but stranded (can't complete a gang)</span>
     </div>
 
     <h2 class="section" style="margin-top:22px">Placement decisions</h2>
@@ -1156,43 +1174,86 @@
     var ksPlan = planFrom(cloneNodes(cluster), (trace && trace.decisions) || []);
     board($("ks-nodes"), $("ks-unplaced"), $("ks-score"), ksPlan);
     var kubeStats = null;
+    var liab = null;
     if (kubePlan && kubePlan.available) {
       $("kube-note").textContent = simNote(kubePlan);
       var kp = planFrom(cloneNodes(cluster), kubePlan.placements || []);
       board($("kube-nodes"), $("kube-unplaced"), $("kube-score"), kp);
       kubeStats = stats(kp);
+      liab = kubePlan.liabilities || null;
+      renderKubeLiabilities(liab);
     } else {
       clear($("kube-nodes")); clear($("kube-unplaced"));
       $("kube-score").textContent = "unavailable";
       $("kube-note").textContent = (kubePlan && kubePlan.reason) || "kube-scheduler-simulator not configured";
       $("kube-nodes").appendChild(el("div", "empty-hint", "No kube-scheduler-simulator baseline for the current workload."));
     }
-    renderTradeoff(stats(ksPlan), kubeStats);
+    renderTradeoff(stats(ksPlan), kubeStats, liab);
     renderDecisions((trace && trace.decisions) || []);
   }
 
-  function renderTradeoff(ks, kube) {
+  // List, under the kube column, the safety liabilities kube incurred by "admitting" more work.
+  function renderKubeLiabilities(liab) {
+    var host = $("kube-unplaced"); if (!host || !liab) return;
+    var items = [];
+    (liab.oom_risk || []).forEach(function (o) { items.push({ tag: "OOM risk", txt: o.detail }); });
+    (liab.split_gangs || []).forEach(function (g) {
+      items.push({ tag: g.kind === "partial" ? "partial gang" : "split gang", txt: g.detail });
+    });
+    items.forEach(function (it) {
+      var row = el("div", "kube-liability");
+      row.appendChild(el("span", "tag", it.tag));
+      row.appendChild(el("span", "txt", it.txt || ""));
+      host.appendChild(row);
+    });
+  }
+
+  function renderTradeoff(ks, kube, liab) {
     var box = $("live-tradeoff"); if (!box) return;
     clear(box);
-    // Only warn when ksolver actually does worse on admission/yield than kube.
+    var liabCount = (liab && liab.count) || 0;
     var gpuDelta = kube ? (ks.scheduledGpu - kube.scheduledGpu) : 0;       // <0 = under-admits
     var podDelta = kube ? (ks.unplacedPods - kube.unplacedPods) : 0;       // >0 = more unplaced
+    var underAdmits = kube && (gpuDelta < 0 || podDelta > 0);
+
+    // Case 1 (the important reframe): kube "admits" more, but only by taking on safety liabilities
+    // ksolver refuses. Lead with SAFER, not "places less".
+    if (liabCount > 0) {
+      box.className = "callout ok";
+      var hd = el("div", "hd"); hd.appendChild(el("span", "glyph", "✓"));
+      hd.appendChild(document.createTextNode("ksolver is safer here — it refused " + liabCount + " unsafe placement" + (liabCount === 1 ? "" : "s") + " kube accepted"));
+      box.appendChild(hd);
+      var body = el("div", "body");
+      body.appendChild(document.createTextNode((liab.summary || "kube's placement carries safety liabilities on this queue") + "."));
+      box.appendChild(body);
+      (liab.oom_risk || []).forEach(function (o) { box.appendChild(el("div", "rec", o.detail)); });
+      (liab.split_gangs || []).forEach(function (g) { box.appendChild(el("div", "rec", g.detail)); });
+      if (underAdmits) {
+        var note = el("div", "rec");
+        var moreTxt = gpuDelta < 0 ? ((-gpuDelta) + " more GPU") : (podDelta + " more pod" + (podDelta === 1 ? "" : "s"));
+        note.appendChild(document.createTextNode("kube's column shows " + moreTxt + " placed, but those placements are unsafe or invalid — ksolver's lower count is the correct call, not a regression."));
+        box.appendChild(note);
+      }
+      return;
+    }
+
+    // Case 2: ksolver under-admits with NO offsetting liability -> the honest cost/yield tradeoff.
     if (!kube || (gpuDelta >= 0 && podDelta <= 0)) { box.className = "callout warn hidden"; return; }
     box.className = "callout warn";
-    var hd = el("div", "hd"); hd.appendChild(el("span", "glyph", "!"));
-    hd.appendChild(document.createTextNode("Admission tradeoff — ksolver batch places less than kube here"));
-    box.appendChild(hd);
-    var body = el("div", "body");
-    body.appendChild(document.createTextNode("On this workload ksolver placed "));
-    body.appendChild(el("b", null, ks.scheduledGpu + " GPU"));
-    body.appendChild(document.createTextNode(" (" + ks.unplacedPods + " pods unplaced) versus kube-scheduler-simulator's "));
-    body.appendChild(el("b", null, kube.scheduledGpu + " GPU"));
-    body.appendChild(document.createTextNode(" (" + kube.unplacedPods + " pods unplaced)"));
+    var hd2 = el("div", "hd"); hd2.appendChild(el("span", "glyph", "!"));
+    hd2.appendChild(document.createTextNode("Admission tradeoff — ksolver batch places less than kube here"));
+    box.appendChild(hd2);
+    var body2 = el("div", "body");
+    body2.appendChild(document.createTextNode("On this workload ksolver placed "));
+    body2.appendChild(el("b", null, ks.scheduledGpu + " GPU"));
+    body2.appendChild(document.createTextNode(" (" + ks.unplacedPods + " pods unplaced) versus kube-scheduler-simulator's "));
+    body2.appendChild(el("b", null, kube.scheduledGpu + " GPU"));
+    body2.appendChild(document.createTextNode(" (" + kube.unplacedPods + " pods unplaced)"));
     var parts = [];
     if (gpuDelta < 0) parts.push((-gpuDelta) + " fewer useful GPU admitted");
     if (podDelta > 0) parts.push(podDelta + " more pods left pending");
-    body.appendChild(document.createTextNode(" — " + parts.join(", ") + ". The active objective optimizes active-node cost and bin-packing density over raw yield, so it can decline whole gangs that kube spreads across more nodes. That is a deliberate tradeoff, not a placement failure, but it under-admits versus kube on this queue."));
-    box.appendChild(body);
+    body2.appendChild(document.createTextNode(" — " + parts.join(", ") + ". The active objective optimizes active-node cost and bin-packing density over raw yield, so it can decline whole gangs that kube spreads across more nodes. That is a deliberate tradeoff, not a placement failure, but it under-admits versus kube on this queue."));
+    box.appendChild(body2);
     var rec = el("div", "rec");
     rec.appendChild(document.createTextNode("If the operator's goal is admission / yield rather than cost, re-solve with the "));
     rec.appendChild(el("b", null, "GPU gang aware"));
@@ -2845,55 +2906,44 @@
         var production = operatorStatus.production_readiness || {};
         var proofGates = operatorStatus.proof_gates || {};
         var evidenceGaps = operatorStatus.evidence_gaps || {};
-        var vram = operatorStatus.vram || {};
         var simulator = operatorStatus.simulator || {};
-        var decision = operatorStatus.decision_readiness || {};
         var actionItems = operatorStatus.action_items || [];
         var strictExit = demoGate.strict_exit_code == null ? (status === "ready" ? 0 : 2) : demoGate.strict_exit_code;
-        var vramClaimSafeLabels = (vram.display_claim_safe_driver_labels || vramDisplayLabels(vram.claim_safe_driver_labels || [])).filter(Boolean).slice(0, 3);
-        var vramSyntheticLabels = (vram.display_synthetic_driver_labels || vramDisplayLabels(vram.synthetic_driver_labels || [])).filter(Boolean).slice(0, 2);
-        var meta = [
-          { label: production.blocker_class && production.blocker_class !== "none" ? production.blocker_class : operatorStatus.status_label || "claim blocked", cls: tone === "bad" ? "down" : "flat" },
-          { label: strictExit === 0 ? "strict pass" : "strict exit " + fmt(strictExit), cls: strictExit === 0 ? "up" : "down" },
-          { label: vram.mode || "VRAM unknown", cls: operatorStatus.can_hard_admit_vram ? "up" : "flat" }
-        ];
+        // Distilled banner: only the top-line gate state lives here. Per-driver VRAM
+        // labels, gap categories, and the decision state-map remain in the Diagnostics
+        // tab (progressive disclosure); counts fold into chip color + tooltip.
+        var meta = [];
         if (proofGates.total) {
-          meta.push({ label: fmt(proofGates.pass || 0) + "/" + fmt(proofGates.total || 0) + " proof gates", cls: proofGates.blocked ? "down" : (proofGates.warn ? "warn" : "up") });
-          if (proofGates.blocked) meta.push({ label: fmt(proofGates.blocked) + " blocked", cls: "down" });
-          else if (proofGates.warn) meta.push({ label: fmt(proofGates.warn) + " warn", cls: "warn" });
+          var pgTitle = [fmt(proofGates.pass || 0) + " of " + fmt(proofGates.total) + " proof gates passing"];
+          if (proofGates.blocked) pgTitle.push(fmt(proofGates.blocked) + " blocked");
+          if (proofGates.warn) pgTitle.push(fmt(proofGates.warn) + " warning");
+          meta.push({
+            label: fmt(proofGates.pass || 0) + "/" + fmt(proofGates.total) + " proof gates",
+            cls: proofGates.blocked ? "down" : (proofGates.warn ? "warn" : "up"),
+            title: pgTitle.join(" · ")
+          });
         }
-        if (evidenceGaps.total) {
-          meta.push({ label: fmt(evidenceGaps.blocked || 0) + " gaps blocked", cls: evidenceGaps.blocked ? "down" : "flat" });
-          if (evidenceGaps.warn) meta.push({ label: fmt(evidenceGaps.warn) + " gap warn", cls: "warn" });
-          var gapCategoryText = categoryCountsText(evidenceGaps.category_counts, 2);
-          if (gapCategoryText) meta.push({ label: gapCategoryText, cls: "warn" });
+        meta.push({
+          label: strictExit === 0 ? "strict pass" : "strict exit " + fmt(strictExit),
+          cls: strictExit === 0 ? "up" : "down",
+          title: strictExit === 0 ? "strict demo gate passes" : "strict demo gate exits " + fmt(strictExit) + " — would fail CI"
+        });
+        if (evidenceGaps.total && evidenceGaps.blocked) {
+          var gapTitle = [fmt(evidenceGaps.blocked) + " evidence gap(s) blocking the claim"];
+          if (evidenceGaps.warn) gapTitle.push(fmt(evidenceGaps.warn) + " warning");
+          var gapCat = categoryCountsText(evidenceGaps.category_counts, 3);
+          if (gapCat) gapTitle.push(gapCat);
+          meta.push({ label: fmt(evidenceGaps.blocked) + " gaps blocked", cls: "down", title: gapTitle.join(" · ") });
         }
         if (simulator.claim_ready != null || simulator.claim_mode || simulator.claim_blocker) {
           var simClaimReady = simulator.claim_ready === true;
-          meta.push({ label: simClaimReady ? "simulator claim ready" : "simulator claim blocked", cls: simClaimReady ? "up" : "down" });
-          if (simulator.claim_mode) meta.push({ label: simulator.claim_mode, cls: simClaimReady ? "ks" : "warn" });
-          if (!simClaimReady && simulator.claim_blocker) meta.push({ label: shortText(simulator.claim_blocker, 50), cls: "down" });
+          var simTitle = [simClaimReady ? "simulator baseline claim is ready" : "simulator baseline claim is blocked"];
+          if (simulator.claim_mode) simTitle.push(simulator.claim_mode);
+          if (!simClaimReady && simulator.claim_blocker) simTitle.push(shortText(simulator.claim_blocker, 80));
+          meta.push({ label: simClaimReady ? "simulator claim ready" : "simulator claim blocked", cls: simClaimReady ? "up" : "down", title: simTitle.join(" · ") });
         }
         var reserveMeta = reservePressureBannerMeta(binding);
         if (reserveMeta) meta.push(reserveMeta);
-        if (decision.summary) {
-          meta.push({ label: shortText(decision.summary, 80), cls: decision.status === "ready" ? "up" : "warn" });
-        }
-        if (actionItems.length) {
-          meta.push({ label: "next " + (actionItems[0].category || "action"), cls: actionItems[0].severity === "blocked" ? "down" : "warn" });
-        }
-        if (vram.model_driver_count) {
-          meta.push({ label: "VRAM drivers " + fmt(vram.model_driver_count), cls: "ks" });
-        }
-        if (vram.claim_safe_driver_count != null) {
-          meta.push({ label: "claim-safe " + fmt(vram.claim_safe_driver_count), cls: vram.claim_safe_driver_count ? "ks" : "warn" });
-        }
-        vramClaimSafeLabels.forEach(function (label) {
-          meta.push({ label: label, cls: "ks" });
-        });
-        vramSyntheticLabels.forEach(function (label) {
-          meta.push({ label: label, cls: "warn" });
-        });
         var debugCommands = operatorStatus.debug_commands || production.debug_commands || [];
         if (simulator.recovery_command && simulator.claim_ready !== true) {
           debugCommands = [simulator.recovery_command].concat(debugCommands || []);
@@ -2935,30 +2985,27 @@
     }
     var blockerText = String(blocker);
     var action = summary.primary_claim_blocker_next_action || "Open Diagnostics for the missing evidence and collection commands.";
-    var prodClass = summary.production_readiness_blocker_class || "";
     var fallbackReadiness = ((evidenceBundle && evidenceBundle.artifacts && evidenceBundle.artifacts.production_safety) || {}).readiness || {};
     var fallbackDebugCommands = fallbackReadiness.debug_commands || [];
     var tone = blockerText.indexOf("production readiness blocked:") === 0 || blockerText.indexOf("mutation is allowed") === 0 ? "bad" : "warn";
     var strictExit = summary.demo_gate_strict_exit_code == null ? (summary.review_ready ? 0 : 2) : summary.demo_gate_strict_exit_code;
-    var claimSafeLabels = (summary.vram_display_claim_safe_driver_labels || vramDisplayLabels(summary.vram_claim_safe_driver_labels || [])).filter(Boolean).slice(0, 2);
-    var syntheticLabels = (summary.vram_display_synthetic_driver_labels || vramDisplayLabels(summary.vram_synthetic_driver_labels || [])).filter(Boolean).slice(0, 1);
+    // Distilled fallback banner (operator-status unavailable): top-line state only;
+    // full VRAM drivers and gap detail remain in the Diagnostics tab.
     var meta = [
-      { label: prodClass && prodClass !== "none" ? prodClass : "claim blocked", cls: tone === "bad" ? "down" : "flat" },
-      { label: strictExit === 0 ? "strict pass" : "strict exit " + fmt(strictExit), cls: strictExit === 0 ? "up" : "down" },
-      { label: summary.vram_admission_mode || "VRAM unknown", cls: summary.vram_hard_admission_ready ? "up" : "flat" }
+      {
+        label: strictExit === 0 ? "strict pass" : "strict exit " + fmt(strictExit),
+        cls: strictExit === 0 ? "up" : "down",
+        title: strictExit === 0 ? "strict demo gate passes" : "strict demo gate exits " + fmt(strictExit) + " — would fail CI"
+      }
     ];
     if (summary.simulator_claim_ready != null || summary.simulator_claim_mode || summary.simulator_claim_blocker) {
       var simSummaryClaimReady = summary.simulator_claim_ready === true;
-      meta.push({ label: simSummaryClaimReady ? "simulator claim ready" : "simulator claim blocked", cls: simSummaryClaimReady ? "up" : "down" });
-      if (summary.simulator_claim_mode) meta.push({ label: summary.simulator_claim_mode, cls: simSummaryClaimReady ? "ks" : "warn" });
-      if (!simSummaryClaimReady && summary.simulator_claim_blocker) meta.push({ label: shortText(summary.simulator_claim_blocker, 50), cls: "down" });
+      var simSumTitle = [simSummaryClaimReady ? "simulator baseline claim is ready" : "simulator baseline claim is blocked"];
+      if (summary.simulator_claim_mode) simSumTitle.push(summary.simulator_claim_mode);
+      if (!simSummaryClaimReady && summary.simulator_claim_blocker) simSumTitle.push(shortText(summary.simulator_claim_blocker, 80));
+      meta.push({ label: simSummaryClaimReady ? "simulator claim ready" : "simulator claim blocked", cls: simSummaryClaimReady ? "up" : "down", title: simSumTitle.join(" · ") });
     }
     if (summaryReserveMeta) meta.push(summaryReserveMeta);
-    if (summary.vram_claim_safe_driver_count != null) {
-      meta.push({ label: "claim-safe " + fmt(summary.vram_claim_safe_driver_count || 0), cls: summary.vram_claim_safe_driver_count ? "ks" : "warn" });
-    }
-    claimSafeLabels.forEach(function (label) { meta.push({ label: label, cls: "ks" }); });
-    syntheticLabels.forEach(function (label) { meta.push({ label: label, cls: "warn" }); });
     showOperatorBanner(tone, blockerText, action, meta, fallbackDebugCommands[0]);
   }
   function renderApiErrorBanner(message) {

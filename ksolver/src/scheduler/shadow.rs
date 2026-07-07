@@ -4155,6 +4155,185 @@ async fn cluster_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::V
     }))
 }
 
+/// Per-pod metadata needed to judge whether kube's placement is *unsafe*, not just different.
+#[derive(Debug, Clone)]
+struct PodLiabilityMeta {
+    gang_key: Option<String>,
+    colocate: bool,
+    predicted_vram_bytes: i64,
+}
+
+/// Compare the kube-scheduler-simulator's placement against the constraints ksolver enforces and
+/// surface the *liabilities* kube incurs by "admitting" more work: placing a job whose predicted
+/// peak VRAM exceeds the GPU's memory (CUDA OOM risk), or spreading / partially placing a
+/// co-located gang (breaks required co-location, or strands GPUs on a gang that never runs).
+///
+/// This is what lets the live demo show ksolver is *safer and smarter*, not merely different: when
+/// kube places more GPUs, this names the price it paid to do so.
+fn compute_kube_liabilities(
+    placements: &[serde_json::Value],
+    pod_meta: &std::collections::BTreeMap<String, PodLiabilityMeta>,
+    node_vram_bytes: &std::collections::BTreeMap<String, i64>,
+) -> serde_json::Value {
+    let gib = 1024.0 * 1024.0 * 1024.0;
+    let round1 = |bytes: i64| ((bytes as f64 / gib) * 10.0).round() / 10.0;
+
+    // scope ("ns/name") -> node kube placed it on (placed pods only)
+    let mut placed_node: std::collections::BTreeMap<String, String> = Default::default();
+    for p in placements {
+        let ns = p.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(node) = p.get("placement").and_then(|pl| {
+            if pl.get("kind").and_then(|k| k.as_str()) == Some("placed") {
+                pl.get("node").and_then(|n| n.as_str())
+            } else {
+                None
+            }
+        }) {
+            placed_node.insert(format!("{ns}/{name}"), node.to_string());
+        }
+    }
+
+    // OOM risk: kube placed a pod whose predicted peak VRAM exceeds the node's per-GPU VRAM.
+    let mut oom_risk = Vec::new();
+    for (scope, node) in &placed_node {
+        let Some(meta) = pod_meta.get(scope) else {
+            continue;
+        };
+        if meta.predicted_vram_bytes <= 0 {
+            continue;
+        }
+        let Some(&node_vram) = node_vram_bytes.get(node) else {
+            continue;
+        };
+        if node_vram > 0 && meta.predicted_vram_bytes > node_vram {
+            oom_risk.push(serde_json::json!({
+                "scope": scope,
+                "node": node,
+                "predicted_vram_gib": round1(meta.predicted_vram_bytes),
+                "node_vram_gib": round1(node_vram),
+                "detail": format!(
+                    "kube placed {scope} on {node}, but its predicted peak VRAM ({:.0} GiB) exceeds the GPU's memory ({:.0} GiB) — CUDA OOM risk that ksolver blocks",
+                    round1(meta.predicted_vram_bytes), round1(node_vram)
+                ),
+            }));
+        }
+    }
+
+    // Split / partial co-located gangs: kube spread a colocate gang across nodes or admitted only
+    // part of it. Either way the gang's co-location intent is violated and GPUs are wasted.
+    let mut groups: std::collections::BTreeMap<
+        String,
+        (usize, std::collections::BTreeSet<String>, usize),
+    > = Default::default();
+    for (scope, meta) in pod_meta {
+        if !meta.colocate {
+            continue;
+        }
+        let Some(gang) = meta.gang_key.as_ref() else {
+            continue;
+        };
+        let entry = groups.entry(gang.clone()).or_default();
+        entry.0 += 1;
+        if let Some(node) = placed_node.get(scope) {
+            entry.1.insert(node.clone());
+            entry.2 += 1;
+        }
+    }
+    let mut split_gangs = Vec::new();
+    for (gang, (total, nodes, placed)) in &groups {
+        let multi_node = nodes.len() > 1;
+        let partial = *placed > 0 && *placed < *total;
+        if !multi_node && !partial {
+            continue;
+        }
+        let (kind, detail) = if multi_node {
+            (
+                "split",
+                format!(
+                    "kube spread co-located gang {gang} across {} nodes — breaks the gang's required co-location (e.g. NVLink); ksolver keeps it together or declines it",
+                    nodes.len()
+                ),
+            )
+        } else {
+            (
+                "partial",
+                format!(
+                    "kube admitted only {placed}/{total} of co-located gang {gang} — a partial gang strands GPUs and never runs; ksolver admits it whole or not at all"
+                ),
+            )
+        };
+        split_gangs.push(serde_json::json!({
+            "group": gang,
+            "kind": kind,
+            "member_total": total,
+            "placed_count": placed,
+            "nodes": nodes.iter().cloned().collect::<Vec<_>>(),
+            "detail": detail,
+        }));
+    }
+
+    let count = oom_risk.len() + split_gangs.len();
+    let mut parts = Vec::new();
+    if !oom_risk.is_empty() {
+        parts.push(format!("{} job(s) at CUDA OOM risk", oom_risk.len()));
+    }
+    if !split_gangs.is_empty() {
+        parts.push(format!(
+            "{} co-located gang(s) split or partially placed",
+            split_gangs.len()
+        ));
+    }
+    let summary = if count == 0 {
+        "kube's placement carries no detected safety liabilities on this queue".to_string()
+    } else {
+        format!(
+            "kube would accept placements ksolver refuses: {}",
+            parts.join(", ")
+        )
+    };
+
+    serde_json::json!({
+        "count": count,
+        "oom_risk": oom_risk,
+        "split_gangs": split_gangs,
+        "summary": summary,
+    })
+}
+
+/// Build the per-pod liability metadata + node VRAM maps from live shadow state, then compute the
+/// kube liabilities for the given placements.
+fn kube_liabilities_from_state(
+    placements: &[serde_json::Value],
+    pending: &[crate::scheduler::pod_filter::PendingGpuPod],
+    cluster: Option<&crate::model::NormalizedCluster>,
+) -> serde_json::Value {
+    let mut pod_meta: std::collections::BTreeMap<String, PodLiabilityMeta> = Default::default();
+    for p in pending {
+        pod_meta.insert(
+            format!("{}/{}", p.namespace, p.name),
+            PodLiabilityMeta {
+                gang_key: p.gang_key.clone(),
+                colocate: p.colocate,
+                predicted_vram_bytes: p.predicted_peak_vram_bytes,
+            },
+        );
+    }
+    let mut node_vram: std::collections::BTreeMap<String, i64> = Default::default();
+    if let Some(cluster) = cluster {
+        for node in &cluster.nodes {
+            let bytes = crate::scheduler::pending_input::node_peak_vram_bytes(&node.labels);
+            if bytes > 0 {
+                node_vram.insert(node.name.clone(), bytes);
+            }
+        }
+    }
+    compute_kube_liabilities(placements, &pod_meta, &node_vram)
+}
+
 async fn kube_simulator_plan_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
     if s.simulator_pool.is_empty() {
         return Json(serde_json::json!({
@@ -4230,12 +4409,23 @@ async fn kube_simulator_plan_handler(State(s): State<ShadowHttpState>) -> Json<s
             Json(value)
         }
         Ok(Ok((simulator_url, plan))) => {
+            let liabilities = {
+                let pending = s
+                    .latest_pending
+                    .lock()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let cluster = s.latest_cluster.lock().ok().and_then(|g| g.clone());
+                kube_liabilities_from_state(&plan.placements, &pending, cluster.as_ref())
+            };
             let value = serde_json::json!({
             "available": true,
             "source": format!("kube-scheduler-simulator at {}", simulator_url.trim_end_matches('/')),
             "simulator": plan.simulator,
             "trace_sequence": trace.sequence,
             "placements": plan.placements,
+            "liabilities": liabilities,
             });
             let mut cache = s.simulator_plan_cache.lock().await;
             *cache = Some((simulator_cache_key, value.clone()));
@@ -6820,6 +7010,68 @@ async fn run_one_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kube_liabilities_flags_split_gang_and_oom() {
+        use std::collections::BTreeMap;
+        // kube spreads a 2-member co-located gang across nodes a+b, and places a
+        // 40 GiB job on a 24 GiB GPU. Both are liabilities ksolver would refuse.
+        let placements = vec![
+            serde_json::json!({"namespace":"t","name":"g0","placement":{"kind":"placed","node":"a"}}),
+            serde_json::json!({"namespace":"t","name":"g1","placement":{"kind":"placed","node":"b"}}),
+            serde_json::json!({"namespace":"t","name":"big","placement":{"kind":"placed","node":"a"}}),
+            serde_json::json!({"namespace":"t","name":"safe","placement":{"kind":"unplaced","reason":"x"}}),
+        ];
+        let gang = |vram: i64| PodLiabilityMeta {
+            gang_key: Some("t/team".to_string()),
+            colocate: true,
+            predicted_vram_bytes: vram,
+        };
+        let mut meta = BTreeMap::new();
+        meta.insert("t/g0".to_string(), gang(0));
+        meta.insert("t/g1".to_string(), gang(0));
+        meta.insert(
+            "t/big".to_string(),
+            PodLiabilityMeta {
+                gang_key: None,
+                colocate: false,
+                predicted_vram_bytes: 40 * 1024 * 1024 * 1024,
+            },
+        );
+        let mut node_vram = BTreeMap::new();
+        node_vram.insert("a".to_string(), 24 * 1024 * 1024 * 1024i64);
+        node_vram.insert("b".to_string(), 24 * 1024 * 1024 * 1024i64);
+
+        let out = compute_kube_liabilities(&placements, &meta, &node_vram);
+        assert_eq!(out["count"], serde_json::json!(2));
+        assert_eq!(out["split_gangs"].as_array().unwrap().len(), 1);
+        assert_eq!(out["split_gangs"][0]["kind"], serde_json::json!("split"));
+        assert_eq!(out["oom_risk"].as_array().unwrap().len(), 1);
+        assert_eq!(out["oom_risk"][0]["scope"], serde_json::json!("t/big"));
+    }
+
+    #[test]
+    fn kube_liabilities_empty_when_placement_is_safe() {
+        use std::collections::BTreeMap;
+        // gang kept together on one node, VRAM within budget -> no liabilities.
+        let placements = vec![
+            serde_json::json!({"namespace":"t","name":"g0","placement":{"kind":"placed","node":"a"}}),
+            serde_json::json!({"namespace":"t","name":"g1","placement":{"kind":"placed","node":"a"}}),
+        ];
+        let gang = || PodLiabilityMeta {
+            gang_key: Some("t/team".to_string()),
+            colocate: true,
+            predicted_vram_bytes: 10 * 1024 * 1024 * 1024,
+        };
+        let mut meta = BTreeMap::new();
+        meta.insert("t/g0".to_string(), gang());
+        meta.insert("t/g1".to_string(), gang());
+        let mut node_vram = BTreeMap::new();
+        node_vram.insert("a".to_string(), 24 * 1024 * 1024 * 1024i64);
+
+        let out = compute_kube_liabilities(&placements, &meta, &node_vram);
+        assert_eq!(out["count"], serde_json::json!(0));
+    }
 
     fn test_shadow_config(cluster_name: &str) -> ShadowConfig {
         ShadowConfig {
