@@ -1,12 +1,12 @@
 # VRAM Probe Summary
 
-- total rows: 228
-- successful rows: 228
+- total rows: 276
+- successful rows: 276
 - OOM rows: 0
-- near-capacity risk rows (>=90% reported GPU memory): 11
-- families: {'mlp': 42, 'transformer': 111, 'cnn': 75}
-- precisions: {'fp32': 91, 'fp16': 137}
-- GPU SKU labels: ['rtx-4090']
+- near-capacity risk rows (>=90% reported GPU memory): 15
+- families: {'mlp': 55, 'transformer': 128, 'cnn': 93}
+- precisions: {'fp32': 105, 'fp16': 159, 'bf16': 12}
+- GPU SKU labels: ['rtx-4090', 'unknown']
 - GPUs: ['NVIDIA GeForce RTX 4090']
 - GPU total MiB values: [24563]
 - GPU total GiB values: [23.99]
@@ -21,25 +21,25 @@ OOM labels.
 - fit: ridge_linear_interactions
 - alpha: 25.0
 - feature mode: interactions
-- training rows: 228
-- in-sample MAE MiB: 956.5
-- in-sample p95 absolute error MiB: 2541.6
-- leave-one-out MAE MiB: 1015.6
-- leave-one-out p95 absolute error MiB: 2627.8
-- leave-one-out max error MiB: 7212.2
+- training rows: 276
+- in-sample MAE MiB: 981.2
+- in-sample p95 absolute error MiB: 2680.5
+- leave-one-out MAE MiB: 1036.7
+- leave-one-out p95 absolute error MiB: 2805.1
+- leave-one-out max error MiB: 7636.0
 
 ## Top VRAM Driver Groups
 
 | rank | group | normalized impact MiB/std |
 | ---: | --- | ---: |
-| 1 | synthetic headroom | 5023.1 |
-| 2 | parameters | 3075.9 |
-| 3 | activations | 1746.3 |
-| 4 | architecture | 694.0 |
-| 5 | input shape | 567.9 |
-| 6 | model family | 97.3 |
-| 7 | optimizer | 55.8 |
-| 8 | precision | 42.5 |
+| 1 | synthetic headroom | 5048.6 |
+| 2 | parameters | 2630.6 |
+| 3 | activations | 994.1 |
+| 4 | architecture | 267.8 |
+| 5 | model family | 190.9 |
+| 6 | precision | 91.1 |
+| 7 | input shape | 88.7 |
+| 8 | optimizer | 51.7 |
 
 ## Top VRAM Model Drivers
 
@@ -50,24 +50,24 @@ that the feature lowers true VRAM.
 
 | rank | feature | group | model weight | impact MiB/std | meaning |
 | ---: | --- | --- | --- | ---: | --- |
-| 1 | reserve_extra_gib | synthetic headroom | positive_model_weight | 4988.8 | synthetic VRAM headroom probe allocation |
-| 2 | param_x_precision | parameters | positive_model_weight | 2328.4 | parameter count multiplied by precision bytes |
-| 3 | activation_units_m | activations | negative_model_weight | -1015.5 | batch * sequence/image shape * hidden/layers activation footprint |
-| 4 | param_count_m | parameters | negative_model_weight | -747.5 | parameter count in millions |
-| 5 | layers | architecture | positive_model_weight | 625.8 | model depth |
-| 6 | batch_size | input shape | positive_model_weight | 567.9 | training batch size |
-| 7 | activation_x_batch | activations | positive_model_weight | 556.3 | activation footprint multiplied by batch size |
-| 8 | activation_x_precision | activations | negative_model_weight | -174.5 | activation footprint multiplied by precision bytes |
-| 9 | family_transformer | model family | positive_model_weight | 83.2 | transformer model-family indicator |
-| 10 | hidden_size_k | architecture | negative_model_weight | -68.2 | hidden size in thousands |
+| 1 | reserve_extra_gib | synthetic headroom | positive_model_weight | 5024.2 | synthetic VRAM headroom probe allocation |
+| 2 | param_x_precision | parameters | positive_model_weight | 2110.8 | parameter count multiplied by precision bytes |
+| 3 | activation_x_precision | activations | negative_model_weight | -590.1 | activation footprint multiplied by precision bytes |
+| 4 | param_count_m | parameters | negative_model_weight | -519.8 | parameter count in millions |
+| 5 | activation_x_batch | activations | positive_model_weight | 238.5 | activation footprint multiplied by batch size |
+| 6 | layers | architecture | positive_model_weight | 205.4 | model depth |
+| 7 | family_cnn | model family | positive_model_weight | 176.3 | CNN model-family indicator |
+| 8 | activation_units_m | activations | positive_model_weight | 165.5 | batch * sequence/image shape * hidden/layers activation footprint |
+| 9 | precision_bytes | precision | positive_model_weight | 91.1 | bytes per tensor element from fp32/fp16/bf16/int8 |
+| 10 | batch_size | input shape | negative_model_weight | -88.7 | training batch size |
 
 ## Family Models
 
 | family | rows | usable | fit | alpha | in-sample MAE MiB | LOO MAE MiB | LOO p95 abs error MiB |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |
-| cnn | 75 | True | ridge_linear_base | 25.0 | 421.1 | 453.7 | 1354.4 |
-| mlp | 42 | True | ridge_linear_interactions | 10.0 | 647.8 | 826.9 | 3317.6 |
-| transformer | 111 | True | ridge_linear_interactions | 10.0 | 621.3 | 680.0 | 1816.8 |
+| cnn | 93 | True | ridge_linear_interactions | 10.0 | 405.4 | 512.1 | 1431.4 |
+| mlp | 55 | True | ridge_linear_base | 100.0 | 693.4 | 790.2 | 3232.0 |
+| transformer | 128 | True | ridge_linear_interactions | 10.0 | 736.0 | 804.4 | 2204.9 |
 
 ## Rows
 
@@ -301,3 +301,51 @@ that the feature lowers true VRAM.
 | iter2-pressure-gpt-fp16-pad20g | transformer | fp16 | adamw | False | 20480 | 24089 | 24846 | 381651200 |
 | iter2-pressure-gpt-fp16-pad21g | transformer | fp16 | adamw | False | 21504 | 24095 | 25870 | 381651200 |
 | iter2-pressure-gpt-fp16-pad22g | transformer | fp16 | adamw | False | 22528 | 24083 | 26894 | 381651200 |
+| smoke-mlp | mlp | fp32 | adamw | False | 0 | 1207 | 94 | 2624768 |
+| cov-xf-fp32-b4-s512-h1024-l10 | transformer | fp32 | adamw | False | 0 | 5183 | 4980 | 191530240 |
+| cov-xf-fp32-b3-s1024-h1280-l12 | transformer | fp32 | adamw | False | 0 | 10511 | 9398 | 318081280 |
+| cov-xf-fp32-b1-s2048-h1536-l12 | transformer | fp32 | adamw | False | 0 | 11095 | 9982 | 438314240 |
+| cov-xf-fp32-b8-s384-h768-l8 | transformer | fp32 | adamw | False | 0 | 5481 | 4368 | 105886976 |
+| cov-xf-fp16-b4-s512-h1024-l10 | transformer | fp16 | adamw | False | 0 | 3573 | 2454 | 191530240 |
+| cov-xf-fp16-b3-s1024-h1280-l12 | transformer | fp16 | adamw | False | 0 | 4635 | 4458 | 318081280 |
+| cov-xf-fp16-b1-s2048-h1536-l12 | transformer | fp16 | adamw | False | 0 | 6103 | 4984 | 438314240 |
+| cov-xf-fp16-b8-s384-h768-l8 | transformer | fp16 | adamw | False | 0 | 1363 | 2160 | 105886976 |
+| cov-xf-bf16-b4-s512-h1024-l10 | transformer | bf16 | adamw | False | 0 | 1589 | 2454 | 191530240 |
+| cov-xf-bf16-b3-s1024-h1280-l12 | transformer | bf16 | adamw | False | 0 | 4109 | 4458 | 318081280 |
+| cov-xf-bf16-b1-s2048-h1536-l12 | transformer | bf16 | adamw | False | 0 | 4259 | 4984 | 438314240 |
+| cov-xf-bf16-b8-s384-h768-l8 | transformer | bf16 | adamw | False | 0 | 1365 | 2160 | 105886976 |
+| cov-cnn-fp32-b48-i192-h160-l10 | cnn | fp32 | sgd | False | 0 | 2909 | 1792 | 54140 |
+| cov-cnn-fp32-b16-i320-h192-l14 | cnn | fp32 | sgd | False | 0 | 3377 | 2572 | 93376 |
+| cov-cnn-fp32-b96-i128-h96-l8 | cnn | fp32 | sgd | False | 0 | 2389 | 1272 | 33688 |
+| cov-cnn-fp32-b6-i448-h224-l16 | cnn | fp32 | sgd | False | 0 | 3863 | 2746 | 136044 |
+| cov-cnn-fp16-b48-i192-h160-l10 | cnn | fp16 | sgd | False | 0 | 1975 | 1016 | 54140 |
+| cov-cnn-fp16-b16-i320-h192-l14 | cnn | fp16 | sgd | False | 0 | 2535 | 1410 | 93376 |
+| cov-cnn-fp16-b96-i128-h96-l8 | cnn | fp16 | sgd | False | 0 | 1633 | 626 | 33688 |
+| cov-cnn-fp16-b6-i448-h224-l16 | cnn | fp16 | sgd | False | 0 | 2345 | 1522 | 136044 |
+| cov-cnn-bf16-b48-i192-h160-l10 | cnn | bf16 | sgd | False | 0 | 2281 | 1156 | 54140 |
+| cov-cnn-bf16-b16-i320-h192-l14 | cnn | bf16 | sgd | False | 0 | 2535 | 1410 | 93376 |
+| cov-cnn-bf16-b96-i128-h96-l8 | cnn | bf16 | sgd | False | 0 | 1639 | 626 | 33688 |
+| cov-cnn-bf16-b6-i448-h224-l16 | cnn | bf16 | sgd | False | 0 | 2647 | 1522 | 136044 |
+| cov-mlp-fp32-b256-h4096-l6 | mlp | fp32 | adamw | False | 0 | 2589 | 1468 | 71324160 |
+| cov-mlp-fp32-b512-h2048-l8 | mlp | fp32 | adamw | False | 0 | 1689 | 568 | 27277824 |
+| cov-mlp-fp32-b128-h8192-l4 | mlp | fp32 | adamw | False | 0 | 3889 | 2768 | 142631424 |
+| cov-mlp-fp32-b1024-h1024-l10 | mlp | fp32 | adamw | False | 0 | 1115 | 242 | 9446912 |
+| cov-mlp-fp16-b256-h4096-l6 | mlp | fp16 | adamw | False | 0 | 1319 | 724 | 71324160 |
+| cov-mlp-fp16-b512-h2048-l8 | mlp | fp16 | adamw | False | 0 | 1413 | 348 | 27277824 |
+| cov-mlp-fp16-b128-h8192-l4 | mlp | fp16 | adamw | False | 0 | 2531 | 1404 | 142631424 |
+| cov-mlp-fp16-b1024-h1024-l10 | mlp | fp16 | adamw | False | 0 | 1261 | 134 | 9446912 |
+| cov-mlp-bf16-b256-h4096-l6 | mlp | bf16 | adamw | False | 0 | 1851 | 724 | 71324160 |
+| cov-mlp-bf16-b512-h2048-l8 | mlp | bf16 | adamw | False | 0 | 1253 | 348 | 27277824 |
+| cov-mlp-bf16-b128-h8192-l4 | mlp | bf16 | adamw | False | 0 | 2531 | 1404 | 142631424 |
+| cov-mlp-bf16-b1024-h1024-l10 | mlp | bf16 | adamw | False | 0 | 1261 | 134 | 9446912 |
+| cov-transformer-ckpt-fp16 | transformer | fp16 | adamw | True | 0 | 6293 | 5166 | 357436160 |
+| cov-cnn-ckpt-fp16 | cnn | fp16 | adamw | True | 0 | 3339 | 2206 | 103792 |
+| oom-pressure-xf-fp16-res22000 | transformer | fp16 | adamw | False | 22000 | 24047 | 27010 | 438314240 |
+| oom-pressure-xf-fp16-res24000 | transformer | fp16 | adamw | False | 24000 | 24049 | 29010 | 438314240 |
+| oom-pressure-xf-fp16-res26000 | transformer | fp16 | adamw | False | 26000 | 24045 | 31010 | 438314240 |
+| oom-pressure-xf-fp16-res28000 | transformer | fp16 | adamw | False | 28000 | 24043 | 33010 | 438314240 |
+| rf-resnet18-fp16-b128-i224 | cnn | fp16 | sgd | False | 0 | 3968 | 2558 | 11689512 |
+| rf-resnet50-fp32-b32-i224 | cnn | fp32 | sgd | False | 0 | 4703 | 3286 | 25557032 |
+| rf-resnet50-fp16-b64-i224 | cnn | fp16 | sgd | False | 0 | 4711 | 3264 | 25557032 |
+| rf-convnext-tiny-fp16-b32-i224 | cnn | fp16 | adamw | False | 0 | 3547 | 2100 | 28589128 |
+| rf-vit-b16-fp16-b32-i224 | cnn | fp16 | adamw | False | 0 | 4162 | 2718 | 86567656 |

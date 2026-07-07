@@ -8181,10 +8181,13 @@ mod tests {
             payload["dataset"]["synthetic_headroom"]["torch_allocator_reserve_gap_rows"],
             payload["dataset"]["reserve_pressure"]["torch_allocator_reserve_gap_rows"]
         );
-        assert_eq!(
-            payload["dataset"]["verified_real_framework_rows"],
-            serde_json::json!(0)
+        // Real-framework data now exists (torchvision probes); this used to guard "still 0".
+        assert!(
+            payload["dataset"]["verified_real_framework_rows"].as_u64().expect("verified real rows")
+                >= 1,
+            "expected >=1 verified real-framework row after the torchvision sweep"
         );
+        // Customer-workload fingerprinting is still not implemented -> stays exactly 0 (honesty guard).
         assert_eq!(
             payload["dataset"]["customer_workload_fingerprint_rows"],
             serde_json::json!(0)
@@ -8193,9 +8196,9 @@ mod tests {
             payload["model_drivers"]["available"],
             serde_json::json!(true)
         );
-        assert_eq!(
-            payload["model_drivers"]["training_rows"],
-            serde_json::json!(228)
+        assert!(
+            payload["model_drivers"]["training_rows"].as_u64().expect("model training rows") >= 228,
+            "model should be fit on >= 228 rows"
         );
         assert!(payload["model_drivers"]["top_drivers"]
             .as_array()
@@ -8228,11 +8231,15 @@ mod tests {
             .expect("group impacts")
             .iter()
             .any(|row| row["group"] == serde_json::json!("activations")));
-        assert!(payload["model_drivers"]["top_organic_driver_descriptions"]
-            .as_array()
-            .expect("organic descriptions")
-            .iter()
-            .any(|row| row == "batch * sequence/image shape * hidden/layers activation footprint"));
+        // Organic (non-synthetic) driver descriptions exist; exact phrasing shifts as the model
+        // is refit on new data, so assert presence rather than an exact string.
+        assert!(
+            !payload["model_drivers"]["top_organic_driver_descriptions"]
+                .as_array()
+                .expect("organic descriptions")
+                .is_empty(),
+            "expected at least one organic driver description"
+        );
         assert!(payload["model_drivers"]["real_top_drivers"]
             .as_array()
             .expect("real top drivers")
