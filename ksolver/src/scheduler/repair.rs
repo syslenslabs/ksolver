@@ -457,7 +457,30 @@ fn solve_repair_subset(
     search.best
 }
 
-fn summarize_repair_metrics(plans: &[RepairPlan], notes: &[String]) -> RepairMetrics {
+fn count_skip_reason(metrics: &mut RepairMetrics, reason: &str) {
+    if reason.contains("priority") {
+        metrics.priority_blocked_candidates += 1;
+    } else if reason.contains("business-value") || reason.contains("deadline") {
+        metrics.value_policy_blocked_candidates += 1;
+    } else if reason.contains("safe-to-evict")
+        || reason.contains("volume attachment")
+        || reason.contains("do-not-disrupt")
+        || reason.contains("near-complete")
+        || reason.contains("migration/preemption")
+    {
+        metrics.disruption_policy_blocked_candidates += 1;
+    } else if reason.contains("PDB") {
+        metrics.pdb_blocked_candidates += 1;
+    } else if reason.contains("bounded repair candidate set") {
+        metrics.candidate_budget_skipped_candidates += 1;
+    }
+}
+
+fn summarize_repair_metrics(
+    plans: &[RepairPlan],
+    notes: &[String],
+    unrepairable_skips: &[RepairSkip],
+) -> RepairMetrics {
     let mut metrics = RepairMetrics {
         repairable_targets: plans.len(),
         unrepairable_targets: notes.len(),
@@ -467,23 +490,7 @@ fn summarize_repair_metrics(plans: &[RepairPlan], notes: &[String]) -> RepairMet
         metrics.disruption_cost += i64::from(plan.disruption_cost.max(0));
         metrics.skipped_candidates += plan.skipped_candidates.len();
         for skipped in &plan.skipped_candidates {
-            let reason = skipped.reason.as_str();
-            if reason.contains("priority") {
-                metrics.priority_blocked_candidates += 1;
-            } else if reason.contains("business-value") || reason.contains("deadline") {
-                metrics.value_policy_blocked_candidates += 1;
-            } else if reason.contains("safe-to-evict")
-                || reason.contains("volume attachment")
-                || reason.contains("do-not-disrupt")
-                || reason.contains("near-complete")
-                || reason.contains("migration/preemption")
-            {
-                metrics.disruption_policy_blocked_candidates += 1;
-            } else if reason.contains("PDB") {
-                metrics.pdb_blocked_candidates += 1;
-            } else if reason.contains("bounded repair candidate set") {
-                metrics.candidate_budget_skipped_candidates += 1;
-            }
+            count_skip_reason(&mut metrics, skipped.reason.as_str());
         }
         for action in &plan.actions {
             match action.action.as_str() {
@@ -492,6 +499,12 @@ fn summarize_repair_metrics(plans: &[RepairPlan], notes: &[String]) -> RepairMet
                 _ => {}
             }
         }
+    }
+    // Candidates that blocked an unrepairable target are still real, explainable skips even though
+    // no plan carries them — count them so the operator sees why (fixes disruption_policy=0).
+    metrics.skipped_candidates += unrepairable_skips.len();
+    for skipped in unrepairable_skips {
+        count_skip_reason(&mut metrics, skipped.reason.as_str());
     }
     for note in notes {
         if note.contains("blocked by predicted peak VRAM") {
@@ -647,6 +660,9 @@ pub fn advise_repairs_with_options(
     let pdb_budget = pdb_budget_by_key(&cluster.pdbs);
     let mut plans = Vec::new();
     let mut notes = Vec::new();
+    // Candidates that blocked a target which produced NO plan, kept so the metrics and note can
+    // explain *why* the target was unrepairable (which pod / which policy), not just "no plan".
+    let mut unrepairable_skips: Vec<RepairSkip> = Vec::new();
 
     for group in groups.values().filter(|g| g.all_unplaced) {
         if group.gpu_request <= 0 {
@@ -691,6 +707,7 @@ pub fn advise_repairs_with_options(
             continue;
         }
         let mut best: Option<RepairPlan> = None;
+        let mut target_skips: Vec<RepairSkip> = Vec::new();
         for (node, cap) in &capacity {
             if *cap < group.gpu_request || !group_node_feasible(group, node) {
                 continue;
@@ -758,6 +775,8 @@ pub fn advise_repairs_with_options(
                     pdb_keys: matching_pdbs.unwrap_or_default(),
                 });
             }
+            // Remember why candidates were rejected on this node, in case no node yields a plan.
+            target_skips.extend(skipped_candidates.iter().cloned());
 
             let Some((actions, freed, disruption_cost)) = solve_repair_subset(
                 &candidates,
@@ -805,10 +824,28 @@ pub fn advise_repairs_with_options(
         if let Some(plan) = best {
             plans.push(plan);
         } else {
-            notes.push(format!(
-                "{} has enough total node capacity somewhere, but no repair plan was found within policy and candidate budget",
-                group.target
-            ));
+            // Explain WHICH candidates/policies blocked the repair, not just "no plan".
+            let mut reason_counts: BTreeMap<String, usize> = BTreeMap::new();
+            for skip in &target_skips {
+                *reason_counts.entry(skip.reason.clone()).or_default() += 1;
+            }
+            let detail = reason_counts
+                .iter()
+                .map(|(reason, count)| format!("{count} {reason}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if detail.is_empty() {
+                notes.push(format!(
+                    "{} has enough total node capacity somewhere, but no repair plan was found within policy and candidate budget",
+                    group.target
+                ));
+            } else {
+                notes.push(format!(
+                    "{} has enough total node capacity somewhere, but no repair plan was found within policy and candidate budget: {}",
+                    group.target, detail
+                ));
+            }
+            unrepairable_skips.extend(target_skips);
         }
     }
 
@@ -826,7 +863,7 @@ pub fn advise_repairs_with_options(
             .then_with(|| a.target.cmp(&b.target))
     });
     plans.truncate(8);
-    let metrics = summarize_repair_metrics(&plans, &notes);
+    let metrics = summarize_repair_metrics(&plans, &notes, &unrepairable_skips);
     RepairAdvice {
         plans,
         notes,
@@ -1271,6 +1308,39 @@ mod tests {
     }
 
     #[test]
+    fn unrepairable_target_attributes_blocking_policy() {
+        // Target needs 4 GPUs on one node; the only freeable candidate is do-not-disrupt protected,
+        // so no plan can form. The note must name the policy and the metric must count the block,
+        // instead of a bare "no plan" with disruption_policy_blocked_candidates = 0.
+        let mut protected = running("protected", "n1");
+        protected.do_not_disrupt = true;
+        let cluster = NormalizedCluster {
+            nodes: vec![node("n1", 4)],
+            workloads: vec![protected],
+            ..Default::default()
+        };
+        let pending = vec![
+            pending("target-0", 0),
+            pending("target-1", 0),
+            pending("target-2", 0),
+            pending("target-3", 0),
+        ];
+        let trace = unplaced_trace(&pending);
+        let advice = advise_repairs(&cluster, &pending, &trace);
+        assert_eq!(advice.metrics.repairable_targets, 0);
+        assert_eq!(advice.metrics.unrepairable_targets, 1);
+        assert!(advice.plans.is_empty());
+        assert_eq!(advice.metrics.disruption_policy_blocked_candidates, 1);
+        assert_eq!(advice.metrics.skipped_candidates, 1);
+        assert_eq!(advice.notes.len(), 1);
+        assert!(
+            advice.notes[0].contains("do-not-disrupt"),
+            "note should attribute the blocking policy: {}",
+            advice.notes[0]
+        );
+    }
+
+    #[test]
     fn repair_prefers_migration_over_preemption_when_base_cost_ties() {
         let mut preempt_only = running("a-preempt-only", "n1");
         preempt_only.migration_allowed = false;
@@ -1436,8 +1506,14 @@ mod tests {
         assert!(advice.plans.is_empty());
         assert_eq!(advice.notes.len(), 1);
         assert!(advice.notes[0].contains("policy and candidate budget"));
-        assert_eq!(advice.metrics.skipped_candidates, 0);
-        assert_eq!(advice.metrics.pdb_blocked_candidates, 0);
+        // Fixed: candidates blocked on an unrepairable target are now attributed (were dropped).
+        assert_eq!(advice.metrics.skipped_candidates, 2);
+        assert_eq!(advice.metrics.pdb_blocked_candidates, 2);
+        assert!(
+            advice.notes[0].contains("PDB"),
+            "note should attribute the PDB block: {}",
+            advice.notes[0]
+        );
     }
 
     #[test]
