@@ -1,0 +1,55 @@
+# Real published torchvision architectures (trainer_style: torchvision) — the FIRST probe
+# scenarios that are NOT the synthetic harness. model_arch is the torchvision factory name;
+# family=cnn (image input) is required. verified_real_framework=true is set at runtime ONLY
+# because build_real_torchvision_model() actually instantiates the published model.
+#
+# Run (once the WSL 4090 cluster is back up):
+#   KUBECONFIG=~/.kube/wsl /tmp/vram-venv/bin/python vram-model-lab/scripts/run_k8s_probe.py \
+#     --scenarios-file vram-model-lab/generated/real_framework_4090_sweep.yaml --all \
+#     --namespace vram-probe --skip-existing --wait-timeout 1200
+scenarios:
+- name: rf-resnet50-fp32-b32-i224
+  family: cnn
+  model_arch: resnet50
+  trainer_style: torchvision
+  precision: fp32
+  batch_size: 32
+  image_size: 224
+  steps: 4
+  optimizer: sgd
+- name: rf-resnet50-fp16-b64-i224
+  family: cnn
+  model_arch: resnet50
+  trainer_style: torchvision
+  precision: fp16
+  batch_size: 64
+  image_size: 224
+  steps: 4
+  optimizer: sgd
+- name: rf-resnet18-fp16-b128-i224
+  family: cnn
+  model_arch: resnet18
+  trainer_style: torchvision
+  precision: fp16
+  batch_size: 128
+  image_size: 224
+  steps: 4
+  optimizer: sgd
+- name: rf-convnext-tiny-fp16-b32-i224
+  family: cnn
+  model_arch: convnext_tiny
+  trainer_style: torchvision
+  precision: fp16
+  batch_size: 32
+  image_size: 224
+  steps: 4
+  optimizer: adamw
+- name: rf-vit-b16-fp16-b32-i224
+  family: cnn
+  model_arch: vit_b_16
+  trainer_style: torchvision
+  precision: fp16
+  batch_size: 32
+  image_size: 224
+  steps: 4
+  optimizer: adamw

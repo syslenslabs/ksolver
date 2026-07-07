@@ -56,7 +56,11 @@ def env_bool(name, default=False):
 FAMILY = os.environ.get("KSOLVER_FAMILY", "mlp")
 MODEL_ARCH = os.environ.get("KSOLVER_MODEL_ARCH", FAMILY)
 TRAINER_STYLE = os.environ.get("KSOLVER_TRAINER_STYLE", "synthetic")
-VERIFIED_REAL_FRAMEWORK = env_bool("KSOLVER_VERIFIED_REAL_FRAMEWORK")
+# Reality-only: this flag is NEVER trusted from the scenario label. It is set True solely by
+# build_real_torchvision_model() when a genuine published architecture is actually instantiated,
+# so a synthetic run can never masquerade as real-framework data.
+VERIFIED_REAL_FRAMEWORK = False
+REAL_FRAMEWORK_NAME = None
 CUSTOMER_WORKLOAD_FINGERPRINT = env_bool("KSOLVER_CUSTOMER_WORKLOAD_FINGERPRINT")
 PRECISION = os.environ.get("KSOLVER_PRECISION", "fp32")
 BATCH_SIZE = env_int("KSOLVER_BATCH_SIZE", 8)
@@ -252,7 +256,28 @@ class TinyTransformer(nn.Module):
         return self.head(y)
 
 
+def build_real_torchvision_model():
+    # Real published architecture from torchvision (bundled in the pytorch/pytorch image), NOT the
+    # synthetic harness. This is the only path that may mark a sample verified_real_framework=True.
+    global VERIFIED_REAL_FRAMEWORK, REAL_FRAMEWORK_NAME
+    import torchvision.models as tvm
+
+    synthetic_aliases = ("cnn", "mlp", "transformer", "resnet-style", "efficientnet-style", "convnext-style")
+    name = "resnet50" if MODEL_ARCH in synthetic_aliases else MODEL_ARCH
+    factory = getattr(tvm, name, None)
+    if not callable(factory):
+        raise ValueError("unknown torchvision model: " + str(name))
+    model = factory(weights=None)
+    VERIFIED_REAL_FRAMEWORK = True
+    REAL_FRAMEWORK_NAME = "torchvision:" + name
+    return model
+
+
 def build_model():
+    if TRAINER_STYLE == "torchvision":
+        if FAMILY != "cnn":
+            raise ValueError("trainer_style=torchvision requires family=cnn (image input)")
+        return build_real_torchvision_model()
     if FAMILY == "transformer":
         return TinyTransformer()
     if FAMILY == "cnn":
@@ -391,6 +416,7 @@ result = {
     "error": error,
     "framework": "pytorch",
     "framework_version": torch.__version__,
+    "real_framework": REAL_FRAMEWORK_NAME,
     "trainer_style": TRAINER_STYLE,
     "verified_real_framework": VERIFIED_REAL_FRAMEWORK,
     "customer_workload_fingerprint": CUSTOMER_WORKLOAD_FINGERPRINT,
