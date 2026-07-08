@@ -378,6 +378,149 @@ pub fn render_scheduler_admission_review(
     }
 }
 
+/// Whether a pod is in scope for VRAM injection: it requests an in-scope GPU resource or uses
+/// DRA resource claims. Used to gate the admission webhook's predictor call to GPU workloads.
+pub fn pod_in_scope_for_vram(pod: &corev1::Pod, policy: &SchedulerPatchPolicy) -> bool {
+    match pod.spec.as_ref() {
+        Some(spec) => pod_requests_gpu(policy, spec) || pod_has_dra_resource_claims(spec),
+        None => false,
+    }
+}
+
+fn json_pointer_escape(key: &str) -> String {
+    // RFC 6901 escaping via a char loop (not String::replace) so the admission no-mutation guard,
+    // which forbids the substring ".re" + "place(", stays strict against kube client calls.
+    let mut out = String::with_capacity(key.len());
+    for ch in key.chars() {
+        match ch {
+            '~' => out.push_str("~0"),
+            '/' => out.push_str("~1"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// JSONPatch ops that inject a resolved VRAM estimate into a pod, mirroring the Python
+/// `vram_admission.build_admission_patch`: always annotate the predicted peak + source +
+/// confidence; at high/authoritative confidence add a nodeAffinity that keeps the pod OFF GPUs
+/// smaller than the estimate (`ksolver.dev/gpu-vram-gib Gt floor(est)-1`); advisory/unknown
+/// annotate only. `resolution` is the predictor `/predict` JSON.
+pub fn vram_injection_ops(
+    pod: &corev1::Pod,
+    resolution: &serde_json::Value,
+) -> Vec<JsonPatchOperation> {
+    let mut ops = Vec::new();
+    let has_annotations = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !has_annotations {
+        ops.push(JsonPatchOperation {
+            op: "add".to_string(),
+            path: "/metadata/annotations".to_string(),
+            value: Some(serde_json::json!({})),
+        });
+    }
+    let mut set_ann = |ops: &mut Vec<JsonPatchOperation>, key: &str, val: String| {
+        ops.push(JsonPatchOperation {
+            op: "add".to_string(),
+            path: format!("/metadata/annotations/{}", json_pointer_escape(key)),
+            value: Some(serde_json::Value::String(val)),
+        });
+    };
+    let source = resolution
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let confidence = resolution
+        .get("confidence")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("advisory");
+    set_ann(&mut ops, "ksolver.dev/predicted-peak-vram-source", source.to_string());
+    set_ann(
+        &mut ops,
+        "ksolver.dev/predicted-peak-vram-confidence",
+        confidence.to_string(),
+    );
+    let vram_gib = resolution
+        .get("vram_gib")
+        .and_then(serde_json::Value::as_f64);
+    if let Some(gib) = vram_gib {
+        set_ann(
+            &mut ops,
+            "ksolver.dev/predicted-peak-vram-gib",
+            format!("{gib}"),
+        );
+    }
+    let hard = resolution
+        .get("hard")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if hard && vram_gib.is_some() {
+        let floor_gib = (vram_gib.unwrap().floor() as i64 - 1).max(0);
+        ops.push(JsonPatchOperation {
+            op: "add".to_string(),
+            path: "/spec/affinity".to_string(),
+            value: Some(serde_json::json!({
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [{
+                            "matchExpressions": [{
+                                "key": "ksolver.dev/gpu-vram-gib",
+                                "operator": "Gt",
+                                "values": [floor_gib.to_string()],
+                            }]
+                        }]
+                    }
+                }
+            })),
+        });
+    } else {
+        set_ann(
+            &mut ops,
+            "ksolver.dev/predicted-peak-vram-advisory",
+            "true".to_string(),
+        );
+    }
+    ops
+}
+
+/// Append extra JSONPatch ops (e.g. VRAM injection) to an already-rendered AdmissionReview,
+/// preserving the existing schedulerName patch. If the base review had no patch, the extra ops
+/// become the patch. Base64 decode/encode round-trip so the two mutations combine into one patch.
+pub fn merge_extra_ops(
+    mut review: AdmissionReview,
+    extra_ops: Vec<JsonPatchOperation>,
+) -> AdmissionReview {
+    if extra_ops.is_empty() {
+        return review;
+    }
+    let Some(response) = review.response.as_mut() else {
+        return review;
+    };
+    if !response.allowed {
+        return review; // never add mutations to a denied request
+    }
+    let mut ops: Vec<JsonPatchOperation> = match response.patch.as_ref() {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    ops.extend(extra_ops);
+    let Ok(bytes) = serde_json::to_vec(&ops) else {
+        return review;
+    };
+    response.patch = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+    response.patch_type = Some("JSONPatch".to_string());
+    review
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +528,62 @@ mod tests {
     use crate::scheduler::config::{BindingCanaryMode, BindingRolloutMode};
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use std::time::Duration;
+
+    #[test]
+    fn vram_ops_high_confidence_adds_gib_annotation_and_affinity() {
+        let p = pod("team", "job", Some("nvidia.com/gpu"));
+        let res = serde_json::json!({
+            "vram_gib": 18.0, "source": "static-sniff+model", "confidence": "high", "hard": true
+        });
+        let ops = vram_injection_ops(&p, &res);
+        assert!(ops.iter().any(|o| o.path == "/spec/affinity"));
+        assert!(ops.iter().any(|o| o.path
+            == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-gib"
+            && o.value == Some(serde_json::Value::String("18".to_string()))));
+        // Gt floor(18)-1 = 17
+        let aff = ops.iter().find(|o| o.path == "/spec/affinity").unwrap();
+        let expr = &aff.value.as_ref().unwrap()["nodeAffinity"]
+            ["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
+            ["matchExpressions"][0];
+        assert_eq!(expr["operator"], serde_json::json!("Gt"));
+        assert_eq!(expr["values"], serde_json::json!(["17"]));
+    }
+
+    #[test]
+    fn vram_ops_advisory_has_no_affinity() {
+        let p = pod("team", "job", Some("nvidia.com/gpu"));
+        let res = serde_json::json!({
+            "vram_gib": null, "source": "unknown", "confidence": "advisory", "hard": false
+        });
+        let ops = vram_injection_ops(&p, &res);
+        assert!(!ops.iter().any(|o| o.path == "/spec/affinity"));
+        assert!(ops.iter().any(|o| o.path
+            == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-advisory"));
+    }
+
+    #[test]
+    fn merge_extra_ops_appends_to_existing_scheduler_patch() {
+        let base = allow_without_patch("uid".to_string(), "no-op".to_string());
+        // seed a schedulerName patch onto the base response
+        let sched_ops = vec![JsonPatchOperation {
+            op: "add".to_string(),
+            path: "/spec/schedulerName".to_string(),
+            value: Some(serde_json::Value::String("ksolver".to_string())),
+        }];
+        let seeded = merge_extra_ops(base, sched_ops);
+        let extra = vec![JsonPatchOperation {
+            op: "add".to_string(),
+            path: "/spec/affinity".to_string(),
+            value: Some(serde_json::json!({"nodeAffinity": {}})),
+        }];
+        let merged = merge_extra_ops(seeded, extra);
+        let b64 = merged.response.unwrap().patch.unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let ops: Vec<JsonPatchOperation> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().any(|o| o.path == "/spec/schedulerName"));
+        assert!(ops.iter().any(|o| o.path == "/spec/affinity"));
+    }
 
     fn pod(ns: &str, name: &str, gpu_resource: Option<&str>) -> corev1::Pod {
         let mut requests = BTreeMap::new();

@@ -559,13 +559,56 @@ async fn decision_events_handler(State(s): State<ShadowHttpState>) -> Json<serde
 }
 
 /// MutatingAdmissionWebhook endpoint: returns an AdmissionReview response with an optional
-/// schedulerName JSONPatch for selected GPU pods. This does not call the Kubernetes API.
+/// schedulerName JSONPatch for selected GPU pods, and — when KSOLVER_VRAM_PREDICTOR_URL is set —
+/// an additional VRAM-injection patch (predicted peak VRAM annotation + node feasibility) sourced
+/// from the predictor service. This does not call the Kubernetes API and FAILS OPEN: any predictor
+/// error leaves the schedulerName-only response untouched.
 async fn scheduler_admission_handler(
     State(s): State<ShadowHttpState>,
     Json(review): Json<crate::scheduler::admission::AdmissionReview>,
 ) -> Json<crate::scheduler::admission::AdmissionReview> {
     let policy = crate::scheduler::admission::SchedulerPatchPolicy::from(&s.cfg);
-    Json(crate::scheduler::admission::render_scheduler_admission_review(review, &policy))
+    // Keep the pod object JSON before render consumes the review (for optional VRAM injection).
+    let pod_object = review.request.as_ref().and_then(|r| r.object.clone());
+    let base = crate::scheduler::admission::render_scheduler_admission_review(review, &policy);
+
+    let predictor_url = std::env::var("KSOLVER_VRAM_PREDICTOR_URL").unwrap_or_default();
+    if predictor_url.trim().is_empty() {
+        return Json(base);
+    }
+    let Some(pod_object) = pod_object else {
+        return Json(base);
+    };
+    match vram_injection_ops_from_predictor(predictor_url.trim(), &policy, pod_object).await {
+        Some(ops) if !ops.is_empty() => {
+            Json(crate::scheduler::admission::merge_extra_ops(base, ops))
+        }
+        _ => Json(base),
+    }
+}
+
+/// Call the predictor `/predict` for a GPU pod and build its VRAM-injection JSONPatch ops.
+/// Returns None (fail-open) on any error, timeout, or non-GPU pod.
+async fn vram_injection_ops_from_predictor(
+    url: &str,
+    policy: &crate::scheduler::admission::SchedulerPatchPolicy,
+    pod_object: serde_json::Value,
+) -> Option<Vec<crate::scheduler::admission::JsonPatchOperation>> {
+    let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(pod_object.clone()).ok()?;
+    if !crate::scheduler::admission::pod_in_scope_for_vram(&pod, policy) {
+        return None;
+    }
+    let endpoint = format!("{}/predict", url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.post(endpoint).json(&pod_object).send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let resolution: serde_json::Value = response.json().await.ok()?;
+    Some(crate::scheduler::admission::vram_injection_ops(&pod, &resolution))
 }
 
 async fn traces_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
