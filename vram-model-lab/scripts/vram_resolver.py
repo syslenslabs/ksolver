@@ -51,6 +51,19 @@ def _p95(values: list[float]) -> float:
     return ordered[lo] + frac * (ordered[hi] - ordered[lo])
 
 
+def record_observation(store_path: str | Path, pod: dict[str, Any], peak_mib: float) -> None:
+    """Append one measured peak-VRAM observation for a pod's workload fingerprint.
+
+    This is how the tier-4 store gets populated going forward: when a run completes, record the
+    pod it ran and its measured peak (e.g. from ksolver's completed-job observations / nvidia-smi).
+    Store format is JSONL of {"image", "command_hash", "peak_mib"} keyed by pod_fingerprint.
+    """
+    fp = pod_fingerprint(pod)
+    row = {"image": fp.get("image"), "command_hash": fp.get("command_hash"), "peak_mib": float(peak_mib)}
+    with Path(store_path).open("a") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def load_observations(path: str | Path) -> dict[str, list[float]]:
     """Index observed peak VRAM (MiB) by workload fingerprint key.
 

@@ -1,6 +1,8 @@
 """Unit tests for the VRAM resolution cascade (tiers A: explicit + static-sniff)."""
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 import vram_resolver as vr
@@ -130,6 +132,21 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertEqual(r["confidence"], "high")
         self.assertTrue(r["hard"])
         self.assertGreater(r["vram_mib"], 0.0)
+
+    def test_record_then_resolve_round_trip_fires_tier4(self):
+        pod = gpu_pod(args=["--custom-flag", "x"])  # unsniffable
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        try:
+            for peak in (8000.0, 8200.0, 8400.0):
+                vr.record_observation(path, pod, peak)
+            obs = vr.load_observations(path)
+            r = vr.resolve(pod, observations=obs)
+            self.assertEqual(r["source"], "historical-fingerprint")
+            self.assertEqual(r["observation_samples"], 3)
+            self.assertGreaterEqual(r["vram_mib"], 8000.0)
+        finally:
+            os.unlink(path)
 
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
