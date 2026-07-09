@@ -56,7 +56,14 @@ patch; tier-4 firing on real data; DRA claim accepted by k8s 1.36 server-side dr
 
 Remaining / not done:
 - In-cluster `MutatingWebhookConfiguration` + TLS (run against a live API server).
-- Auto-populate the tier-4 store from ksolver's own completed-job observations (needs a Rust
-  fingerprint that byte-matches the Python one).
+- Auto-populate the tier-4 store from ksolver's own completed-job observations. UNBLOCKED: the
+  byte-identical Rust fingerprint now exists (`ksolver/src/scheduler/vram_store.rs`
+  `workload_command_hash`, cross-checked against the Python hash in a unit test), plus
+  `observations_from_pods` (reads the `ksolver.dev/observed-peak-vram-mib` annotation on
+  Succeeded pods) and `append_observations` (writes the same JSONL the resolver reads).
+  Remaining wiring: (1) collect completed `corev1::Pod`s with their raw spec in the shadow
+  loop and feed them to `observations_from_pods` -> `append_observations`; (2) a VRAM-metrics
+  source (DCGM / probe sidecar) that sets `ksolver.dev/observed-peak-vram-mib` — ksolver does
+  not measure VRAM itself.
 - Full DRA allocation loop (needs a GPU DRA driver; node-affinity is the enforceable fallback).
 - Model breadth: single-SKU (4090), no true CUDA-OOM labels yet.

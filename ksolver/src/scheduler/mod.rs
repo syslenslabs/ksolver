@@ -24,6 +24,7 @@ pub mod prediction;
 pub mod repair;
 pub mod shadow;
 pub mod trace;
+pub mod vram_store;
 pub mod watch_state;
 
 #[cfg(test)]
