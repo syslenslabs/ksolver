@@ -2104,7 +2104,7 @@ fn operator_scale_safety_from_production_safety(
         "regret_status": regret_status,
         "next_action": next_action,
         "pruning_active": pruning_active,
-        "widened": quality.get("widened").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "widened": quality.get("widened").cloned().unwrap_or(serde_json::json!(false)),
         "edge_reduction_milli": quality.get("edge_reduction_milli").cloned().unwrap_or_else(|| serde_json::json!(0)),
         "explanation": quality.get("explanation").cloned().unwrap_or_else(|| serde_json::json!("candidate quality not reported")),
         "candidate_node_limit": trace.get("candidate_node_limit").cloned().unwrap_or_else(|| serde_json::json!(0)),
@@ -2117,6 +2117,7 @@ fn operator_scale_safety_from_production_safety(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operator_decision_readiness(
     summary: &serde_json::Value,
     binding_safety: &serde_json::Value,
@@ -2427,7 +2428,7 @@ fn operator_binding_safety_from_production_safety(
         "next_action": next_action,
         "mutation_allowed": mutation_allowed,
         "mode": rollout.get("mode").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
-        "enable_real_binding": rollout.get("enable_real_binding").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "enable_real_binding": rollout.get("enable_real_binding").cloned().unwrap_or(serde_json::json!(false)),
         "real_binding_dry_run": dry_run,
         "binding_kill_switch": kill_switch,
         "binding_canary_mode": rollout.get("binding_canary_mode").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
@@ -3883,6 +3884,7 @@ fn safety_gate_status(kube_liabilities: Option<&serde_json::Value>) -> (&'static
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evidence_bundle_live_validation_gates(
     latest_trace: Option<&DecisionTrace>,
     production_safety: &serde_json::Value,
@@ -5038,7 +5040,7 @@ fn simulator_recovery_command_for_urls_with_cache_dir(urls: &[String], cache_dir
         "scripts/kss-pool.sh status {} {} {}",
         count,
         base_port,
-        shell_quote_arg(&cache_dir)
+        shell_quote_arg(cache_dir)
     )
 }
 

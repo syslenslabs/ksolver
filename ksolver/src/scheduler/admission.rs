@@ -424,7 +424,7 @@ pub fn vram_injection_ops(
             value: Some(serde_json::json!({})),
         });
     }
-    let mut set_ann = |ops: &mut Vec<JsonPatchOperation>, key: &str, val: String| {
+    let set_ann = |ops: &mut Vec<JsonPatchOperation>, key: &str, val: String| {
         ops.push(JsonPatchOperation {
             op: "add".to_string(),
             path: format!("/metadata/annotations/{}", json_pointer_escape(key)),
@@ -459,8 +459,8 @@ pub fn vram_injection_ops(
         .get("hard")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if hard && vram_gib.is_some() {
-        let floor_gib = (vram_gib.unwrap().floor() as i64 - 1).max(0);
+    if let (true, Some(gib)) = (hard, vram_gib) {
+        let floor_gib = (gib.floor() as i64 - 1).max(0);
         ops.push(JsonPatchOperation {
             op: "add".to_string(),
             path: "/spec/affinity".to_string(),
