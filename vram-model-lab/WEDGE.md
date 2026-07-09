@@ -1,0 +1,62 @@
+# VRAM → DRA wedge
+
+Predict a pod's peak GPU VRAM and inject it as a Kubernetes-native resource request, so GPU
+memory stops being a user guess. ksolver becomes the *predictive, provably-safe planning layer*
+in front of any binder (KAI or plain kube); DRA is the interface.
+
+Design spec: `docs/superpowers/specs/2026-07-08-vram-dra-wedge-design.md`.
+
+## How it fits together
+
+```
+ pod ──▶ admission webhook (ksolver, Rust) ──▶ predictor /predict (Python) ──▶ resolution
+                     │                                                              │
+                     └── merge JSONPatch: annotations + nodeAffinity + (DRA claim) ◀┘
+```
+
+- **Resolver** (`vram_resolver.py`) — confidence-ranked cascade, highest available tier wins:
+  1. **explicit** annotation `ksolver.dev/predicted-peak-vram-{gib,bytes}` → authoritative
+  4. **historical fingerprint** (image + command/env hash) → observed p95 peak → high *(measured beats sniffed)*
+  3. **referenced config** (DeepSpeed/HF/accelerate, read via API) → model → high
+  2. **static sniff** (annotations/env/CLI flags) → model → high
+  - else → **advisory** only (never a hard constraint on a guess)
+- **Delivery** (`vram_admission.py`) — turns a resolution into a JSONPatch: annotate the estimate;
+  at high/authoritative confidence add `nodeAffinity ksolver.dev/gpu-vram-gib Gt floor(est)-1`
+  (enforceable today, no DRA driver needed) plus a DRA consumable-capacity `ResourceClaimTemplate`
+  (`build_resource_claim_template`, live-ready once a GPU DRA driver publishes devices).
+- **Rust relay** (`ksolver … admission.rs` / `shadow.rs`) — the real ksolver webhook calls the
+  predictor and merges the VRAM patch with its schedulerName patch. **Fails open** on any error.
+
+## Run it
+
+```bash
+# one-command local demo across all tiers (starts predictor, drives /admit)
+PY=/path/to/venv/python vram-model-lab/scripts/wedge_demo.sh
+
+# or manually:
+python vram-model-lab/scripts/vram_admission_service.py --port 8091 \
+    --observations vram-model-lab/data/observations.jsonl        # predictor + tier-4 store
+KUBECONFIG=... KSOLVER_VRAM_PREDICTOR_URL=http://127.0.0.1:8091 \
+    ksolver shadow                                                # webhook relays to it
+```
+
+Deps: `numpy`, `pyyaml`. `KSOLVER_VRAM_PREDICTOR_URL` unset ⇒ VRAM injection disabled (no
+behavior change).
+
+## Populating the tier-4 store
+
+- Forward (primary): `vram_resolver.record_observation(store, pod, peak_mib)` on each completed
+  run. Tier 4 fires once a fingerprint recurs ≥ `FINGERPRINT_MIN_SAMPLES` (3).
+- Batch seed from measured lab runs: `python vram-model-lab/scripts/build_observation_store.py`.
+
+## Status
+
+Built + unit-tested (18 Python + 3 Rust) and CI-covered; proven live locally (merged webhook
+patch; tier-4 firing on real data; DRA claim accepted by k8s 1.36 server-side dry-run).
+
+Remaining / not done:
+- In-cluster `MutatingWebhookConfiguration` + TLS (run against a live API server).
+- Auto-populate the tier-4 store from ksolver's own completed-job observations (needs a Rust
+  fingerprint that byte-matches the Python one).
+- Full DRA allocation loop (needs a GPU DRA driver; node-affinity is the enforceable fallback).
+- Model breadth: single-SKU (4090), no true CUDA-OOM labels yet.
