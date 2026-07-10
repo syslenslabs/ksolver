@@ -2,6 +2,33 @@
 
 > **For agentic workers:** This is a ranked product/engineering roadmap, not a single implementation ticket. When executing, split each phase into a focused implementation plan with tests, KSS proof criteria, demo criteria, and rollback notes. UI implementation must be delegated to Claude; Codex can do backend, tests, docs, and proof harness work.
 
+## Status update (2026-07-09)
+
+Delivered since the roadmap was written:
+
+- **Safer-than-kube, proven live.** Live kube-scheduler-simulator comparison now detects the
+  liabilities kube incurs when it "admits" more — CUDA-OOM risk and split/partial co-located
+  gangs — and surfaces them as a passing **"kube safety advantage" proof gate** + a green
+  live-trace callout (dashboard). This reframes ksolver's lower raw admission as the *correct*,
+  safer call. (Phase 4 evidence; addresses the "gang-only wins are table stakes" gap.)
+- **Repair explainability.** Unrepairable targets now name the blocking pod/policy instead of a
+  bare "no plan" (Phase 1 hardening).
+- **VRAM estimator is real + promoted.** Collected real RTX-4090 samples incl. **real-framework
+  (torchvision) probes** (verified_real_framework 0 → 5); refit + promoted the model on 276 rows.
+  (Phase 2 data foundation.)
+- **The VRAM → DRA wedge (new, cross-cutting Phase 2/5).** Predict peak VRAM via a confidence
+  cascade (explicit → historical-fingerprint → config → static-sniff → advisory) and inject it as
+  a DRA consumable-capacity claim + node feasibility, wired into ksolver's real mutating webhook
+  (fail-open). Full design + how-to: `docs/superpowers/specs/2026-07-08-vram-dra-wedge-design.md`
+  and `vram-model-lab/WEDGE.md`. All four cascade tiers have live paths; hardened against
+  extrapolation (advisory guard), dual VRAM labels (ksolver GiB / NVIDIA GFD MiB), and
+  Rust↔Python fingerprint parity.
+
+**Frontier (infra-gated, not code):** in-cluster `MutatingWebhookConfiguration` + TLS; a
+VRAM-metrics exporter (DCGM) to auto-populate the tier-4 store; a GPU DRA driver for the full
+allocation loop; cross-SKU + true-OOM data. A gang-aware/Volcano baseline still needed before
+external competitive claims.
+
 ## Goal
 
 Turn ksolver from a kube-scheduler comparison demo into an SRE-ready GPU scheduling product that can explain and safely act on scarce GPU placement problems.
