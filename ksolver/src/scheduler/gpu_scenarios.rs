@@ -1312,6 +1312,7 @@ pub struct BenchmarkReport {
     pub candidate_widening_scenario: CandidateWideningProof,
     pub scenario_pages: Vec<ScenarioPage>,
     pub feature_assertions: Vec<FeatureAssertion>,
+    pub win_classification_summary: WinClassificationSummary,
     pub scenarios: Vec<ScenarioResult>,
 }
 
@@ -1427,6 +1428,7 @@ pub async fn run_benchmark_with_options(
     let benefit_summary = summarize_benefit(&results);
     let roi_summary = summarize_roi(&results);
     let regret_summary = summarize_regret(REGRET_CANDIDATE_LIMIT, &results);
+    let win_classification_summary = summarize_win_classification(&results);
     let repair_scenario = fragmented_repair_scenario_proof();
     let repair_scenarios = vec![
         repair_scenario.clone(),
@@ -1612,6 +1614,7 @@ pub async fn run_benchmark_with_options(
         candidate_widening_scenario,
         scenario_pages,
         feature_assertions,
+        win_classification_summary,
         scenarios: results,
     })
 }
@@ -9473,6 +9476,41 @@ pub fn classify_win(ksolver: i64, kube_only: i64, gang_aware: Option<i64>) -> Wi
     }
 }
 
+/// Report-level rollup of per-scenario [`WinClassification`], so an operator/demo sees the honest
+/// win picture at a glance instead of scanning every scenario.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct WinClassificationSummary {
+    pub total: usize,
+    pub beats_gang_aware: usize,
+    pub beats_kube_only: usize,
+    pub not_proven: usize,
+    /// True while no gang-aware baseline is wired: `beats_gang_aware` is 0 BY CONSTRUCTION (not
+    /// earnable yet), so the demo never overstates the differentiator claim.
+    pub gang_aware_baseline_pending: bool,
+    pub headline: String,
+}
+
+fn summarize_win_classification(results: &[ScenarioResult]) -> WinClassificationSummary {
+    let mut summary = WinClassificationSummary {
+        total: results.len(),
+        gang_aware_baseline_pending: true,
+        ..Default::default()
+    };
+    for r in results {
+        match r.win_classification {
+            WinClassification::BeatsGangAware => summary.beats_gang_aware += 1,
+            WinClassification::BeatsKubeOnly => summary.beats_kube_only += 1,
+            WinClassification::NotProven => summary.not_proven += 1,
+        }
+    }
+    summary.headline = format!(
+        "{} scenarios: {} beats-kube-only, {} not-proven, {} beats-gang-aware \
+         (no gang-aware baseline wired yet, so beats-gang-aware is not yet earnable)",
+        summary.total, summary.beats_kube_only, summary.not_proven, summary.beats_gang_aware
+    );
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9511,6 +9549,38 @@ mod tests {
             serde_json::to_string(&WinClassification::NotProven).unwrap(),
             "\"not-proven\""
         );
+    }
+
+    #[test]
+    fn win_classification_summary_counts_buckets_and_flags_pending_baseline() {
+        let mk = |wc: WinClassification| ScenarioResult {
+            name: "s".to_string(),
+            description: String::new(),
+            tier: Tier::Small,
+            benefit_score: 0,
+            headline: String::new(),
+            kube: empty_engine("kube"),
+            kube_binpack: empty_engine("kube-binpack"),
+            ksolver: empty_engine("ksolver"),
+            reduced_ksolver: empty_engine("ksolver"),
+            regret: RegretMetrics::default(),
+            efficiency_score: 0,
+            significantly_better: false,
+            efficiency_headline: String::new(),
+            win_classification: wc,
+        };
+        let results = vec![
+            mk(WinClassification::BeatsKubeOnly),
+            mk(WinClassification::BeatsKubeOnly),
+            mk(WinClassification::NotProven),
+        ];
+        let s = summarize_win_classification(&results);
+        assert_eq!(s.total, 3);
+        assert_eq!(s.beats_kube_only, 2);
+        assert_eq!(s.not_proven, 1);
+        assert_eq!(s.beats_gang_aware, 0);
+        assert!(s.gang_aware_baseline_pending);
+        assert!(s.headline.contains("beats-gang-aware is not yet earnable"));
     }
 
     fn empty_engine(engine: &str) -> EngineResult {
