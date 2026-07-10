@@ -153,6 +153,22 @@ mod tests {
     }
 
     #[test]
+    fn command_hash_matches_python_for_null_valuefrom_env() {
+        // A valueFrom env has no literal value -> Python stores name:None (json null); the Rust
+        // side must serialize null too, or tier-4 keys diverge across the webhook/predictor boundary.
+        let command = vec!["python".to_string(), "t.py".to_string()];
+        let args: Vec<String> = vec![];
+        let mut env = BTreeMap::new();
+        env.insert("A".to_string(), Some("1".to_string()));
+        env.insert("B".to_string(), None); // valueFrom -> null
+        let hash = workload_command_hash(&command, &args, &env);
+        assert_eq!(
+            hash,
+            "eaa6a4fb61954e8cfb836369d109a019a83fe3416ccdcb315cc7f2957d322d36"
+        );
+    }
+
+    #[test]
     fn observations_only_from_completed_annotated_pods() {
         let mk = |phase: &str, peak: Option<&str>| corev1::Pod {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {

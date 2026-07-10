@@ -197,6 +197,24 @@ class ResolveCascadeTest(unittest.TestCase):
         r = vr.resolve(pod)  # must not crash; falls through to unknown
         self.assertEqual(r["source"], "unknown")
 
+    def test_fingerprint_matches_shared_constant_for_null_valuefrom_env(self):
+        # Locks Rust<->Python parity (same constant asserted in vram_store.rs). A valueFrom env
+        # has no literal value -> serialized as json null on both sides.
+        pod = {
+            "spec": {"containers": [{
+                "name": "t", "image": "i", "command": ["python", "t.py"], "args": [],
+                "env": [
+                    {"name": "A", "value": "1"},
+                    {"name": "B", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                ],
+                "resources": {"limits": {"nvidia.com/gpu": "1"}},
+            }]}
+        }
+        self.assertEqual(
+            vr.pod_fingerprint(pod)["command_hash"],
+            "eaa6a4fb61954e8cfb836369d109a019a83fe3416ccdcb315cc7f2957d322d36",
+        )
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]
