@@ -4322,6 +4322,9 @@ fn compute_kube_liabilities(
                 "node": node,
                 "predicted_vram_gib": round1(meta.predicted_vram_bytes),
                 "node_vram_gib": round1(node_vram),
+                // Predicted-VRAM feasibility is rare: default kube, Volcano, and KAI all ignore it,
+                // so this advantage holds against ~any scheduler, not just default kube.
+                "competitive_strength": "beats-most-schedulers",
                 "detail": format!(
                     "kube placed {scope} on {node}, but its predicted peak VRAM ({:.0} GiB) exceeds the GPU's memory ({:.0} GiB) — CUDA OOM risk that ksolver blocks",
                     round1(meta.predicted_vram_bytes), round1(node_vram)
@@ -4379,6 +4382,8 @@ fn compute_kube_liabilities(
             "member_total": total,
             "placed_count": placed,
             "nodes": nodes.iter().cloned().collect::<Vec<_>>(),
+            // Gang-aware schedulers (Volcano, KAI) also avoid this, so it only beats DEFAULT kube.
+            "competitive_strength": "beats-default-kube-only",
             "detail": detail,
         }));
     }
@@ -4403,11 +4408,18 @@ fn compute_kube_liabilities(
         )
     };
 
+    // Classify strength: OOM-risk advantages hold vs ~any scheduler (VRAM prediction is rare);
+    // split/partial gang advantages only beat DEFAULT kube (gang-aware schedulers avoid them too).
+    let beats_most = oom_risk.len();
+    let beats_default_kube_only = split_gangs.len();
+
     serde_json::json!({
         "count": count,
         "oom_risk": oom_risk,
         "split_gangs": split_gangs,
         "summary": summary,
+        "beats_most_schedulers": beats_most,
+        "beats_default_kube_only": beats_default_kube_only,
     })
 }
 
@@ -7166,6 +7178,11 @@ mod tests {
         assert_eq!(out["split_gangs"][0]["kind"], serde_json::json!("split"));
         assert_eq!(out["oom_risk"].as_array().unwrap().len(), 1);
         assert_eq!(out["oom_risk"][0]["scope"], serde_json::json!("t/big"));
+        // competitive-strength classification (roadmap: beats-kube-only vs beats-any-scheduler)
+        assert_eq!(out["oom_risk"][0]["competitive_strength"], serde_json::json!("beats-most-schedulers"));
+        assert_eq!(out["split_gangs"][0]["competitive_strength"], serde_json::json!("beats-default-kube-only"));
+        assert_eq!(out["beats_most_schedulers"], serde_json::json!(1));
+        assert_eq!(out["beats_default_kube_only"], serde_json::json!(1));
     }
 
     #[test]
