@@ -3861,10 +3861,26 @@ fn safety_gate_status(kube_liabilities: Option<&serde_json::Value>) -> (&'static
                 .and_then(|l| l.get("summary"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("kube would accept unsafe placements ksolver refuses");
+            // Honest competitive tiering (don't overclaim vs a gang-aware baseline).
+            let beats_most = kube_liabilities
+                .and_then(|l| l.get("beats_most_schedulers"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let beats_kube_only = kube_liabilities
+                .and_then(|l| l.get("beats_default_kube_only"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let tiering = if beats_most > 0 || beats_kube_only > 0 {
+                format!(
+                    " ({beats_most} beat ~any scheduler incl. gang-aware, {beats_kube_only} beat default kube only)"
+                )
+            } else {
+                String::new()
+            };
             (
                 "pass",
                 format!(
-                    "ksolver refused {count} unsafe placement(s) the live kube baseline accepted — {summary}"
+                    "ksolver refused {count} unsafe placement(s) the live kube baseline accepted — {summary}{tiering}"
                 ),
                 "cite the avoided OOM-risk / split-gang placements as proof ksolver is safer than kube, not just different",
             )
@@ -7216,11 +7232,17 @@ mod tests {
         let zero = serde_json::json!({"count": 0, "summary": "no liabilities"});
         assert_eq!(safety_gate_status(Some(&zero)).0, "warn");
         // Baseline measured and kube took on liabilities ksolver refused -> pass (provable claim).
-        let two = serde_json::json!({"count": 2, "summary": "kube would OOM and split a gang"});
+        let two = serde_json::json!({
+            "count": 2, "summary": "kube would OOM and split a gang",
+            "beats_most_schedulers": 1, "beats_default_kube_only": 1
+        });
         let (status, reason, _next) = safety_gate_status(Some(&two));
         assert_eq!(status, "pass");
         assert!(reason.contains("2 unsafe placement"));
         assert!(reason.contains("kube would OOM"));
+        // honest tiering surfaced in the proof-gate reason
+        assert!(reason.contains("1 beat ~any scheduler"));
+        assert!(reason.contains("1 beat default kube only"));
     }
 
     fn test_shadow_config(cluster_name: &str) -> ShadowConfig {
