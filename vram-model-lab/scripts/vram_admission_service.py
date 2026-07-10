@@ -4,6 +4,8 @@
 Endpoints:
   POST /predict  -> resolve(pod) result JSON (for a Rust/Go webhook to consume)
   POST /admit    -> AdmissionReview response with a base64 JSONPatch (a webhook itself)
+  POST /observe  -> record a completed run's measured peak (tier-4 populate)
+  POST /claim    -> right-sized DRA ResourceClaimTemplate for a pod
 
 This is the delivery layer for the VRAM->DRA wedge. The model math + cascade live in
 vram_resolver; this only wires HTTP. For a production MutatingWebhookConfiguration, front it
