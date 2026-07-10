@@ -1,6 +1,12 @@
 # DRA GA migration spec (resource.k8s.io/v1)
 
-**Status:** proposed — needs an explicit go-ahead (breaking core-dependency upgrade).
+**Status:** EXECUTED + verified on an unmerged branch (2026-07-10) — awaiting a merge decision.
+Branch `worktree-agent-aac1cc842eaddd3a5` (based on the `scheduler` tip), 3 commits (`a08570a` deps,
+`089a8d4` kube 4.0 API, `91698e9` chrono→jiff). Independently verified: `cargo test -p ksolver
+--lib` = 525 passed; `--features rust-cp-sat` = 574 passed; clippy clean; DRA safety caveats intact.
+Not run: `examples/dra-bundle.yaml` server dry-run (needs a live cluster). Merging is gated on the
+maintainer because it resets the dependency baseline / minimum Kubernetes version. The rest of this
+spec is the executed plan of record.
 **Why:** the VRAM→DRA wedge emits `resource.k8s.io/v1` claims (GA in k8s 1.34), but ksolver's own
 DRA demand modeling (`ksolver/src/dra.rs`, `collector.rs`) reads `resource.k8s.io/v1alpha3`, because
 `k8s-openapi` is pinned to `v1_32`. On a cluster serving only GA DRA, ksolver's demand modeling
