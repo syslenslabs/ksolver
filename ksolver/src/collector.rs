@@ -1496,6 +1496,16 @@ fn sum_pod_spec_requests(spec: &corev1::PodSpec) -> ResourceList {
     regular.milli_cpu = (regular.milli_cpu + sc_cpu).max(peak_cpu);
     regular.memory_bytes = (regular.memory_bytes + sc_mem).max(peak_mem);
     regular.ephemeral_storage = (regular.ephemeral_storage + sc_eph).max(peak_eph);
+    // RuntimeClass pod overhead (Kata/gVisor) is added on top of the aggregated container requests,
+    // matching Kubernetes resourcehelper.PodRequests. Omitting it undercounts the pod.
+    if let Some(overhead) = spec.overhead.as_ref() {
+        regular.milli_cpu += overhead.get("cpu").map(parse_cpu_millis).unwrap_or(0);
+        regular.memory_bytes += overhead.get("memory").map(parse_bytes).unwrap_or(0);
+        regular.ephemeral_storage += overhead
+            .get("ephemeral-storage")
+            .map(parse_bytes)
+            .unwrap_or(0);
+    }
     regular.pods += 1;
     regular
 }
@@ -1563,6 +1573,14 @@ fn sum_pod_extended_requests(spec: &corev1::PodSpec) -> BTreeMap<String, i64> {
     for (name, peak) in init_peak {
         let entry = out.entry(name).or_insert(0);
         *entry = (*entry).max(peak);
+    }
+    // RuntimeClass pod overhead may declare extended resources too — add them on top.
+    if let Some(overhead) = spec.overhead.as_ref() {
+        for (name, quantity) in overhead {
+            if !is_core_resource(name) {
+                *out.entry(name.clone()).or_insert(0) += parse_integer_quantity(quantity);
+            }
+        }
     }
     out
 }
@@ -2290,6 +2308,29 @@ mod tests {
         };
         // app(1000m) + sidecar(500m) = 1500m, not max(1000,500).
         assert_eq!(sum_pod_spec_requests(&spec).milli_cpu, 1500);
+    }
+
+    #[test]
+    fn pod_overhead_adds_to_cpu_and_extended_requests() {
+        use k8s_openapi::api::core::v1 as corev1;
+        // RuntimeClass overhead (Kata/gVisor) adds on top of container requests.
+        let spec = corev1::PodSpec {
+            containers: vec![corev1::Container {
+                name: "app".to_string(),
+                resources: Some(corev1::ResourceRequirements {
+                    requests: Some(BTreeMap::from([("cpu".to_string(), Quantity("1".to_string()))])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            overhead: Some(BTreeMap::from([
+                ("cpu".to_string(), Quantity("250m".to_string())),
+                ("nvidia.com/gpu".to_string(), Quantity("1".to_string())),
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(sum_pod_spec_requests(&spec).milli_cpu, 1250); // 1000m + 250m overhead
+        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&1));
     }
 
     #[test]
