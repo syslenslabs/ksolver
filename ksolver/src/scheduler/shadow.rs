@@ -6308,11 +6308,13 @@ fn gpu_quantity_sum(
 }
 
 fn raw_node_gpu_capacity(node: &corev1::Node) -> i64 {
+    // Count whole GPUs AND MIG slices (via gpu_quantity_sum), so a node partitioned entirely into
+    // MIG slices — which may advertise only nvidia.com/mig-* and no nvidia.com/gpu — is still
+    // recognized as a GPU node in the simulator baseline instead of being silently dropped.
     node.status
         .as_ref()
         .and_then(|s| s.allocatable.as_ref())
-        .and_then(|r| r.get("nvidia.com/gpu"))
-        .and_then(|q| q.0.parse::<i64>().ok())
+        .map(gpu_quantity_sum)
         .unwrap_or(0)
 }
 
@@ -7156,6 +7158,47 @@ async fn run_one_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_node_gpu_capacity_counts_mig_only_nodes() {
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        let mig_only = corev1::Node {
+            status: Some(corev1::NodeStatus {
+                allocatable: Some(std::collections::BTreeMap::from([
+                    ("cpu".to_string(), Quantity("8".to_string())),
+                    ("nvidia.com/mig-1g.5gb".to_string(), Quantity("7".to_string())),
+                ])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // A node with only MIG slices (no nvidia.com/gpu) is still a GPU node.
+        assert_eq!(raw_node_gpu_capacity(&mig_only), 7);
+
+        let whole = corev1::Node {
+            status: Some(corev1::NodeStatus {
+                allocatable: Some(std::collections::BTreeMap::from([(
+                    "nvidia.com/gpu".to_string(),
+                    Quantity("4".to_string()),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(raw_node_gpu_capacity(&whole), 4);
+
+        let cpu_only = corev1::Node {
+            status: Some(corev1::NodeStatus {
+                allocatable: Some(std::collections::BTreeMap::from([(
+                    "cpu".to_string(),
+                    Quantity("16".to_string()),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(raw_node_gpu_capacity(&cpu_only), 0);
+    }
 
     #[test]
     fn kube_liabilities_flags_split_gang_and_oom() {
