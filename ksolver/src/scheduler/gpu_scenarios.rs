@@ -12557,6 +12557,11 @@ mod tests {
             "beats-gang-aware must not be claimed without a gang-aware baseline"
         );
         assert!(wc.gang_aware_baseline_pending);
+        // Provenance rollup sums to total.
+        assert_eq!(
+            wc.live_kss_scenarios + wc.cached_kss_scenarios + wc.deterministic_fixture_scenarios,
+            wc.total
+        );
         for s in &report.scenarios {
             let best_kube = s.kube.metrics.useful_gpu.max(s.kube_binpack.metrics.useful_gpu);
             let expected = classify_win(s.ksolver.metrics.useful_gpu, best_kube, None);
@@ -12565,6 +12570,22 @@ mod tests {
                 "scenario {} classification disagrees with useful-GPU vs best kube baseline",
                 s.name
             );
+            // Every scenario carries an honest proof-type ingredient tag.
+            assert!(
+                !s.proof_characters.is_empty(),
+                "scenario {} has no proof-character tag",
+                s.name
+            );
+            // does_not_prove is consistent with the win class + provenance it was derived from.
+            let prov = proof_provenance(&s.kube.source, &s.kube_binpack.source);
+            assert_eq!(
+                s.does_not_prove,
+                scenario_does_not_prove(s.win_classification, prov),
+                "scenario {} does_not_prove is inconsistent with its class/provenance",
+                s.name
+            );
+            // No scenario can silently claim beats-gang-aware.
+            assert_ne!(s.win_classification, WinClassification::BeatsGangAware);
         }
     }
 }
