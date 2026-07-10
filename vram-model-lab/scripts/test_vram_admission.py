@@ -31,10 +31,15 @@ class AdmissionPatchTest(unittest.TestCase):
         self.assertEqual(self._find_ann(patches, "ksolver.dev/predicted-peak-vram-source"), "static-sniff+model")
         aff = self._affinity(patches)
         self.assertIsNotNone(aff)
-        expr = aff["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"][0]
-        self.assertEqual(expr["key"], va.NODE_VRAM_LABEL)
-        self.assertEqual(expr["operator"], "Gt")
-        self.assertEqual(expr["values"], ["17"])  # floor(18)-1
+        terms = aff["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+        # OR'd: GiB label term + MiB label term
+        gib = terms[0]["matchExpressions"][0]
+        self.assertEqual(gib["key"], va.NODE_VRAM_LABEL)
+        self.assertEqual(gib["operator"], "Gt")
+        self.assertEqual(gib["values"], ["17"])  # floor(18)-1
+        mib = terms[1]["matchExpressions"][0]
+        self.assertEqual(mib["key"], va.NODE_VRAM_LABEL_MIB)
+        self.assertEqual(mib["values"], ["17408"])  # 17 * 1024
 
     def test_advisory_annotates_but_no_affinity(self):
         res = {"vram_gib": None, "source": "unknown", "confidence": "advisory", "hard": False}

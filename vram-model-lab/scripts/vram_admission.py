@@ -19,7 +19,8 @@ import json
 import math
 from typing import Any, Callable
 
-NODE_VRAM_LABEL = "ksolver.dev/gpu-vram-gib"
+NODE_VRAM_LABEL = "ksolver.dev/gpu-vram-gib"       # ksolver label, GiB
+NODE_VRAM_LABEL_MIB = "nvidia.com/gpu.memory"      # NVIDIA GPU-feature-discovery label, MiB
 DEFAULT_DEVICE_CLASS = "gpu.ksolver"
 
 
@@ -45,7 +46,9 @@ def build_admission_patch(pod: dict[str, Any], resolution: dict[str, Any]) -> li
 
     if resolution.get("hard") and vram_gib is not None:
         # Require node per-GPU VRAM strictly greater than floor(estimate)-1 GiB, i.e. >= ceil.
+        # Two OR'd terms so it matches the ksolver GiB label OR the NVIDIA GFD MiB label.
         floor_gib = max(0, math.floor(vram_gib) - 1)
+        floor_mib = floor_gib * 1024
         patches.append(
             {
                 "op": "add",
@@ -54,15 +57,12 @@ def build_admission_patch(pod: dict[str, Any], resolution: dict[str, Any]) -> li
                     "nodeAffinity": {
                         "requiredDuringSchedulingIgnoredDuringExecution": {
                             "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": NODE_VRAM_LABEL,
-                                            "operator": "Gt",
-                                            "values": [str(floor_gib)],
-                                        }
-                                    ]
-                                }
+                                {"matchExpressions": [
+                                    {"key": NODE_VRAM_LABEL, "operator": "Gt", "values": [str(floor_gib)]}
+                                ]},
+                                {"matchExpressions": [
+                                    {"key": NODE_VRAM_LABEL_MIB, "operator": "Gt", "values": [str(floor_mib)]}
+                                ]},
                             ]
                         }
                     }

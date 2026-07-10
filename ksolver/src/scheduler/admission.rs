@@ -461,19 +461,26 @@ pub fn vram_injection_ops(
         .unwrap_or(false);
     if let (true, Some(gib)) = (hard, vram_gib) {
         let floor_gib = (gib.floor() as i64 - 1).max(0);
+        let floor_mib = floor_gib * 1024;
+        // Two OR'd terms: match the ksolver GiB label OR the NVIDIA GFD MiB label.
         ops.push(JsonPatchOperation {
             op: "add".to_string(),
             path: "/spec/affinity".to_string(),
             value: Some(serde_json::json!({
                 "nodeAffinity": {
                     "requiredDuringSchedulingIgnoredDuringExecution": {
-                        "nodeSelectorTerms": [{
-                            "matchExpressions": [{
+                        "nodeSelectorTerms": [
+                            {"matchExpressions": [{
                                 "key": "ksolver.dev/gpu-vram-gib",
                                 "operator": "Gt",
                                 "values": [floor_gib.to_string()],
-                            }]
-                        }]
+                            }]},
+                            {"matchExpressions": [{
+                                "key": "nvidia.com/gpu.memory",
+                                "operator": "Gt",
+                                "values": [floor_mib.to_string()],
+                            }]},
+                        ]
                     }
                 }
             })),
@@ -540,13 +547,17 @@ mod tests {
         assert!(ops.iter().any(|o| o.path
             == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-gib"
             && o.value == Some(serde_json::Value::String("18".to_string()))));
-        // Gt floor(18)-1 = 17
+        // Gt floor(18)-1 = 17 GiB, OR'd with the MiB label (17*1024 = 17408)
         let aff = ops.iter().find(|o| o.path == "/spec/affinity").unwrap();
-        let expr = &aff.value.as_ref().unwrap()["nodeAffinity"]
-            ["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
-            ["matchExpressions"][0];
-        assert_eq!(expr["operator"], serde_json::json!("Gt"));
-        assert_eq!(expr["values"], serde_json::json!(["17"]));
+        let terms = &aff.value.as_ref().unwrap()["nodeAffinity"]
+            ["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"];
+        let gib = &terms[0]["matchExpressions"][0];
+        assert_eq!(gib["key"], serde_json::json!("ksolver.dev/gpu-vram-gib"));
+        assert_eq!(gib["operator"], serde_json::json!("Gt"));
+        assert_eq!(gib["values"], serde_json::json!(["17"]));
+        let mib = &terms[1]["matchExpressions"][0];
+        assert_eq!(mib["key"], serde_json::json!("nvidia.com/gpu.memory"));
+        assert_eq!(mib["values"], serde_json::json!(["17408"]));
     }
 
     #[test]
