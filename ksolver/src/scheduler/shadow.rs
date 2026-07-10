@@ -6272,10 +6272,27 @@ fn synthetic_gpu_blocker_pod(pod: &corev1::Pod, idx: usize) -> Option<corev1::Po
 }
 
 fn raw_pod_gpu_request(pod: &corev1::Pod) -> i64 {
-    pod.spec
-        .as_ref()
-        .map(|spec| spec.containers.iter().map(container_gpu_request).sum())
-        .unwrap_or(0)
+    let Some(spec) = pod.spec.as_ref() else {
+        return 0;
+    };
+    let app_sum: i64 = spec.containers.iter().map(container_gpu_request).sum();
+    // Init containers (KEP-753): plain inits are a running max; restartable sidecars accumulate and
+    // run concurrently with app containers. Previously init containers were ignored entirely, so a
+    // running pod whose GPU comes from an init/sidecar looked like 0 GPUs and was NOT counted as
+    // consuming capacity when synthesizing simulator blocker pods — the baseline would treat that
+    // GPU as free. Mirrors pod_filter::effective_gpu_request.
+    let mut restartable = 0i64;
+    let mut init_peak = 0i64;
+    if let Some(inits) = spec.init_containers.as_ref() {
+        for c in inits {
+            let g = container_gpu_request(c);
+            init_peak = init_peak.max(restartable + g);
+            if c.restart_policy.as_deref() == Some("Always") {
+                restartable += g;
+            }
+        }
+    }
+    (app_sum + restartable).max(init_peak)
 }
 
 fn container_gpu_request(container: &corev1::Container) -> i64 {
@@ -8787,6 +8804,48 @@ mod tests {
         };
 
         assert!(synthetic_gpu_blocker_pod(&original, 0).is_none());
+    }
+
+    #[test]
+    fn raw_pod_gpu_request_counts_init_and_sidecar_gpus() {
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        let gpu = |n: &str| {
+            Some(corev1::ResourceRequirements {
+                requests: Some(std::collections::BTreeMap::from([(
+                    "nvidia.com/gpu".to_string(),
+                    Quantity(n.to_string()),
+                )])),
+                ..Default::default()
+            })
+        };
+        let mut sidecar = corev1::Container {
+            name: "gpu-sidecar".to_string(),
+            resources: gpu("1"),
+            ..Default::default()
+        };
+        sidecar.restart_policy = Some("Always".to_string());
+        let pod = corev1::Pod {
+            spec: Some(corev1::PodSpec {
+                node_name: Some("gpu-node-a".to_string()),
+                containers: vec![corev1::Container {
+                    name: "app".to_string(),
+                    resources: gpu("2"),
+                    ..Default::default()
+                }],
+                init_containers: Some(vec![
+                    sidecar,
+                    corev1::Container {
+                        name: "setup".to_string(),
+                        resources: gpu("4"),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // init peak = sidecar(1)+setup(4)=5; app phase = app(2)+sidecar(1)=3; max = 5.
+        assert_eq!(raw_pod_gpu_request(&pod), 5);
     }
 
     #[test]
