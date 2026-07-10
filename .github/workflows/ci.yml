@@ -46,7 +46,7 @@ jobs:
       - name: VRAM->DRA wedge tests
         run: |
           python3 -m pip install --quiet numpy pyyaml
-          cd vram-model-lab/scripts && python3 -m unittest test_vram_resolver test_vram_admission
+          cd vram-model-lab/scripts && python3 -m unittest test_vram_resolver test_vram_admission test_vram_admission_service
 
       - name: Clippy
         run: cargo clippy --features rust-cp-sat -- -D warnings

@@ -1,0 +1,58 @@
+"""Unit tests for the predictor service request routing (no HTTP needed)."""
+from __future__ import annotations
+
+import base64
+import json
+import unittest
+
+import vram_admission_service as svc
+
+
+def gpu_pod(annotations=None, args=None):
+    return {
+        "metadata": {"annotations": annotations or {}},
+        "spec": {"containers": [{"name": "t", "image": "i", "args": args or [],
+                                 "resources": {"limits": {"nvidia.com/gpu": "1"}}}]},
+    }
+
+
+class RouteTest(unittest.TestCase):
+    def test_predict_returns_resolution(self):
+        status, body = svc.route("/predict", gpu_pod({"ksolver.dev/predicted-peak-vram-gib": "20"}), {})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["source"], "explicit-annotation")
+        self.assertEqual(body["vram_gib"], 20.0)
+
+    def test_admit_returns_admissionreview_with_patch(self):
+        review = {"request": {"uid": "u", "operation": "CREATE",
+                              "object": gpu_pod({"ksolver.dev/predicted-peak-vram-gib": "20"})}}
+        status, body = svc.route("/admit", review, {})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["response"]["allowed"])
+        ops = json.loads(base64.b64decode(body["response"]["patch"]))
+        self.assertTrue(any("predicted-peak-vram" in o["path"] for o in ops))
+
+    def test_observe_indexes_and_reports_samples(self):
+        obs: dict = {}
+        pod = gpu_pod(args=["--x", "1"])
+        for peak in (5000, 5100, 5200):
+            status, body = svc.route("/observe", {"pod": pod, "peak_mib": peak}, obs)
+            self.assertEqual(status, 200)
+            self.assertTrue(body["recorded"])
+        self.assertEqual(body["samples"], 3)
+        # and now /predict resolves via tier 4
+        _, pred = svc.route("/predict", pod, obs)
+        self.assertEqual(pred["source"], "historical-fingerprint")
+
+    def test_observe_rejects_bad_peak(self):
+        status, body = svc.route("/observe", {"pod": gpu_pod(), "peak_mib": "nope"}, {})
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
+    def test_unknown_path_404(self):
+        status, body = svc.route("/nope", {}, {})
+        self.assertEqual(status, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

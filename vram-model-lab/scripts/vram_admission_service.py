@@ -21,11 +21,35 @@ import vram_admission as va
 import vram_resolver as vr
 
 
+def route(path, payload, observations, store_path=None):
+    """Pure request router -> (status_code, response_dict). Testable without HTTP.
+
+    /predict {pod}          -> resolution
+    /admit   {request:...}  -> AdmissionReview response (base64 JSONPatch)
+    /observe {pod,peak_mib} -> index + persist an observation (tier-4 populate)
+    """
+    path = path.rstrip("/")
+    if path == "/predict":
+        return 200, vr.resolve(payload, observations=observations)
+    if path == "/admit":
+        return 200, va.render_admission_response(
+            payload, lambda pod: vr.resolve(pod, observations=observations)
+        )
+    if path == "/observe":
+        pod = payload.get("pod") or {}
+        try:
+            peak = float(payload.get("peak_mib"))
+        except (TypeError, ValueError):
+            return 400, {"error": "peak_mib must be a number"}
+        key = vr.index_observation(observations, pod, peak)
+        if store_path:
+            vr.record_observation(store_path, pod, peak)
+        return 200, {"recorded": True, "key": key, "samples": len(observations[key])}
+    return 404, {"error": "not found"}
+
+
 def _make_handler(observations, store_path):
     observations = observations if observations is not None else {}
-
-    def resolve_fn(pod):
-        return vr.resolve(pod, observations=observations)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # quiet
@@ -47,26 +71,8 @@ def _make_handler(observations, store_path):
             except json.JSONDecodeError:
                 self._send({"error": "invalid json"}, 400)
                 return
-            path = self.path.rstrip("/")
-            if path == "/predict":
-                self._send(resolve_fn(payload))
-            elif path == "/admit":
-                self._send(va.render_admission_response(payload, resolve_fn))
-            elif path == "/observe":
-                # Record a completed run's measured peak so tier 4 fires for the next occurrence.
-                # Body: {"pod": {...}, "peak_mib": <number>}. Updates the live index + persists.
-                pod = payload.get("pod") or {}
-                try:
-                    peak = float(payload.get("peak_mib"))
-                except (TypeError, ValueError):
-                    self._send({"error": "peak_mib must be a number"}, 400)
-                    return
-                key = vr.index_observation(observations, pod, peak)
-                if store_path:
-                    vr.record_observation(store_path, pod, peak)
-                self._send({"recorded": True, "key": key, "samples": len(observations[key])})
-            else:
-                self._send({"error": "not found"}, 404)
+            status, body = route(self.path, payload, observations, store_path)
+            self._send(body, status)
 
     return Handler
 
