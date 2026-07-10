@@ -64,6 +64,14 @@ def record_observation(store_path: str | Path, pod: dict[str, Any], peak_mib: fl
         f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def index_observation(observations: dict[str, list[float]], pod: dict[str, Any], peak_mib: float) -> str:
+    """Add an observation to an in-memory store index (so a running predictor sees it immediately).
+    Returns the fingerprint key. Pair with record_observation() to also persist it."""
+    key = fingerprint_key(pod_fingerprint(pod))
+    observations.setdefault(key, []).append(float(peak_mib))
+    return key
+
+
 def load_observations(path: str | Path) -> dict[str, list[float]]:
     """Index observed peak VRAM (MiB) by workload fingerprint key.
 

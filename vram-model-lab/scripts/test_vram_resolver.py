@@ -148,6 +148,15 @@ class ResolveCascadeTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_index_observation_makes_tier4_fire_in_memory(self):
+        pod = gpu_pod(args=["--live", "x"])
+        obs: dict = {}
+        for peak in (7000.0, 7100.0, 7200.0):
+            vr.index_observation(obs, pod, peak)
+        r = vr.resolve(pod, observations=obs)
+        self.assertEqual(r["source"], "historical-fingerprint")
+        self.assertEqual(r["observation_samples"], 3)
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]

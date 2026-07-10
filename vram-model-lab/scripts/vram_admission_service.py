@@ -21,7 +21,9 @@ import vram_admission as va
 import vram_resolver as vr
 
 
-def _make_handler(observations, config_docs_fn):
+def _make_handler(observations, store_path):
+    observations = observations if observations is not None else {}
+
     def resolve_fn(pod):
         return vr.resolve(pod, observations=observations)
 
@@ -45,10 +47,24 @@ def _make_handler(observations, config_docs_fn):
             except json.JSONDecodeError:
                 self._send({"error": "invalid json"}, 400)
                 return
-            if self.path.rstrip("/") == "/predict":
+            path = self.path.rstrip("/")
+            if path == "/predict":
                 self._send(resolve_fn(payload))
-            elif self.path.rstrip("/") == "/admit":
+            elif path == "/admit":
                 self._send(va.render_admission_response(payload, resolve_fn))
+            elif path == "/observe":
+                # Record a completed run's measured peak so tier 4 fires for the next occurrence.
+                # Body: {"pod": {...}, "peak_mib": <number>}. Updates the live index + persists.
+                pod = payload.get("pod") or {}
+                try:
+                    peak = float(payload.get("peak_mib"))
+                except (TypeError, ValueError):
+                    self._send({"error": "peak_mib must be a number"}, 400)
+                    return
+                key = vr.index_observation(observations, pod, peak)
+                if store_path:
+                    vr.record_observation(store_path, pod, peak)
+                self._send({"recorded": True, "key": key, "samples": len(observations[key])})
             else:
                 self._send({"error": "not found"}, 404)
 
@@ -61,9 +77,15 @@ def main() -> int:
     parser.add_argument("--observations", help="JSONL observation store for the fingerprint tier")
     args = parser.parse_args()
 
-    observations = vr.load_observations(args.observations) if args.observations else None
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), _make_handler(observations, None))
-    print(f"vram admission service on 127.0.0.1:{args.port} (/predict, /admit)")
+    import os
+
+    observations = {}
+    if args.observations and os.path.exists(args.observations):
+        observations = vr.load_observations(args.observations)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port), _make_handler(observations, args.observations)
+    )
+    print(f"vram admission service on 127.0.0.1:{args.port} (/predict, /admit, /observe)")
     server.serve_forever()
     return 0
 
