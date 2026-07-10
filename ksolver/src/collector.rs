@@ -1467,6 +1467,13 @@ fn sum_pod_spec_requests(spec: &corev1::PodSpec) -> ResourceList {
             }
         }
     }
+    // Init containers (KEP-753): plain init containers run in sequence (a running max per
+    // resource); restartable sidecars (restartPolicy: Always) run concurrently with the app
+    // containers, so their requests ADD to the app-container sum in `regular`. Track the sidecar
+    // accumulation and the init-phase peak separately, then combine. (Plain-only init containers
+    // reduce to the previous max behavior.)
+    let (mut sc_cpu, mut sc_mem, mut sc_eph) = (0i64, 0i64, 0i64);
+    let (mut peak_cpu, mut peak_mem, mut peak_eph) = (0i64, 0i64, 0i64);
     if let Some(init_containers) = &spec.init_containers {
         for container in init_containers {
             if let Some(resources) = container.resources.as_ref() {
@@ -1474,30 +1481,88 @@ fn sum_pod_spec_requests(spec: &corev1::PodSpec) -> ResourceList {
                     let cpu = reqs.get("cpu").map(parse_cpu_millis).unwrap_or(0);
                     let mem = reqs.get("memory").map(parse_bytes).unwrap_or(0);
                     let eph = reqs.get("ephemeral-storage").map(parse_bytes).unwrap_or(0);
-                    regular.milli_cpu = regular.milli_cpu.max(cpu);
-                    regular.memory_bytes = regular.memory_bytes.max(mem);
-                    regular.ephemeral_storage = regular.ephemeral_storage.max(eph);
+                    peak_cpu = peak_cpu.max(sc_cpu + cpu);
+                    peak_mem = peak_mem.max(sc_mem + mem);
+                    peak_eph = peak_eph.max(sc_eph + eph);
+                    if container.restart_policy.as_deref() == Some("Always") {
+                        sc_cpu += cpu;
+                        sc_mem += mem;
+                        sc_eph += eph;
+                    }
                 }
             }
         }
     }
+    regular.milli_cpu = (regular.milli_cpu + sc_cpu).max(peak_cpu);
+    regular.memory_bytes = (regular.memory_bytes + sc_mem).max(peak_mem);
+    regular.ephemeral_storage = (regular.ephemeral_storage + sc_eph).max(peak_eph);
     regular.pods += 1;
     regular
 }
 
-fn sum_pod_extended_requests(spec: &corev1::PodSpec) -> BTreeMap<String, i64> {
+/// Effective extended-resource requests for ONE container: `requests[r]` if set, otherwise
+/// `limits[r]`, per resource, excluding core resources. GPU/extended resources are commonly
+/// declared limits-only, so the per-resource fallback matters.
+fn container_extended(resources: Option<&corev1::ResourceRequirements>) -> BTreeMap<String, i64> {
     let mut out = BTreeMap::new();
+    let Some(resources) = resources else {
+        return out;
+    };
+    if let Some(reqs) = resources.requests.as_ref() {
+        for (name, quantity) in reqs {
+            if !is_core_resource(name) {
+                out.insert(name.clone(), parse_integer_quantity(quantity));
+            }
+        }
+    }
+    if let Some(limits) = resources.limits.as_ref() {
+        for (name, quantity) in limits {
+            if !is_core_resource(name) {
+                out.entry(name.clone())
+                    .or_insert_with(|| parse_integer_quantity(quantity));
+            }
+        }
+    }
+    out
+}
+
+fn sum_pod_extended_requests(spec: &corev1::PodSpec) -> BTreeMap<String, i64> {
+    // App containers run concurrently -> sum per resource.
+    let mut app: BTreeMap<String, i64> = BTreeMap::new();
     for container in &spec.containers {
-        if let Some(resources) = container.resources.as_ref() {
-            if let Some(reqs) = resources.requests.as_ref() {
-                for (name, quantity) in reqs {
-                    if is_core_resource(name) {
-                        continue;
-                    }
-                    *out.entry(name.clone()).or_insert(0) += parse_integer_quantity(quantity);
+        for (name, value) in container_extended(container.resources.as_ref()) {
+            *app.entry(name).or_insert(0) += value;
+        }
+    }
+    // Init containers (KEP-753): plain init containers run in sequence (a running per-resource
+    // max); restartable sidecars (restartPolicy: Always) run concurrently with app containers and
+    // accumulate. This path previously IGNORED init containers entirely, dropping any GPU an init
+    // container requests from the modeled demand -> the solver would over-place.
+    let mut restartable: BTreeMap<String, i64> = BTreeMap::new();
+    let mut init_peak: BTreeMap<String, i64> = BTreeMap::new();
+    if let Some(inits) = spec.init_containers.as_ref() {
+        for container in inits {
+            let ext = container_extended(container.resources.as_ref());
+            for (name, value) in &ext {
+                let peak = restartable.get(name).copied().unwrap_or(0) + value;
+                let entry = init_peak.entry(name.clone()).or_insert(0);
+                *entry = (*entry).max(peak);
+            }
+            if container.restart_policy.as_deref() == Some("Always") {
+                for (name, value) in ext {
+                    *restartable.entry(name).or_insert(0) += value;
                 }
             }
         }
+    }
+    // App phase = app sum + all restartable sidecars; final per resource = max(app phase, init peak).
+    let mut out = app;
+    for (name, value) in &restartable {
+        *out.entry(name.clone()).or_insert(0) += value;
+    }
+    for (name, peak) in init_peak {
+        let entry = out.entry(name).or_insert(0);
+        *entry = (*entry).max(peak);
     }
     out
 }
@@ -1955,7 +2020,7 @@ async fn list_vertical_pod_autoscalers(
 mod tests {
     use super::{
         extract_extended_resources, modeled_preferred_pod_terms, parse_bytes,
-        parse_vpa_safety_margin_arg, to_model_pod,
+        parse_vpa_safety_margin_arg, sum_pod_extended_requests, sum_pod_spec_requests, to_model_pod,
     };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -2133,6 +2198,98 @@ mod tests {
         assert_eq!(extended.get("nvidia.com/gpu"), Some(&2));
         assert!(!extended.contains_key("cpu"));
         assert!(!extended.contains_key("memory"));
+    }
+
+    fn gpu_req(n: &str) -> Option<k8s_openapi::api::core::v1::ResourceRequirements> {
+        use k8s_openapi::api::core::v1 as corev1;
+        Some(corev1::ResourceRequirements {
+            requests: Some(BTreeMap::from([(
+                "nvidia.com/gpu".to_string(),
+                Quantity(n.to_string()),
+            )])),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn extended_requests_include_init_containers_and_sidecars() {
+        use k8s_openapi::api::core::v1 as corev1;
+        // A GPU declared by a plain init container was previously dropped entirely; a restartable
+        // sidecar's GPU must ADD to the app-container sum.
+        let mut sidecar = corev1::Container {
+            name: "gpu-sidecar".to_string(),
+            resources: gpu_req("1"),
+            ..Default::default()
+        };
+        sidecar.restart_policy = Some("Always".to_string());
+        let spec = corev1::PodSpec {
+            containers: vec![corev1::Container {
+                name: "app".to_string(),
+                resources: gpu_req("2"),
+                ..Default::default()
+            }],
+            init_containers: Some(vec![
+                sidecar,
+                corev1::Container {
+                    name: "setup".to_string(),
+                    resources: gpu_req("4"),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        // init peak = sidecar(1)+setup(4)=5; app phase = app(2)+sidecar(1)=3; max = 5.
+        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&5));
+    }
+
+    #[test]
+    fn extended_requests_fall_back_to_limits_per_resource() {
+        use k8s_openapi::api::core::v1 as corev1;
+        // GPU only in limits (cpu in requests) — must still be counted.
+        let spec = corev1::PodSpec {
+            containers: vec![corev1::Container {
+                name: "app".to_string(),
+                resources: Some(corev1::ResourceRequirements {
+                    requests: Some(BTreeMap::from([("cpu".to_string(), Quantity("2".to_string()))])),
+                    limits: Some(BTreeMap::from([(
+                        "nvidia.com/gpu".to_string(),
+                        Quantity("1".to_string()),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&1));
+    }
+
+    #[test]
+    fn cpu_mem_restartable_sidecar_adds_to_app_sum() {
+        use k8s_openapi::api::core::v1 as corev1;
+        let cpu_req = |c: &str| -> Option<corev1::ResourceRequirements> {
+            Some(corev1::ResourceRequirements {
+                requests: Some(BTreeMap::from([("cpu".to_string(), Quantity(c.to_string()))])),
+                ..Default::default()
+            })
+        };
+        let mut sidecar = corev1::Container {
+            name: "logs".to_string(),
+            resources: cpu_req("500m"),
+            ..Default::default()
+        };
+        sidecar.restart_policy = Some("Always".to_string());
+        let spec = corev1::PodSpec {
+            containers: vec![corev1::Container {
+                name: "app".to_string(),
+                resources: cpu_req("1"),
+                ..Default::default()
+            }],
+            init_containers: Some(vec![sidecar]),
+            ..Default::default()
+        };
+        // app(1000m) + sidecar(500m) = 1500m, not max(1000,500).
+        assert_eq!(sum_pod_spec_requests(&spec).milli_cpu, 1500);
     }
 
     #[test]
