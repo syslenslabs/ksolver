@@ -1,0 +1,7 @@
+{
+  "gpt2-xl": {"family": "transformer", "hidden_size": 1600, "layers": 48, "heads": 25, "param_count": 1500000000},
+  "distilgpt2": {"family": "transformer", "hidden_size": 768, "layers": 6, "heads": 12, "param_count": 82000000},
+  "distilbert-base-uncased": {"family": "transformer", "hidden_size": 768, "layers": 6, "heads": 12, "param_count": 66000000},
+  "resnet18": {"family": "cnn", "hidden_size": 512, "layers": 18, "param_count": 11000000},
+  "resnet101": {"family": "cnn", "hidden_size": 2048, "layers": 101, "param_count": 44000000}
+}

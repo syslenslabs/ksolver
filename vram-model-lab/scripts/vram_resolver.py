@@ -239,6 +239,14 @@ KNOWN_MODELS: dict[str, dict[str, Any]] = {
     "vit-b-16": {"family": "cnn", "hidden_size": 768, "layers": 12, "param_count": 86_000_000},
 }
 
+# Operators can add/override models without a code change via data/known_models.json (file wins).
+_KNOWN_MODELS_FILE = ROOT / "data" / "known_models.json"
+if _KNOWN_MODELS_FILE.exists():
+    try:
+        KNOWN_MODELS.update(json.loads(_KNOWN_MODELS_FILE.read_text()))
+    except (ValueError, OSError):
+        pass
+
 MODEL_NAME_ANNOTATION = "ksolver.ai/vram-model"
 _MODEL_ENV_KEYS = {"MODEL_NAME", "MODEL", "HF_MODEL", "MODEL_NAME_OR_PATH", "PRETRAINED_MODEL_NAME_OR_PATH"}
 

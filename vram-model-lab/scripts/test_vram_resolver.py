@@ -231,6 +231,13 @@ class ResolveCascadeTest(unittest.TestCase):
     def test_unknown_model_name_infers_nothing(self):
         self.assertEqual(vr.infer_model_hints([], ["--model", "acme/secret-net"], {}, {}), {})
 
+    def test_known_models_extended_from_json_file(self):
+        # distilgpt2 is only in data/known_models.json, not the built-in table.
+        self.assertIn("distilgpt2", vr.KNOWN_MODELS)
+        h = vr.infer_model_hints([], ["--model", "distilgpt2"], {}, {})
+        self.assertEqual(h["family"], "transformer")
+        self.assertEqual(h["layers"], 6)
+
     def test_each_tier_returns_a_human_explanation(self):
         explicit = vr.resolve(gpu_pod(annotations={"ksolver.dev/predicted-peak-vram-gib": "22"}))
         self.assertIn("operator-declared", explicit["explanation"])
