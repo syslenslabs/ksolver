@@ -69,11 +69,12 @@ validated worked example is in `examples/dra-bundle.yaml`.
   `claim: null` (with a reason) and you rely on the **node-affinity feasibility patch**, which keeps
   the pod off too-small GPUs on every version.
 
-Live-verified 2026-07-10 on both endpoints of the range — the **same binary** read
-`dra.ksolver/gpu.example = 2` from a k8s 1.34 cluster (`resource.k8s.io/v1`) and a k8s 1.31 cluster
-(`resource.k8s.io/v1alpha3`). Repeat with `scripts/dra-version-smoke.sh [kindest/node:vX.Y.Z]`
-(spins up an ephemeral kind cluster with DRA enabled, applies objects at the served version, runs
-`ksolver analyze`, asserts the read, tears down).
+Live-verified 2026-07-10 across the **whole range** — the **same binary** read
+`dra.ksolver/gpu.example = 2` from every DRA API shape: k8s 1.31 (`v1alpha3`), 1.32 (`v1beta1`),
+1.33 (`v1beta2`), 1.34 (`v1` GA; also covers 1.35). Repeat any version with
+`scripts/dra-version-smoke.sh [kindest/node:vX.Y.Z]` (spins up an ephemeral kind cluster with DRA
+enabled, applies objects at the served version, runs `ksolver analyze`, asserts the read, tears
+down). CI runs the full matrix on demand (`dra-compat-smoke`, `workflow_dispatch`).
 
 ## Populating the tier-4 store
 

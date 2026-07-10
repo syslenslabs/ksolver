@@ -24,11 +24,15 @@ EXPECT=2
 cleanup() { kind delete cluster --name "$NAME" >/dev/null 2>&1 || true; rm -f "$KUBECONFIG_FILE"; }
 trap cleanup EXIT
 
+# Enable DRA: the feature gate PLUS `api/all=true` so the resource.k8s.io group is served whatever
+# version this k8s ships (GA v1 is on by default, but alpha/beta versions need to be turned on).
 cat > "${KUBECONFIG_FILE}.kind.yaml" <<'EOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 featureGates:
   DynamicResourceAllocation: true
+runtimeConfig:
+  "api/all": "true"
 nodes:
   - role: control-plane
 EOF
@@ -41,7 +45,8 @@ else
 fi
 export KUBECONFIG="$KUBECONFIG_FILE"
 
-VERSION="$(kubectl api-versions | grep '^resource.k8s.io/' | sort | tail -1 | cut -d/ -f2)"
+# (|| true so `grep` finding nothing doesn't trip `set -o pipefail` before the friendly check.)
+VERSION="$(kubectl api-versions | { grep '^resource.k8s.io/' || true; } | sort | tail -1 | cut -d/ -f2)"
 if [[ -z "$VERSION" ]]; then
   echo "FAIL: resource.k8s.io not served (DRA not enabled on this image)"; exit 1
 fi
