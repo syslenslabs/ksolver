@@ -5692,8 +5692,14 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
                             metrics::inc_shadow_bind_reservation_created(1);
                             publish_binding_ledger_metrics(&binding_ledger);
                         }
-                        let outcomes =
-                            crate::scheduler::binder::apply_bindings(bc, &plan, &cfg).await;
+                        let outcomes = crate::scheduler::binder::apply_bindings(
+                            bc,
+                            &plan,
+                            &cfg,
+                            &trace.candidate_quality_metrics.regret_status,
+                            trace.candidate_quality_metrics.pruning_active,
+                        )
+                        .await;
                         if let Ok(mut latest) = latest_bind_outcomes.lock() {
                             *latest = Some((trace.sequence, outcomes.clone()));
                         }

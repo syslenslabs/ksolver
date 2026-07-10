@@ -134,6 +134,20 @@ fn binding_disabled_reason(cfg: &ShadowConfig) -> Option<&'static str> {
     }
 }
 
+/// Phase 6 safety gate: refuse real binding for the pass when candidate pruning was active AND its
+/// scheduling regret is unknown. In that state we cannot prove pruning didn't change the placement,
+/// so a real bind would be a decision we can't stand behind. Conservative — it can only ever BLOCK
+/// binding, never enable it. When pruning wasn't active there is no pruning regret to worry about.
+fn unknown_regret_block_reason(regret_status: &str, pruning_active: bool) -> Option<String> {
+    if pruning_active && regret_status.contains("unknown") {
+        Some(format!(
+            "real binding blocked: candidate-pruning regret is {regret_status} (rerun with candidate_node_limit=0 to prove no scheduling regret before binding)"
+        ))
+    } else {
+        None
+    }
+}
+
 fn canary_skip_reason(entry: &BindingPlanEntry, cfg: &ShadowConfig) -> Option<String> {
     match cfg.binding_canary_mode {
         BindingCanaryMode::All => None,
@@ -334,6 +348,8 @@ pub async fn apply_bindings(
     client: &kube::Client,
     plan: &[(BindingPlanEntry, BindReadiness)],
     cfg: &ShadowConfig,
+    regret_status: &str,
+    pruning_active: bool,
 ) -> Vec<BindOutcome> {
     use k8s_openapi::api::core::v1 as corev1;
     use kube::api::{Api, PostParams};
@@ -343,6 +359,15 @@ pub async fn apply_bindings(
         return plan
             .iter()
             .map(|(e, _)| BindOutcome::skip(e, reason.into()))
+            .collect();
+    }
+
+    // Phase 6: don't mutate when candidate pruning may have changed the placement and we can't
+    // prove it didn't (unknown regret). Blocks the whole pass; each entry reports the reason.
+    if let Some(reason) = unknown_regret_block_reason(regret_status, pruning_active) {
+        return plan
+            .iter()
+            .map(|(e, _)| BindOutcome::skip(e, reason.clone()))
             .collect();
     }
 
@@ -683,6 +708,19 @@ mod tests {
             binding_disabled_reason(&cfg),
             Some("real binding disabled by kill switch")
         );
+    }
+
+    #[test]
+    fn unknown_regret_blocks_binding_only_when_pruning_active() {
+        // Blocked: pruning changed the candidate set AND regret couldn't be measured.
+        assert!(unknown_regret_block_reason("unknown", true).is_some());
+        assert!(unknown_regret_block_reason("unknown-regret", true).is_some());
+        // Not blocked: pruning wasn't active (no pruning regret to worry about).
+        assert!(unknown_regret_block_reason("unknown", false).is_none());
+        // Not blocked: regret is measured/bounded, even with pruning active.
+        assert!(unknown_regret_block_reason("no_measured_regret", true).is_none());
+        assert!(unknown_regret_block_reason("measured_regret", true).is_none());
+        assert!(unknown_regret_block_reason("full_feasible_set", true).is_none());
     }
 
     #[test]
