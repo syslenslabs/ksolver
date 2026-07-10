@@ -59,6 +59,22 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertGreater(r["vram_mib"], 0.0)
         self.assertEqual(r["missing"], [])
 
+    def test_extrapolated_prediction_is_downgraded_to_advisory(self):
+        # A very large transformer extrapolates far beyond training -> implausible single-GPU VRAM.
+        pod = gpu_pod(
+            annotations={
+                "ksolver.ai/vram-family": "transformer",
+                "ksolver.ai/vram-hidden-size": "8192",
+                "ksolver.ai/vram-layers": "80",
+            },
+            args=["--batch-size", "64", "--seq-len", "8192"],
+        )
+        r = vr.resolve(pod)
+        self.assertEqual(r["source"], "static-sniff+model")
+        self.assertEqual(r["confidence"], "advisory")
+        self.assertFalse(r["hard"])  # never a hard constraint on a wild extrapolation
+        self.assertIn("guard", r)
+
     def test_tier_unknown_when_hints_missing_is_advisory_not_hard(self):
         pod = gpu_pod(args=["--epochs", "3"])  # nothing useful
         r = vr.resolve(pod)

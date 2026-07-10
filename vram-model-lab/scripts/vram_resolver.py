@@ -31,6 +31,11 @@ EXPLICIT_BYTES = "ksolver.dev/predicted-peak-vram-bytes"
 EXPLICIT_GIB = "ksolver.dev/predicted-peak-vram-gib"
 MIB = 1024.0 * 1024.0
 
+# A model *prediction* above the largest plausible single-GPU VRAM (or <=0) is almost certainly a
+# bad extrapolation. It must NOT become a hard node constraint — that would strand the job on zero
+# feasible nodes. ~144 GiB covers today's biggest single GPU (H200 141 GB) with headroom.
+MAX_PLAUSIBLE_SINGLE_GPU_MIB = 144 * 1024
+
 # Tier 4: how many prior observations of the same workload fingerprint we require before we
 # trust the measured peak as a hard constraint (a promotion threshold).
 FINGERPRINT_MIN_SAMPLES = 3
@@ -295,37 +300,30 @@ def resolve(
         combined.update({k: v for k, v in hints_from_config_docs(config_docs).items() if v not in (None, "")})
         job, _missing = row_from_hints(combined)
         if job:
-            pred = predict(job, artifact, gpu_total_mib)
-            return _result(
-                pred["conservative_estimate_mib"],
-                "config+model",
-                "high",
-                [],
-                fingerprint,
-                extra={
-                    "point_estimate_mib": pred["point_estimate_mib"],
-                    "selected_model": pred["selected_model"],
-                },
-            )
+            return _model_result(predict(job, artifact, gpu_total_mib), "config+model", fingerprint)
 
     # Tier 2 — static spec sniff (annotations/env/CLI) -> linear model.
     job, missing = row_from_hints(sniff_hints)
     if job:
-        pred = predict(job, artifact, gpu_total_mib)
-        return _result(
-            pred["conservative_estimate_mib"],
-            "static-sniff+model",
-            "high",
-            [],
-            fingerprint,
-            extra={
-                "point_estimate_mib": pred["point_estimate_mib"],
-                "selected_model": pred["selected_model"],
-            },
-        )
+        return _model_result(predict(job, artifact, gpu_total_mib), "static-sniff+model", fingerprint)
 
     # Nothing resolvable -> advisory only (never hard-admit on a guess).
     return _result(None, "unknown", "advisory", missing, fingerprint)
+
+
+def _model_result(pred: dict[str, Any], source: str, fingerprint: dict[str, Any]) -> dict[str, Any]:
+    """Build a tier-2/tier-3 model result, downgrading implausible extrapolations to advisory so a
+    bad prediction can never become a hard constraint that strands the job."""
+    mib = pred.get("conservative_estimate_mib")
+    extra = {
+        "point_estimate_mib": pred.get("point_estimate_mib"),
+        "selected_model": pred.get("selected_model"),
+    }
+    if mib is None or mib <= 0 or mib > MAX_PLAUSIBLE_SINGLE_GPU_MIB:
+        extra["guard"] = "prediction outside plausible single-GPU VRAM range; advisory only"
+        keep = mib if (mib is not None and mib > 0) else None
+        return _result(keep, source, "advisory", [], fingerprint, extra=extra)
+    return _result(mib, source, "high", [], fingerprint, extra=extra)
 
 
 if __name__ == "__main__":
