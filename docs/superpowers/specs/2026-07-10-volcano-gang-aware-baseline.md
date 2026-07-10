@@ -20,6 +20,21 @@ On a local `kind` cluster:
 
 So real gang-aware placement is reproducible here — a credible baseline, not a strawman.
 
+### Substrate spike for GPU scenarios (2026-07-10)
+
+kind has no real GPUs, so the baseline needs fake GPU nodes. Verified on kind:
+- **KWOK fake GPU nodes work.** A KWOK node (`kwok.x-k8s.io/node: fake`, taint tolerated) advertising
+  `nvidia.com/gpu: 4` goes Ready, and a GPU pod (`limits: nvidia.com/gpu`) runs on it (KWOK fakes the
+  lifecycle). Note: extended resources require `limits`, and pods need the kwok taint toleration +
+  `nodeSelector: {type: kwok}`.
+- **Volcano gang-blocks over-capacity GPU gangs.** A 3×2-GPU gang (6 > 4 available) stayed
+  `PodGroup: Inqueue`, 0/3 placed — all-or-nothing on the GPU resource, on fake nodes.
+- **Harness note:** a *fitting* GPU gang was still 0/2 at ~18 s (torn down before it stabilized). The
+  harness must **poll to steady state** (like the KSS baseline caches results), NOT use a fixed
+  sleep — KWOK+Volcano need time to settle. Re-confirm the fitting-placement case when building it.
+
+Stack for the harness: `kind` + KWOK (fake GPU nodes sized to the scenario) + Volcano.
+
 ## Integration plan (the large part)
 
 The existing KSS baseline path (`run_kube_baseline` → `run_kube_simulator`) POSTs scenarios to the
