@@ -280,18 +280,25 @@ pub fn effective_gpu_request(pod: &corev1::Pod, cfg: &ShadowConfig) -> i64 {
         return 0;
     };
     let normal_sum: i64 = spec.containers.iter().map(|c| container_gpu(c, cfg)).sum();
-    let init_max: i64 = spec
-        .init_containers
-        .as_ref()
-        .map(|inits| {
-            inits
-                .iter()
-                .map(|c| container_gpu(c, cfg))
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
-    normal_sum.max(init_max)
+
+    // Kubernetes effective request across init containers (KEP-753 sidecars). Plain init
+    // containers run in sequence, so their demand is a running max — not additive. A restartable
+    // init container (`restartPolicy: Always`, i.e. a native sidecar) runs CONCURRENTLY with the
+    // app containers, so its demand ADDS. Walk init containers in order tracking accumulated
+    // restartable demand; each init container peaks at its own demand plus everything restartable
+    // that started before it. The app phase then runs all normal containers plus all sidecars.
+    let mut restartable_sum: i64 = 0;
+    let mut init_peak: i64 = 0;
+    if let Some(inits) = spec.init_containers.as_ref() {
+        for c in inits {
+            let c_gpu = container_gpu(c, cfg);
+            init_peak = init_peak.max(restartable_sum + c_gpu);
+            if c.restart_policy.as_deref() == Some("Always") {
+                restartable_sum += c_gpu;
+            }
+        }
+    }
+    (normal_sum + restartable_sum).max(init_peak)
 }
 
 pub fn classify(pod: &corev1::Pod, cfg: &ShadowConfig) -> Option<PendingGpuPod> {
@@ -1090,6 +1097,42 @@ mod tests {
             ],
             vec![container("init", Some(q(&[("nvidia.com/gpu", "5")])), None)],
         );
+        assert_eq!(effective_gpu_request(&p, &cfg()), 5);
+    }
+
+    #[test]
+    fn restartable_init_sidecar_gpu_adds_to_app_sum() {
+        // A restartable init container (restartPolicy: Always — a native sidecar) runs concurrently
+        // with app containers, so its GPU demand ADDS. A plain init-max would undercount it and let
+        // the pod overcommit the GPU.
+        let mut sidecar = container("gpu-sidecar", Some(q(&[("nvidia.com/gpu", "1")])), None);
+        sidecar.restart_policy = Some("Always".to_string());
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("app", Some(q(&[("nvidia.com/gpu", "2")])), None)],
+            vec![sidecar],
+        );
+        // app(2) + sidecar(1) run together = 3, not max(2,1)=2.
+        assert_eq!(effective_gpu_request(&p, &cfg()), 3);
+    }
+
+    #[test]
+    fn plain_and_restartable_init_containers_mix_correctly() {
+        // A big plain init container (max phase) plus a small sidecar: the init peak includes the
+        // sidecar that started before it; the app phase adds the sidecar to the app sum.
+        let mut sidecar = container("sidecar", Some(q(&[("nvidia.com/gpu", "1")])), None);
+        sidecar.restart_policy = Some("Always".to_string());
+        let big_init = container("setup", Some(q(&[("nvidia.com/gpu", "4")])), None);
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container("app", Some(q(&[("nvidia.com/gpu", "2")])), None)],
+            vec![sidecar, big_init], // sidecar starts first, then the big plain init runs
+        );
+        // init peak = sidecar(1) + setup(4) = 5; app phase = app(2) + sidecar(1) = 3; max = 5.
         assert_eq!(effective_gpu_request(&p, &cfg()), 5);
     }
 
