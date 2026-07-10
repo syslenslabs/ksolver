@@ -1800,12 +1800,13 @@ pub fn print_table(report: &BenchmarkReport) {
         println!();
     }
     println!(
-        "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  headline",
+        "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [win/provenance] headline",
         "#", "scenario", "score", "kube useful", "ksolver useful", "kube bad", "ks bad", "K regret"
     );
     for (i, r) in report.scenarios.iter().enumerate() {
+        let prov = proof_provenance(&r.kube.source, &r.kube_binpack.source).as_str();
         println!(
-            "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  {}",
+            "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [{}/{}] {}",
             i + 1,
             r.name,
             r.benefit_score,
@@ -1814,6 +1815,8 @@ pub fn print_table(report: &BenchmarkReport) {
             r.kube.metrics.partial_or_invalid_gangs,
             r.ksolver.metrics.partial_or_invalid_gangs,
             r.regret.useful_gpu_regret,
+            r.win_classification.as_str(),
+            prov,
             r.headline
         );
     }
@@ -9456,6 +9459,17 @@ pub enum ProofProvenance {
     DeterministicFixture,
 }
 
+impl ProofProvenance {
+    /// Compact tag for human output (matches the serde kebab form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProofProvenance::LiveKss => "live-kss",
+            ProofProvenance::CachedKss => "cached-kss",
+            ProofProvenance::DeterministicFixture => "deterministic-fixture",
+        }
+    }
+}
+
 /// Classify a scenario's kube-baseline provenance (strongest of the two baselines). A cached source
 /// embeds the KSS name ("cached kube-scheduler-simulator ..."), so `live` must exclude the `cached `
 /// prefix.
@@ -9639,6 +9653,10 @@ mod tests {
         // Strongest of the two baselines wins: one live -> live; one cached (no live) -> cached.
         assert_eq!(proof_provenance(cached, live), ProofProvenance::LiveKss);
         assert_eq!(proof_provenance(fixture, cached), ProofProvenance::CachedKss);
+        // Compact tags for human output match the serde kebab form.
+        assert_eq!(ProofProvenance::LiveKss.as_str(), "live-kss");
+        assert_eq!(ProofProvenance::CachedKss.as_str(), "cached-kss");
+        assert_eq!(ProofProvenance::DeterministicFixture.as_str(), "deterministic-fixture");
     }
 
     #[test]
