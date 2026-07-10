@@ -225,6 +225,51 @@ def _detect_precision(docs: list[Any]) -> str | None:
     return explicit or flag
 
 
+# Starter table of well-known model architectures, so a pod that only references a model name
+# still yields the family/hidden/layers the linear model needs. Approximate; extend as needed.
+KNOWN_MODELS: dict[str, dict[str, Any]] = {
+    "gpt2": {"family": "transformer", "hidden_size": 768, "layers": 12, "heads": 12, "param_count": 124_000_000},
+    "gpt2-medium": {"family": "transformer", "hidden_size": 1024, "layers": 24, "heads": 16, "param_count": 355_000_000},
+    "gpt2-large": {"family": "transformer", "hidden_size": 1280, "layers": 36, "heads": 20, "param_count": 774_000_000},
+    "bert-base-uncased": {"family": "transformer", "hidden_size": 768, "layers": 12, "heads": 12, "param_count": 110_000_000},
+    "bert-large-uncased": {"family": "transformer", "hidden_size": 1024, "layers": 24, "heads": 16, "param_count": 340_000_000},
+    "llama-2-7b": {"family": "transformer", "hidden_size": 4096, "layers": 32, "heads": 32, "param_count": 6_700_000_000},
+    "llama-2-13b": {"family": "transformer", "hidden_size": 5120, "layers": 40, "heads": 40, "param_count": 13_000_000_000},
+    "resnet50": {"family": "cnn", "hidden_size": 2048, "layers": 50, "param_count": 25_000_000},
+    "vit-b-16": {"family": "cnn", "hidden_size": 768, "layers": 12, "param_count": 86_000_000},
+}
+
+MODEL_NAME_ANNOTATION = "ksolver.ai/vram-model"
+_MODEL_ENV_KEYS = {"MODEL_NAME", "MODEL", "HF_MODEL", "MODEL_NAME_OR_PATH", "PRETRAINED_MODEL_NAME_OR_PATH"}
+
+
+def _normalize_model_name(raw: str) -> str:
+    name = raw.strip().strip("'\"").split("/")[-1].lower()  # drop org prefix (meta-llama/Llama-2-7b)
+    return name.replace("_", "-")
+
+
+def infer_model_hints(command: list[str], args: list[str], env: dict[str, Any], ann: dict[str, str]) -> dict[str, Any]:
+    """If a well-known model name appears in the pod, return its architecture hints (else {})."""
+    candidates: list[str] = []
+    if ann.get(MODEL_NAME_ANNOTATION):
+        candidates.append(ann[MODEL_NAME_ANNOTATION])
+    for key, value in (env or {}).items():
+        if key.upper() in _MODEL_ENV_KEYS and value:
+            candidates.append(str(value))
+    tokens = list(command or []) + list(args or [])
+    for i, tok in enumerate(tokens):
+        if tok in ("--model", "--model-name", "--model_name_or_path", "--pretrained", "--model-id") and i + 1 < len(tokens):
+            candidates.append(tokens[i + 1])
+        if "=" in tok:
+            candidates.append(tok.split("=", 1)[1])
+        candidates.append(tok)
+    for cand in candidates:
+        arch = KNOWN_MODELS.get(_normalize_model_name(cand))
+        if arch:
+            return dict(arch)
+    return {}
+
+
 def _explicit_estimate_mib(ann: dict[str, str]) -> float | None:
     if EXPLICIT_BYTES in ann:
         b = as_int(ann[EXPLICIT_BYTES])
@@ -295,6 +340,12 @@ def resolve(
 
     row = _row_from_pod(pod)
     sniff_hints = hints_from_row(row, ann, ann)
+    # Fill architecture gaps (family/hidden/layers/param) from a referenced known model name, so a
+    # pod that only says e.g. `--model gpt2-large --batch-size 4 --seq-len 1024` still predicts.
+    for key, value in infer_model_hints(
+        row.get("command") or [], row.get("args") or [], row.get("env") or {}, ann
+    ).items():
+        sniff_hints.setdefault(key, value)
 
     # Tier 3 — referenced training config (deepspeed/accelerate/HF), merged over the sniffed hints
     # (config fills gaps CLI/env can't). Sources: config_docs passed in (e.g. fetched ConfigMaps)

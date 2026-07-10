@@ -19,7 +19,8 @@ Design spec: `docs/superpowers/specs/2026-07-08-vram-dra-wedge-design.md`.
   4. **historical fingerprint** (image + command/env hash) → observed p95 peak → high *(measured beats sniffed)*
   3. **referenced config** (DeepSpeed/HF/accelerate — via passed `config_docs` or an inline
      `ksolver.ai/vram-config` JSON annotation) → model → high
-  2. **static sniff** (annotations/env/CLI flags) → model → high
+  2. **static sniff** (annotations/env/CLI flags; a known model name like `--model gpt2-large`
+     auto-fills family/hidden/layers) → model → high
   - else → **advisory** only (never a hard constraint on a guess)
 - **Delivery** (`vram_admission.py`) — turns a resolution into a JSONPatch: annotate the estimate;
   at high/authoritative confidence add `nodeAffinity ksolver.dev/gpu-vram-gib Gt floor(est)-1`

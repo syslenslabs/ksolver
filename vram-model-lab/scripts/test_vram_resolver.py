@@ -215,6 +215,22 @@ class ResolveCascadeTest(unittest.TestCase):
             "eaa6a4fb61954e8cfb836369d109a019a83fe3416ccdcb315cc7f2957d322d36",
         )
 
+    def test_known_model_name_fills_architecture_for_prediction(self):
+        # No family/hidden/layers annotations — only a model name + batch/seq in CLI.
+        pod = gpu_pod(args=["--model", "gpt2-large", "--batch-size", "4", "--seq-len", "1024"])
+        r = vr.resolve(pod)
+        self.assertEqual(r["source"], "static-sniff+model")
+        self.assertEqual(r["confidence"], "high")
+        self.assertGreater(r["vram_mib"], 0.0)
+
+    def test_model_name_with_org_prefix_is_normalized(self):
+        h = vr.infer_model_hints([], ["--model_name_or_path", "meta-llama/Llama-2-7b"], {}, {})
+        self.assertEqual(h["family"], "transformer")
+        self.assertEqual(h["hidden_size"], 4096)
+
+    def test_unknown_model_name_infers_nothing(self):
+        self.assertEqual(vr.infer_model_hints([], ["--model", "acme/secret-net"], {}, {}), {})
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]
