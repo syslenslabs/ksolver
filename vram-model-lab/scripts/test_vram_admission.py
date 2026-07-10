@@ -116,8 +116,20 @@ class AdmissionPatchTest(unittest.TestCase):
         rct = va.build_resource_claim_template("ns", "job-vram", 17.3)
         self.assertEqual(rct["kind"], "ResourceClaimTemplate")
         self.assertEqual(rct["metadata"]["namespace"], "ns")
+        self.assertEqual(rct["apiVersion"], "resource.k8s.io/v1")
         req = rct["spec"]["spec"]["devices"]["requests"][0]["exactly"]
         self.assertEqual(req["capacity"]["requests"]["memory"], "18Gi")  # ceil(17.3)
+
+    def test_resource_claim_template_none_for_non_ga_dra_versions(self):
+        # Consumable-capacity claims are GA-only; pre-GA versions (1.31-1.33) get no claim so the
+        # caller degrades to node-affinity feasibility.
+        for v in ("resource.k8s.io/v1beta1", "resource.k8s.io/v1alpha3", "resource.k8s.io/v1beta2"):
+            self.assertIsNone(
+                va.build_resource_claim_template("ns", "j", 10.0, api_version=v),
+                f"{v} should not emit a consumable-capacity claim",
+            )
+        # GA still emits.
+        self.assertIsNotNone(va.build_resource_claim_template("ns", "j", 10.0))
 
 
 if __name__ == "__main__":

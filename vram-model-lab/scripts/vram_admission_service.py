@@ -44,10 +44,24 @@ def route(path, payload, observations, store_path=None):
         if res.get("vram_gib") is None:
             return 200, {"claim": None, "reason": f"{res['source']}/{res['confidence']}: no VRAM estimate", "resolution": res}
         meta = payload.get("metadata") or {}
+        ann = meta.get("annotations") or {}
+        # Target DRA API version for the cluster (k8s 1.31-1.35 serve different resource.k8s.io
+        # versions). Default GA; an operator/relay can override via annotation.
+        dra_version = ann.get("ksolver.ai/dra-api-version", va.GA_DRA_API_VERSION)
         name = (meta.get("name") or "pod") + "-vram"
         namespace = meta.get("namespace") or "default"
+        claim = va.build_resource_claim_template(namespace, name, res["vram_gib"], api_version=dra_version)
+        if claim is None:
+            # Non-GA DRA has no consumable-capacity claim — the node-affinity feasibility patch
+            # (/admit, /predict) still keeps the pod off too-small GPUs on this cluster.
+            return 200, {
+                "claim": None,
+                "pod_patch": [],
+                "reason": f"DRA {dra_version} has no consumable-capacity claim (GA-only, k8s 1.34+); use node-affinity feasibility instead",
+                "resolution": res,
+            }
         return 200, {
-            "claim": va.build_resource_claim_template(namespace, name, res["vram_gib"]),
+            "claim": claim,
             "pod_patch": va.build_resource_claim_pod_refs(payload, name),
             "resolution": res,
         }

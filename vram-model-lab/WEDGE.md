@@ -59,6 +59,16 @@ apply the pod with the patch (adds `spec.resourceClaims` + the GPU container's `
 A GPU DRA driver then allocates the claim's consumable-capacity memory at schedule time. A
 validated worked example is in `examples/dra-bundle.yaml`.
 
+**k8s 1.31–1.35 compatibility.** `resource.k8s.io` changes group-version across this range
+(`v1alpha3`→`v1beta1`→`v1beta2`→`v1` GA), so ksolver is version-adaptive on both sides:
+- **Read (demand modeling):** the scheduler discovers the served version and lists DRA objects as
+  `DynamicObject`, parsing shape-tolerantly (`ksolver/src/dra.rs`, `collector.rs`) — one binary,
+  no dependency bump.
+- **Emit (`/claim`):** consumable-capacity memory claims are GA-only. Pass the cluster's served
+  version via the `ksolver.ai/dra-api-version` annotation; on a non-GA cluster `/claim` returns
+  `claim: null` (with a reason) and you rely on the **node-affinity feasibility patch**, which keeps
+  the pod off too-small GPUs on every version.
+
 ## Populating the tier-4 store
 
 - Forward (primary): `vram_resolver.record_observation(store, pod, peak_mib)` on each completed
@@ -82,17 +92,10 @@ Remaining / not done:
   source (DCGM / probe sidecar) that sets `ksolver.dev/observed-peak-vram-mib` — ksolver does
   not measure VRAM itself.
 - Full DRA allocation loop (needs a GPU DRA driver; node-affinity is the enforceable fallback).
-- **DRA API version split (decision needed).** This wedge emits `resource.k8s.io/v1` claims (GA in
-  k8s 1.34; the `exactly:` nesting — see `examples/dra-bundle.yaml`, dry-run-validated on 1.36).
-  ksolver's own DRA *demand* modeling (`ksolver/src/dra.rs`, `collector.rs`) reads
-  `resource.k8s.io/v1alpha3`, because `k8s-openapi` is pinned to feature `v1_32` (Kubernetes 1.32),
-  under which the v1 DRA types don't exist. Consequence: on a cluster serving only one of the two
-  versions, only one side engages (the collector already emits a warning and skips DRA augmentation
-  when the v1alpha3 API is absent, so it fails safe — no silent over-admit). Unifying on GA is a
-  **coupled dependency upgrade**, not a feature flip (verified 2026-07-10): `k8s-openapi 0.24` tops
-  out at feature `v1_32` and has no v1 DRA types, so it must go to `k8s-openapi` 0.25/0.26, which is
-  version-locked to a `kube-rs` bump (currently `kube 0.98`) — kube is used across ~13 files and its
-  0.9x bumps carry breaking API changes. Plus porting `dra.rs` from v1alpha3 to v1 (flat request
-  fields move under `exactly` / `firstAvailable`). So this is a real migration project gated on an
-  explicit decision, not an autonomous edit.
+- **DRA API version split — RESOLVED (2026-07-10) via version-adaptive handling** (see the
+  compatibility note above). ksolver reads DRA dynamically (`DynamicObject` + discovery, shape-
+  tolerant parsing) and emits GA-only, degrading to node-affinity on pre-GA clusters — one binary
+  across k8s 1.31–1.35 with **no dependency bump**. This supersedes the earlier "coupled
+  `kube 0.98→4.0` + `k8s-openapi 0.24→0.28` migration" (branch `worktree-agent-aac1cc84…`), which is
+  no longer needed for compatibility (kept only as reference for the typed v1 field mapping).
 - Model breadth: single-SKU (4090), no true CUDA-OOM labels yet.

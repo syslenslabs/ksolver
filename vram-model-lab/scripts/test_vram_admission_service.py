@@ -68,6 +68,22 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(body["claim"])
 
+    def test_claim_degrades_on_non_ga_dra_cluster(self):
+        # On a k8s 1.31-1.33 cluster (pre-GA DRA), the operator/relay flags the served version;
+        # no consumable-capacity claim is emitted, and the reason points to node-affinity feasibility.
+        pod = gpu_pod({
+            "ksolver.dev/predicted-peak-vram-gib": "17.3",
+            "ksolver.ai/dra-api-version": "resource.k8s.io/v1beta1",
+        })
+        pod["metadata"]["name"] = "job"
+        status, body = svc.route("/claim", pod, {})
+        self.assertEqual(status, 200)
+        self.assertIsNone(body["claim"])
+        self.assertEqual(body["pod_patch"], [])
+        self.assertIn("node-affinity", body["reason"])
+        # the estimate itself still resolved (feasibility can still be enforced via affinity)
+        self.assertEqual(body["resolution"]["vram_gib"], 17.3)
+
     def test_unknown_path_404(self):
         status, body = svc.route("/nope", {}, {})
         self.assertEqual(status, 404)

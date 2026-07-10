@@ -140,16 +140,28 @@ def build_resource_claim_pod_refs(
     return ops
 
 
+# DRA consumable-capacity memory claims are a GA (resource.k8s.io/v1, k8s 1.34+) feature. Older DRA
+# API versions (v1alpha3 in 1.31, v1beta1 in 1.32/1.33) don't express per-request consumable
+# capacity, so we do NOT emit a DRA claim there — the node-affinity feasibility injection
+# (build_admission_patch) already enforces "keep off too-small GPUs" on every version.
+GA_DRA_API_VERSION = "resource.k8s.io/v1"
+
+
 def build_resource_claim_template(
     namespace: str,
     name: str,
     vram_gib: float,
     device_class: str = DEFAULT_DEVICE_CLASS,
-) -> dict[str, Any]:
-    """A DRA ResourceClaimTemplate requesting GPU memory as consumable capacity."""
+    api_version: str = GA_DRA_API_VERSION,
+) -> dict[str, Any] | None:
+    """A DRA ResourceClaimTemplate requesting GPU memory as consumable capacity, sized to the
+    estimate. Returns None for non-GA DRA versions (consumable capacity isn't available there) so the
+    caller degrades to the node-affinity feasibility path instead of emitting an unsupported claim."""
+    if api_version != GA_DRA_API_VERSION:
+        return None
     gib = int(math.ceil(vram_gib))
     return {
-        "apiVersion": "resource.k8s.io/v1",
+        "apiVersion": api_version,
         "kind": "ResourceClaimTemplate",
         "metadata": {"name": name, "namespace": namespace},
         "spec": {
