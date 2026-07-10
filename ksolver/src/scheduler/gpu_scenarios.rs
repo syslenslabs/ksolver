@@ -1272,6 +1272,10 @@ pub struct ScenarioResult {
     /// Phase 8 honesty: short statements of what this scenario does NOT establish (derived from the
     /// win classification + kube-baseline provenance). Empty only for a fully-substantiated win.
     pub does_not_prove: Vec<String>,
+    /// Phase 8 proof-type ingredients this scenario exercises (`gang-scheduling`, `vram-prediction`,
+    /// `policy-weighted`, `binpack`), derived from the scenario's own job definitions — so an
+    /// operator sees WHAT KIND of proof it is. These describe ingredients, not win claims.
+    pub proof_characters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1406,6 +1410,7 @@ pub async fn run_benchmark_with_options(
             win_classification,
             proof_provenance(&kube.source, &kube_binpack.source),
         );
+        let proof_characters = scenario_proof_characters(&scenario);
         results.push(ScenarioResult {
             name: scenario.name,
             description: scenario.description,
@@ -1422,6 +1427,7 @@ pub async fn run_benchmark_with_options(
             efficiency_headline,
             win_classification,
             does_not_prove,
+            proof_characters,
         });
     }
     // Rank by efficiency (GPU utilization + cost win) so the scenarios where ksolver most clearly
@@ -9486,6 +9492,33 @@ fn proof_provenance(kube_source: &str, kube_binpack_source: &str) -> ProofProven
     }
 }
 
+/// Phase 8 proof-type ingredients — WHAT KIND of proof a scenario provides, derived from its own job
+/// definitions (honest and definitional, not a guess from result metrics). Describes ingredients
+/// exercised, NOT win claims: a `gang-scheduling` scenario may still win on plain binpack.
+fn scenario_proof_characters(scenario: &ScenarioSpec) -> Vec<String> {
+    let mut tags = Vec::new();
+    if scenario.jobs.iter().any(|j| j.colocate && j.pods > 1) {
+        tags.push("gang-scheduling".to_string());
+    }
+    if scenario.jobs.iter().any(|j| j.predicted_peak_vram_gib > 0) {
+        tags.push("vram-prediction".to_string());
+    }
+    if scenario.jobs.iter().any(|j| {
+        j.priority != 0
+            || j.business_value != 0
+            || j.fair_share_deficit != 0
+            || j.queue_score != 0
+            || j.queue_wait_seconds != 0
+            || j.deadline_after_seconds != 0
+    }) {
+        tags.push("policy-weighted".to_string());
+    }
+    if tags.is_empty() {
+        tags.push("binpack".to_string());
+    }
+    tags
+}
+
 /// Phase 8 "what this does not prove": derive honest limitation statements for a scenario from its
 /// win classification and its baseline provenance. Keeps demo claims from overreaching.
 fn scenario_does_not_prove(win: WinClassification, provenance: ProofProvenance) -> Vec<String> {
@@ -9622,6 +9655,7 @@ mod tests {
             efficiency_headline: String::new(),
             win_classification: wc,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
         };
         let results = vec![
             mk(WinClassification::BeatsKubeOnly),
@@ -9639,6 +9673,27 @@ mod tests {
         assert_eq!(s.deterministic_fixture_scenarios, 3);
         assert_eq!(s.live_kss_scenarios, 0);
         assert!(s.headline.contains("provenance:"));
+    }
+
+    #[test]
+    fn proof_characters_derive_from_scenario_jobs() {
+        // A co-located gang scenario is tagged gang-scheduling (and, since it uses priority, also
+        // policy-weighted) — derived from the real scenario's own jobs, not guessed.
+        let gang = deterministic_scenarios()
+            .into_iter()
+            .find(|s| s.name == "priority-gang-over-fillers")
+            .expect("gang scenario exists");
+        let tags = scenario_proof_characters(&gang);
+        assert!(tags.contains(&"gang-scheduling".to_string()), "tags: {tags:?}");
+        assert!(tags.contains(&"policy-weighted".to_string()), "tags: {tags:?}");
+        // Every scenario gets at least one ingredient tag (fallback binpack).
+        for s in deterministic_scenarios() {
+            assert!(
+                !scenario_proof_characters(&s).is_empty(),
+                "scenario {} has no proof-character tag",
+                s.name
+            );
+        }
     }
 
     #[test]
@@ -10004,6 +10059,7 @@ mod tests {
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
             },
             ScenarioResult {
                 name: "equal".to_string(),
@@ -10049,6 +10105,7 @@ mod tests {
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
             },
         ];
 
@@ -10130,6 +10187,7 @@ mod tests {
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
             }
         };
         let scenarios = vec![
@@ -10198,6 +10256,7 @@ mod tests {
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
             }
         };
         let scenarios = vec![
@@ -10336,6 +10395,7 @@ mod tests {
             efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
         };
 
         let summary = summarize_roi(&[scenario]);
@@ -10641,6 +10701,7 @@ mod tests {
             efficiency_headline: format!("scenario {name} is better"),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
         };
         let scenarios = vec![scenario("top", 100), scenario("second", 50)];
         let hero = HeroDemoSummary {
@@ -11679,6 +11740,7 @@ mod tests {
             efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
+            proof_characters: Vec::new(),
         };
         let tenant_budget = TenantBudgetProof {
             name: "tenant-budget-hard-admission-cap".to_string(),
