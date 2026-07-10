@@ -40,6 +40,8 @@ def build_admission_patch(pod: dict[str, Any], resolution: dict[str, Any]) -> li
 
     set_ann("ksolver.dev/predicted-peak-vram-source", resolution.get("source"))
     set_ann("ksolver.dev/predicted-peak-vram-confidence", resolution.get("confidence"))
+    if resolution.get("explanation"):
+        set_ann("ksolver.dev/predicted-peak-vram-explanation", resolution["explanation"])
     vram_gib = resolution.get("vram_gib")
     if vram_gib is not None:
         set_ann("ksolver.dev/predicted-peak-vram-gib", vram_gib)

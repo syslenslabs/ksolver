@@ -231,6 +231,15 @@ class ResolveCascadeTest(unittest.TestCase):
     def test_unknown_model_name_infers_nothing(self):
         self.assertEqual(vr.infer_model_hints([], ["--model", "acme/secret-net"], {}, {}), {})
 
+    def test_each_tier_returns_a_human_explanation(self):
+        explicit = vr.resolve(gpu_pod(annotations={"ksolver.dev/predicted-peak-vram-gib": "22"}))
+        self.assertIn("operator-declared", explicit["explanation"])
+        sniff = vr.resolve(gpu_pod(args=["--model", "gpt2-large", "--batch-size", "4", "--seq-len", "1024"]))
+        self.assertIn("predicted", sniff["explanation"])
+        self.assertIn("transformer", sniff["explanation"])
+        unknown = vr.resolve(gpu_pod(args=["--epochs", "3"]))
+        self.assertIn("no VRAM signal", unknown["explanation"])
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]

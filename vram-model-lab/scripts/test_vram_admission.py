@@ -41,6 +41,15 @@ class AdmissionPatchTest(unittest.TestCase):
         self.assertEqual(mib["key"], va.NODE_VRAM_LABEL_MIB)
         self.assertEqual(mib["values"], ["17408"])  # 17 * 1024
 
+    def test_explanation_annotation_emitted_when_present(self):
+        res = {"vram_gib": 18.0, "source": "static-sniff+model", "confidence": "high", "hard": True,
+               "explanation": "predicted 18 GiB from transformer"}
+        patches = va.build_admission_patch(pod(), res)
+        self.assertEqual(
+            self._find_ann(patches, "ksolver.dev/predicted-peak-vram-explanation"),
+            "predicted 18 GiB from transformer",
+        )
+
     def test_advisory_annotates_but_no_affinity(self):
         res = {"vram_gib": None, "source": "unknown", "confidence": "advisory", "hard": False}
         patches = va.build_admission_patch(pod(), res)

@@ -445,6 +445,17 @@ pub fn vram_injection_ops(
         "ksolver.dev/predicted-peak-vram-confidence",
         confidence.to_string(),
     );
+    if let Some(explanation) = resolution
+        .get("explanation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        set_ann(
+            &mut ops,
+            "ksolver.dev/predicted-peak-vram-explanation",
+            explanation.to_string(),
+        );
+    }
     let vram_gib = resolution
         .get("vram_gib")
         .and_then(serde_json::Value::as_f64);
@@ -558,6 +569,19 @@ mod tests {
         let mib = &terms[1]["matchExpressions"][0];
         assert_eq!(mib["key"], serde_json::json!("nvidia.com/gpu.memory"));
         assert_eq!(mib["values"], serde_json::json!(["17408"]));
+    }
+
+    #[test]
+    fn vram_ops_emit_explanation_annotation() {
+        let p = pod("team", "job", Some("nvidia.com/gpu"));
+        let res = serde_json::json!({
+            "vram_gib": 18.0, "source": "static-sniff+model", "confidence": "high", "hard": true,
+            "explanation": "predicted 18 GiB from transformer"
+        });
+        let ops = vram_injection_ops(&p, &res);
+        assert!(ops.iter().any(|o| o.path
+            == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-explanation"
+            && o.value == Some(serde_json::Value::String("predicted 18 GiB from transformer".to_string()))));
     }
 
     #[test]

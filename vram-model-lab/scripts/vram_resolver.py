@@ -323,7 +323,10 @@ def resolve(
     # Tier 1 — explicit annotation (authoritative).
     explicit = _explicit_estimate_mib(ann)
     if explicit is not None:
-        return _result(explicit, "explicit-annotation", "authoritative", [], fingerprint)
+        return _result(
+            explicit, "explicit-annotation", "authoritative", [], fingerprint,
+            extra={"explanation": f"operator-declared peak VRAM ({round(explicit / 1024.0, 2)} GiB)"},
+        )
 
     # Tier 4 — historical observation by workload fingerprint (measured beats sniffed).
     if observations:
@@ -335,7 +338,10 @@ def resolve(
                 "high",
                 [],
                 fingerprint,
-                extra={"observation_samples": len(samples)},
+                extra={
+                    "observation_samples": len(samples),
+                    "explanation": f"measured p95 of {len(samples)} prior run(s) of this workload",
+                },
             )
 
     row = _row_from_pod(pod)
@@ -370,19 +376,32 @@ def resolve(
         return _model_result(predict(job, artifact, gpu_total_mib), "static-sniff+model", fingerprint)
 
     # Nothing resolvable -> advisory only (never hard-admit on a guess).
-    return _result(None, "unknown", "advisory", missing, fingerprint)
+    missing_txt = ", ".join(missing) if missing else "no usable hints"
+    return _result(
+        None, "unknown", "advisory", missing, fingerprint,
+        extra={"explanation": f"no VRAM signal ({missing_txt}); advisory only"},
+    )
 
 
 def _model_result(pred: dict[str, Any], source: str, fingerprint: dict[str, Any]) -> dict[str, Any]:
     """Build a tier-2/tier-3 model result, downgrading implausible extrapolations to advisory so a
     bad prediction can never become a hard constraint that strands the job."""
     mib = pred.get("conservative_estimate_mib")
+    job = pred.get("input") or {}
+    shape = f"seq {job.get('seq_len')}" if job.get("seq_len") else f"image {job.get('image_size')}"
+    explanation = (
+        f"predicted {round((mib or 0) / 1024.0, 2)} GiB from {job.get('family')} "
+        f"(hidden {job.get('hidden_size')}, {job.get('layers')} layers) at batch "
+        f"{job.get('batch_size')}, {shape}, {job.get('precision')}"
+    )
     extra = {
         "point_estimate_mib": pred.get("point_estimate_mib"),
         "selected_model": pred.get("selected_model"),
+        "explanation": explanation,
     }
     if mib is None or mib <= 0 or mib > MAX_PLAUSIBLE_SINGLE_GPU_MIB:
         extra["guard"] = "prediction outside plausible single-GPU VRAM range; advisory only"
+        extra["explanation"] = explanation + "; exceeds plausible single-GPU VRAM, advisory only"
         keep = mib if (mib is not None and mib > 0) else None
         return _result(keep, source, "advisory", [], fingerprint, extra=extra)
     return _result(mib, source, "high", [], fingerprint, extra=extra)
