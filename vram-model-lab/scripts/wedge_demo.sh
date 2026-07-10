@@ -60,4 +60,14 @@ admit "tier 4 (historical fingerprint)" "$(cat /tmp/wedge-historical-pod.json)"
 admit "unknown (advisory only)" \
   "{\"metadata\":{},\"spec\":{\"containers\":[{\"name\":\"t\",\"args\":[\"--epochs\",\"3\"],$GPU}]}}"
 
+# Learning loop: a brand-new workload is unknown, then becomes historical after 3 observations.
+echo "== learning loop (/observe): same workload before vs after 3 measured runs =="
+LP="{\"metadata\":{},\"spec\":{\"containers\":[{\"name\":\"t\",\"image\":\"acme/new:1\",\"command\":[\"python\",\"run.py\"],\"args\":[\"--custom\",\"1\"],$GPU}]}}"
+src() { curl -s -X POST "http://127.0.0.1:$PORT/predict" -d "$1" | "$PY" -c "import json,sys;d=json.load(sys.stdin);print(f\"  {sys.argv[1]}: source={d['source']} vram_gib={d['vram_gib']}\")" "$2"; }
+src "$LP" "before"
+for p in 6000 6100 6200; do
+  curl -s -X POST "http://127.0.0.1:$PORT/observe" -d "{\"pod\":$LP,\"peak_mib\":$p}" >/dev/null
+done
+src "$LP" "after "
+
 echo "done."
