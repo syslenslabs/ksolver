@@ -1811,6 +1811,8 @@ pub fn print_table(report: &BenchmarkReport) {
             r.headline
         );
     }
+    println!();
+    println!("win classification: {}", report.win_classification_summary.headline);
 }
 
 fn simulator_provenance_summary<'a>(

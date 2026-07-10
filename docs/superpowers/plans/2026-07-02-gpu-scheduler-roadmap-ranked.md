@@ -155,13 +155,23 @@ Every roadmap phase must ship proof, not only implementation.
 **KSS proof scenarios:**
 
 - KSS live spread/binpack baseline for every policy scenario.
-- A local gang-aware baseline or real Volcano comparison should be added before external claims.
+- A gang-aware baseline is needed before external `beats-gang-aware` claims. **Finding (2026-07-10):**
+  it must be **real Volcano**, not a local hand-rolled one — the codebase deliberately disabled the
+  deterministic greedy kube fallback (`run_kube_baseline` bails without a real KSS baseline) as a
+  no-strawman honesty stance, and a hand-rolled gang-aware baseline would be exactly that strawman.
+  KSS runs the real kube-scheduler, not Volcano, so this is **infra-gated** (deploy Volcano and
+  capture its placements), not autonomous code work.
 
 **Acceptance criteria:**
 
 - The win remains after comparing to the best KSS baseline.
 - The report classifies each win as `beats-kube-only`, `beats-gang-aware`, or `not-proven`.
-- Weight-zero tests prove metadata is inert by default.
+  **DONE (2026-07-10):** `WinClassification` + `classify_win`, wired onto every `ScenarioResult` and
+  rolled up into `BenchmarkReport.win_classification_summary`. Honest by construction —
+  `beats-gang-aware` is unreachable until the real-Volcano baseline above is wired
+  (`gang_aware = None`), so wins read `beats-kube-only` / `not-proven` today.
+- Weight-zero tests prove metadata is inert by default. **DONE (2026-07-10):** inertness proofs for
+  priority, deadline, business-value, queue, queue-wait, and fair-share.
 
 ## Phase 4 - Shadow Evidence Bundle and Production Safety
 
