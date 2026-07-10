@@ -2217,6 +2217,72 @@ mod tests {
     }
 
     #[test]
+    fn parse_vram_label_bytes_handles_units_and_bare_number_heuristic() {
+        let gib = 1024_i64 * 1024 * 1024;
+        let mib = 1024_i64 * 1024;
+        // Explicit suffixes.
+        assert_eq!(parse_vram_label_bytes("24Gi"), 24 * gib);
+        assert_eq!(parse_vram_label_bytes("24576Mi"), 24576 * mib);
+        assert_eq!(parse_vram_label_bytes("1Ki"), 1024);
+        assert_eq!(parse_vram_label_bytes("1Gb"), 1_000_000_000);
+        // Bare-number heuristic that maps real GPU label values to the right unit:
+        //   small -> GiB (a GPU advertised as "24"),
+        assert_eq!(parse_vram_label_bytes("24"), 24 * gib);
+        //   mid-range -> MiB (nvidia.com/gpu.memory is MiB; 24576 MiB = 24 GiB),
+        assert_eq!(parse_vram_label_bytes("24576"), 24576 * mib);
+        //   large -> raw bytes.
+        assert_eq!(parse_vram_label_bytes("25769803776"), 25_769_803_776);
+        // Junk / non-positive -> 0 (unknown; never a fabricated capacity).
+        assert_eq!(parse_vram_label_bytes(""), 0);
+        assert_eq!(parse_vram_label_bytes("garbage"), 0);
+        assert_eq!(parse_vram_label_bytes("-5"), 0);
+    }
+
+    #[test]
+    fn node_peak_vram_bytes_prefers_bytes_then_gib_then_nvidia_mib() {
+        let gib = 1024_i64 * 1024 * 1024;
+        let mib = 1024_i64 * 1024;
+        let label = |k: &str, v: &str| BTreeMap::from([(k.to_string(), v.to_string())]);
+        assert_eq!(
+            node_peak_vram_bytes(&label("nvidia.com/gpu.memory", "40960")),
+            40960 * mib
+        );
+        assert_eq!(
+            node_peak_vram_bytes(&label("ksolver.dev/gpu-vram-gib", "80")),
+            80 * gib
+        );
+        // Priority: explicit bytes label wins over the GiB and NVIDIA MiB labels.
+        let all = BTreeMap::from([
+            ("ksolver.dev/gpu-vram-bytes".to_string(), (24 * gib).to_string()),
+            ("ksolver.dev/gpu-vram-gib".to_string(), "80".to_string()),
+            ("nvidia.com/gpu.memory".to_string(), "40960".to_string()),
+        ]);
+        assert_eq!(node_peak_vram_bytes(&all), 24 * gib);
+        // No recognized label -> 0 (unknown capacity; never blocks or fabricates).
+        assert_eq!(
+            node_peak_vram_bytes(&BTreeMap::from([("x".to_string(), "1".to_string())])),
+            0
+        );
+    }
+
+    #[test]
+    fn vram_fits_node_is_the_oom_prevention_boundary() {
+        let gib = 1024_i64 * 1024 * 1024;
+        let gpu = |n: i64| BTreeMap::from([("nvidia.com/gpu".to_string(), n)]);
+        let is_gpu = |r: &str| r == "nvidia.com/gpu";
+        // Fits when predicted <= node capacity, including the exact-fit boundary.
+        assert!(vram_fits_node(20 * gib, 24 * gib, &gpu(1), &is_gpu));
+        assert!(vram_fits_node(24 * gib, 24 * gib, &gpu(1), &is_gpu));
+        // Does NOT fit when predicted exceeds capacity — the OOM case ksolver must refuse.
+        assert!(!vram_fits_node(25 * gib, 24 * gib, &gpu(1), &is_gpu));
+        // Unknown prediction OR unknown node capacity -> don't block (advisory / fail-open).
+        assert!(vram_fits_node(0, 24 * gib, &gpu(1), &is_gpu));
+        assert!(vram_fits_node(25 * gib, 0, &gpu(1), &is_gpu));
+        // No GPU requested -> VRAM feasibility is not applicable.
+        assert!(vram_fits_node(25 * gib, 24 * gib, &BTreeMap::new(), &is_gpu));
+    }
+
+    #[test]
     fn predicted_vram_filters_known_too_small_gpu_nodes() {
         let mut small = node("small", 16000, 64, 110, 8);
         small
