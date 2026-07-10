@@ -1269,6 +1269,9 @@ pub struct ScenarioResult {
     /// construction: `beats-gang-aware` is never emitted until a gang-aware baseline is wired, so
     /// today a real win reads `beats-kube-only` and a non-win reads `not-proven`.
     pub win_classification: WinClassification,
+    /// Phase 8 honesty: short statements of what this scenario does NOT establish (derived from the
+    /// win classification + kube-baseline provenance). Empty only for a fully-substantiated win.
+    pub does_not_prove: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1399,6 +1402,8 @@ pub async fn run_benchmark_with_options(
             kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
             None,
         );
+        let does_not_prove =
+            scenario_does_not_prove(win_classification, &kube.source, &kube_binpack.source);
         results.push(ScenarioResult {
             name: scenario.name,
             description: scenario.description,
@@ -1414,6 +1419,7 @@ pub async fn run_benchmark_with_options(
             significantly_better,
             efficiency_headline,
             win_classification,
+            does_not_prove,
         });
     }
     // Rank by efficiency (GPU utilization + cost win) so the scenarios where ksolver most clearly
@@ -9438,6 +9444,41 @@ pub fn classify_win(ksolver: i64, kube_only: i64, gang_aware: Option<i64>) -> Wi
     }
 }
 
+/// Phase 8 "what this does not prove": derive honest limitation statements for a scenario from its
+/// win classification and the provenance of its kube baselines. Keeps demo claims from overreaching.
+fn scenario_does_not_prove(
+    win: WinClassification,
+    kube_source: &str,
+    kube_binpack_source: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match win {
+        WinClassification::BeatsKubeOnly => out.push(
+            "superiority over a gang-aware scheduler — no Volcano/gang-aware baseline is wired"
+                .to_string(),
+        ),
+        WinClassification::NotProven => out
+            .push("a useful-GPU win over the best kube baseline for this scenario".to_string()),
+        WinClassification::BeatsGangAware => {}
+    }
+    // Baseline provenance across the two kube baselines (strongest wins). A cached source embeds
+    // the KSS name ("cached kube-scheduler-simulator ..."), so live must exclude the cached prefix.
+    let is_cached = |s: &str| s.starts_with("cached ");
+    let is_live =
+        |s: &str| s.contains("kube-scheduler-simulator") && !is_cached(s) && !s.contains("failed");
+    if !(is_live(kube_source) || is_live(kube_binpack_source)) {
+        if is_cached(kube_source) || is_cached(kube_binpack_source) {
+            out.push("a live result — the kube baseline is a cached KSS run".to_string());
+        } else {
+            out.push(
+                "anything against real kube — the baseline is a deterministic local fixture, not KSS"
+                    .to_string(),
+            );
+        }
+    }
+    out
+}
+
 /// Report-level rollup of per-scenario [`WinClassification`], so an operator/demo sees the honest
 /// win picture at a glance instead of scanning every scenario.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -9530,6 +9571,7 @@ mod tests {
             significantly_better: false,
             efficiency_headline: String::new(),
             win_classification: wc,
+            does_not_prove: Vec::new(),
         };
         let results = vec![
             mk(WinClassification::BeatsKubeOnly),
@@ -9543,6 +9585,28 @@ mod tests {
         assert_eq!(s.beats_gang_aware, 0);
         assert!(s.gang_aware_baseline_pending);
         assert!(s.headline.contains("beats-gang-aware is not yet earnable"));
+    }
+
+    #[test]
+    fn does_not_prove_reflects_classification_and_provenance() {
+        let live = "kube-scheduler-simulator spread";
+        let cached = "cached kube-scheduler-simulator spread";
+        let fixture = "local greedy-spread test fixture (not KSS)";
+        // beats-kube-only + live baseline -> only the gang-aware disclaimer.
+        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, live, live);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("gang-aware"));
+        // not-proven + cached -> a win disclaimer AND a cached-provenance disclaimer.
+        let r = scenario_does_not_prove(WinClassification::NotProven, cached, cached);
+        assert!(r.iter().any(|s| s.contains("useful-GPU win")));
+        assert!(r.iter().any(|s| s.contains("cached")));
+        // deterministic fixture -> fixture disclaimer.
+        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, fixture, fixture);
+        assert!(r.iter().any(|s| s.contains("deterministic local fixture")));
+        // beats-gang-aware + a live baseline -> nothing to disclaim.
+        assert!(scenario_does_not_prove(WinClassification::BeatsGangAware, live, live).is_empty());
+        // one live baseline across the two is enough (no provenance disclaimer).
+        assert!(scenario_does_not_prove(WinClassification::BeatsGangAware, cached, live).is_empty());
     }
 
     fn empty_engine(engine: &str) -> EngineResult {
@@ -9868,6 +9932,7 @@ mod tests {
                 significantly_better: false,
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
             },
             ScenarioResult {
                 name: "equal".to_string(),
@@ -9912,6 +9977,7 @@ mod tests {
                 significantly_better: false,
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
             },
         ];
 
@@ -9992,6 +10058,7 @@ mod tests {
                 significantly_better: false,
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
             }
         };
         let scenarios = vec![
@@ -10059,6 +10126,7 @@ mod tests {
                 significantly_better: false,
                 efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
             }
         };
         let scenarios = vec![
@@ -10196,6 +10264,7 @@ mod tests {
             significantly_better: false,
             efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
         };
 
         let summary = summarize_roi(&[scenario]);
@@ -10500,6 +10569,7 @@ mod tests {
             significantly_better: score > 0,
             efficiency_headline: format!("scenario {name} is better"),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
         };
         let scenarios = vec![scenario("top", 100), scenario("second", 50)];
         let hero = HeroDemoSummary {
@@ -11537,6 +11607,7 @@ mod tests {
             significantly_better: false,
             efficiency_headline: String::new(),
             win_classification: WinClassification::NotProven,
+            does_not_prove: Vec::new(),
         };
         let tenant_budget = TenantBudgetProof {
             name: "tenant-budget-hard-admission-cap".to_string(),
