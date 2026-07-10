@@ -107,6 +107,39 @@ def render_admission_response(
         return _allow(uid)
 
 
+def build_resource_claim_pod_refs(
+    pod: dict[str, Any], rct_name: str, claim_name: str = "ksolver-vram"
+) -> list[dict[str, Any]]:
+    """JSONPatch ops that make a pod REFERENCE a DRA ResourceClaimTemplate: add spec.resourceClaims
+    and the GPU container's resources.claims. Apply AFTER the ResourceClaimTemplate exists (else the
+    pod references a missing claim). Pairs with build_resource_claim_template."""
+    ops: list[dict[str, Any]] = []
+    spec = pod.get("spec") or {}
+    claim_ref = {"name": claim_name, "resourceClaimTemplateName": rct_name}
+    if spec.get("resourceClaims"):
+        ops.append({"op": "add", "path": "/spec/resourceClaims/-", "value": claim_ref})
+    else:
+        ops.append({"op": "add", "path": "/spec/resourceClaims", "value": [claim_ref]})
+
+    containers = spec.get("containers") or []
+    idx = 0
+    for i, c in enumerate(containers):
+        resources = c.get("resources") or {}
+        keys = list((resources.get("requests") or {})) + list((resources.get("limits") or {}))
+        if any("gpu" in k.lower() for k in keys):
+            idx = i
+            break
+    c = containers[idx] if containers else {}
+    resources = c.get("resources") or {}
+    if not c.get("resources"):
+        ops.append({"op": "add", "path": f"/spec/containers/{idx}/resources", "value": {"claims": [{"name": claim_name}]}})
+    elif not resources.get("claims"):
+        ops.append({"op": "add", "path": f"/spec/containers/{idx}/resources/claims", "value": [{"name": claim_name}]})
+    else:
+        ops.append({"op": "add", "path": f"/spec/containers/{idx}/resources/claims/-", "value": {"name": claim_name}})
+    return ops
+
+
 def build_resource_claim_template(
     namespace: str,
     name: str,

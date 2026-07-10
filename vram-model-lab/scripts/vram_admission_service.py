@@ -46,7 +46,11 @@ def route(path, payload, observations, store_path=None):
         meta = payload.get("metadata") or {}
         name = (meta.get("name") or "pod") + "-vram"
         namespace = meta.get("namespace") or "default"
-        return 200, {"claim": va.build_resource_claim_template(namespace, name, res["vram_gib"]), "resolution": res}
+        return 200, {
+            "claim": va.build_resource_claim_template(namespace, name, res["vram_gib"]),
+            "pod_patch": va.build_resource_claim_pod_refs(payload, name),
+            "resolution": res,
+        }
     if path == "/observe":
         pod = payload.get("pod") or {}
         try:

@@ -101,6 +101,17 @@ class AdmissionPatchTest(unittest.TestCase):
         self.assertTrue(resp["response"]["allowed"])
         self.assertNotIn("patch", resp["response"])  # admitted unchanged
 
+    def test_resource_claim_pod_refs_wire_claim_to_gpu_container(self):
+        p = {"spec": {"containers": [
+            {"name": "side", "resources": {}},
+            {"name": "trainer", "resources": {"limits": {"nvidia.com/gpu": "1"}}},
+        ]}}
+        ops = va.build_resource_claim_pod_refs(p, "job-vram")
+        rc = next(o for o in ops if o["path"] == "/spec/resourceClaims")
+        self.assertEqual(rc["value"][0]["resourceClaimTemplateName"], "job-vram")
+        # references the GPU container (index 1), not the sidecar
+        self.assertTrue(any(o["path"] == "/spec/containers/1/resources/claims" for o in ops))
+
     def test_resource_claim_template_sized_to_estimate(self):
         rct = va.build_resource_claim_template("ns", "job-vram", 17.3)
         self.assertEqual(rct["kind"], "ResourceClaimTemplate")
