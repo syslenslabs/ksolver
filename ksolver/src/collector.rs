@@ -399,17 +399,10 @@ impl KubeCollector {
         let groups = self.client.list_api_groups().await.ok()?;
         let group = groups.groups.iter().find(|g| g.name == "resource.k8s.io")?;
         let served: Vec<&str> = group.versions.iter().map(|v| v.version.as_str()).collect();
-        for pref in ["v1", "v1beta2", "v1beta1", "v1alpha3"] {
-            if served.contains(&pref) {
-                return Some(pref.to_string());
-            }
+        if served.is_empty() {
+            return None;
         }
-        // Unknown but present version — fall back to the server's preferred (or first served).
-        group
-            .preferred_version
-            .as_ref()
-            .map(|v| v.version.clone())
-            .or_else(|| served.first().map(|s| s.to_string()))
+        select_dra_version(&served, group.preferred_version.as_ref().map(|v| v.version.as_str()))
     }
 
     /// List one DRA kind as untyped `DynamicObject`s at the given served version, returned as full
@@ -1472,6 +1465,21 @@ fn to_resource_list(resources: &BTreeMap<String, Quantity>) -> ResourceList {
     }
 }
 
+/// Pick the best DRA `resource.k8s.io` version from those the cluster serves, preferring newer
+/// (`v1` > `v1beta2` > `v1beta1` > `v1alpha3`). For an unknown/future version not in that list, fall
+/// back to the server's `preferred` (then the first served). This is what lets one binary target the
+/// right DRA API across k8s 1.31–1.35. Returns None only when nothing is served.
+fn select_dra_version(served: &[&str], preferred: Option<&str>) -> Option<String> {
+    for candidate in ["v1", "v1beta2", "v1beta1", "v1alpha3"] {
+        if served.contains(&candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    preferred
+        .map(|s| s.to_string())
+        .or_else(|| served.first().map(|s| s.to_string()))
+}
+
 fn extract_extended_resources(resources: &BTreeMap<String, Quantity>) -> BTreeMap<String, i64> {
     resources
         .iter()
@@ -2072,7 +2080,8 @@ async fn list_vertical_pod_autoscalers(
 mod tests {
     use super::{
         extract_extended_resources, modeled_preferred_pod_terms, parse_bytes,
-        parse_vpa_safety_margin_arg, sum_pod_extended_requests, sum_pod_spec_requests, to_model_pod,
+        parse_vpa_safety_margin_arg, select_dra_version, sum_pod_extended_requests,
+        sum_pod_spec_requests, to_model_pod,
     };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -2365,6 +2374,31 @@ mod tests {
         };
         assert_eq!(sum_pod_spec_requests(&spec).milli_cpu, 1250); // 1000m + 250m overhead
         assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&1));
+    }
+
+    #[test]
+    fn select_dra_version_prefers_newest_served() {
+        // 1.34/1.35: v1 (+ v1beta1 during deprecation) -> pick GA v1.
+        assert_eq!(
+            select_dra_version(&["v1beta1", "v1"], Some("v1")).as_deref(),
+            Some("v1")
+        );
+        // 1.33: v1beta1 + v1beta2 -> pick the newer beta.
+        assert_eq!(
+            select_dra_version(&["v1beta1", "v1beta2"], Some("v1beta1")).as_deref(),
+            Some("v1beta2")
+        );
+        // 1.32: v1beta1 only.
+        assert_eq!(select_dra_version(&["v1beta1"], None).as_deref(), Some("v1beta1"));
+        // 1.31: v1alpha3 only.
+        assert_eq!(select_dra_version(&["v1alpha3"], None).as_deref(), Some("v1alpha3"));
+        // Unknown/future version not in the preference list -> fall back to server preferred.
+        assert_eq!(
+            select_dra_version(&["v2", "v1zeta"], Some("v2")).as_deref(),
+            Some("v2")
+        );
+        // Nothing served.
+        assert_eq!(select_dra_version(&[], None), None);
     }
 
     #[test]
