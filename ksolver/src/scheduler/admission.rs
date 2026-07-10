@@ -125,42 +125,39 @@ fn quantity_positive(quantity: &k8s_openapi::apimachinery::pkg::api::resource::Q
     quantity.0.parse::<i64>().map(|v| v > 0).unwrap_or(false)
 }
 
-fn resources_request_gpu(
+fn map_has_gpu(
     policy: &SchedulerPatchPolicy,
-    requests: Option<&BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
+    map: Option<&BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
 ) -> bool {
-    requests
-        .map(|requests| {
-            requests.iter().any(|(name, quantity)| {
-                is_gpu_resource(policy, name) && quantity_positive(quantity)
-            })
-        })
-        .unwrap_or(false)
+    map.map(|map| {
+        map.iter()
+            .any(|(name, quantity)| is_gpu_resource(policy, name) && quantity_positive(quantity))
+    })
+    .unwrap_or(false)
+}
+
+// A container "uses" a GPU if it names a positive GPU quantity in EITHER requests or limits.
+// GPU extended resources are commonly declared limits-only (the API server copies limits ->
+// requests during defaulting, but that runs before webhooks see raw manifests, and the /predict
+// and /claim paths operate on undefaulted specs). Checking only requests misses those pods.
+fn container_uses_gpu(policy: &SchedulerPatchPolicy, container: &corev1::Container) -> bool {
+    let resources = container.resources.as_ref();
+    map_has_gpu(policy, resources.and_then(|r| r.requests.as_ref()))
+        || map_has_gpu(policy, resources.and_then(|r| r.limits.as_ref()))
 }
 
 fn pod_requests_gpu(policy: &SchedulerPatchPolicy, spec: &corev1::PodSpec) -> bool {
-    let containers_request_gpu = spec.containers.iter().any(|container| {
-        resources_request_gpu(
-            policy,
-            container
-                .resources
-                .as_ref()
-                .and_then(|r| r.requests.as_ref()),
-        )
-    });
+    let containers_request_gpu = spec
+        .containers
+        .iter()
+        .any(|container| container_uses_gpu(policy, container));
     let init_containers_request_gpu = spec
         .init_containers
         .as_ref()
         .map(|containers| {
-            containers.iter().any(|container| {
-                resources_request_gpu(
-                    policy,
-                    container
-                        .resources
-                        .as_ref()
-                        .and_then(|r| r.requests.as_ref()),
-                )
-            })
+            containers
+                .iter()
+                .any(|container| container_uses_gpu(policy, container))
         })
         .unwrap_or(false);
     containers_request_gpu || init_containers_request_gpu
@@ -722,6 +719,30 @@ mod tests {
             &SchedulerPatchPolicy::default(),
         );
         assert!(matches!(got, SchedulerPatchDecision::Patch(_)));
+    }
+
+    #[test]
+    fn detects_limits_only_gpu_pod() {
+        // GPU extended resources are commonly declared limits-only (no requests). Before the API
+        // server copies limits -> requests, checking only requests would miss the pod — it must
+        // still be recognized as a GPU pod.
+        let mut p = pod("team-a", "limits-only", None);
+        p.spec.as_mut().unwrap().containers[0].resources = Some(corev1::ResourceRequirements {
+            limits: Some(BTreeMap::from([(
+                "nvidia.com/gpu".to_string(),
+                Quantity("1".to_string()),
+            )])),
+            requests: None,
+            ..Default::default()
+        });
+        assert!(
+            matches!(
+                render_scheduler_name_patch(&p, &SchedulerPatchPolicy::default()),
+                SchedulerPatchDecision::Patch(_)
+            ),
+            "a limits-only GPU pod must be detected as a GPU pod"
+        );
+        assert!(pod_in_scope_for_vram(&p, &SchedulerPatchPolicy::default()));
     }
 
     #[test]
