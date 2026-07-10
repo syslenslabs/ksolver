@@ -242,19 +242,32 @@ fn predicted_peak_vram_bytes(pod: &corev1::Pod, gpu_request: i64) -> i64 {
 }
 
 /// Sum of GPU resources (exact names or MIG prefixes, per `cfg.is_gpu_resource`) within one
-/// container's effective map (requests, falling back to limits when requests is absent).
+/// container. The effective request is computed PER resource — `requests[r]` if set, otherwise
+/// `limits[r]` (Kubernetes semantics) — NOT per map. Doing it per-map (take requests wholesale,
+/// fall back to limits only when requests is entirely absent) drops a GPU declared only in
+/// `limits` whenever cpu/mem sit in `requests`, reading such a pod as 0 GPUs.
 fn container_gpu(container: &corev1::Container, cfg: &ShadowConfig) -> i64 {
     let Some(res) = container.resources.as_ref() else {
         return 0;
     };
-    let map = res.requests.as_ref().or(res.limits.as_ref());
-    let Some(map) = map else {
-        return 0;
-    };
+    let requests = res.requests.as_ref();
     let mut total = 0i64;
-    for (name, qty) in map {
-        if cfg.is_gpu_resource(name) {
-            total += parse_gpu_quantity(&qty.0);
+    if let Some(requests) = requests {
+        for (name, qty) in requests {
+            if cfg.is_gpu_resource(name) {
+                total += parse_gpu_quantity(&qty.0);
+            }
+        }
+    }
+    // Add GPU resources present only in limits (absent from requests): effective = requests[r]
+    // else limits[r], applied per resource so requests wins where both are set.
+    if let Some(limits) = res.limits.as_ref() {
+        for (name, qty) in limits {
+            if cfg.is_gpu_resource(name)
+                && requests.map(|r| !r.contains_key(name)).unwrap_or(true)
+            {
+                total += parse_gpu_quantity(&qty.0);
+            }
         }
     }
     total
@@ -1087,6 +1100,43 @@ mod tests {
             None,
             Some("Pending"),
             vec![container("a", None, Some(q(&[("nvidia.com/gpu", "2")])))],
+            vec![],
+        );
+        assert_eq!(effective_gpu_request(&p, &cfg()), 2);
+    }
+
+    #[test]
+    fn counts_gpu_in_limits_when_requests_hold_only_cpu() {
+        // The GPU is declared ONLY in limits while cpu sits in requests. Effective request is
+        // per-resource (requests[r] else limits[r]), so the GPU must still count — a per-map
+        // fallback would take requests wholesale, see no GPU, and drop the pod from scheduling.
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container(
+                "a",
+                Some(q(&[("cpu", "2")])),
+                Some(q(&[("cpu", "2"), ("nvidia.com/gpu", "1")])),
+            )],
+            vec![],
+        );
+        assert_eq!(effective_gpu_request(&p, &cfg()), 1);
+        assert!(classify(&p, &cfg()).is_some(), "limits-only GPU pod must be in scope");
+    }
+
+    #[test]
+    fn requests_win_over_limits_per_resource_no_double_count() {
+        // GPU in both requests and limits: count it once (requests wins), never sum the two.
+        let p = pod(
+            "ksolver",
+            None,
+            Some("Pending"),
+            vec![container(
+                "a",
+                Some(q(&[("nvidia.com/gpu", "2")])),
+                Some(q(&[("nvidia.com/gpu", "2")])),
+            )],
             vec![],
         );
         assert_eq!(effective_gpu_request(&p, &cfg()), 2);
