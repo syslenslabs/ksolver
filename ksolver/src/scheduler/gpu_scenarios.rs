@@ -1402,8 +1402,10 @@ pub async fn run_benchmark_with_options(
             kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
             None,
         );
-        let does_not_prove =
-            scenario_does_not_prove(win_classification, &kube.source, &kube_binpack.source);
+        let does_not_prove = scenario_does_not_prove(
+            win_classification,
+            proof_provenance(&kube.source, &kube_binpack.source),
+        );
         results.push(ScenarioResult {
             name: scenario.name,
             description: scenario.description,
@@ -9444,13 +9446,35 @@ pub fn classify_win(ksolver: i64, kube_only: i64, gang_aware: Option<i64>) -> Wi
     }
 }
 
+/// Phase 8 baseline provenance — how a scenario's kube comparison was substantiated. Customer dollar
+/// claims require live/cached KSS; a deterministic fixture is demo-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProofProvenance {
+    LiveKss,
+    CachedKss,
+    DeterministicFixture,
+}
+
+/// Classify a scenario's kube-baseline provenance (strongest of the two baselines). A cached source
+/// embeds the KSS name ("cached kube-scheduler-simulator ..."), so `live` must exclude the `cached `
+/// prefix.
+fn proof_provenance(kube_source: &str, kube_binpack_source: &str) -> ProofProvenance {
+    let is_cached = |s: &str| s.starts_with("cached ");
+    let is_live =
+        |s: &str| s.contains("kube-scheduler-simulator") && !is_cached(s) && !s.contains("failed");
+    if is_live(kube_source) || is_live(kube_binpack_source) {
+        ProofProvenance::LiveKss
+    } else if is_cached(kube_source) || is_cached(kube_binpack_source) {
+        ProofProvenance::CachedKss
+    } else {
+        ProofProvenance::DeterministicFixture
+    }
+}
+
 /// Phase 8 "what this does not prove": derive honest limitation statements for a scenario from its
-/// win classification and the provenance of its kube baselines. Keeps demo claims from overreaching.
-fn scenario_does_not_prove(
-    win: WinClassification,
-    kube_source: &str,
-    kube_binpack_source: &str,
-) -> Vec<String> {
+/// win classification and its baseline provenance. Keeps demo claims from overreaching.
+fn scenario_does_not_prove(win: WinClassification, provenance: ProofProvenance) -> Vec<String> {
     let mut out = Vec::new();
     match win {
         WinClassification::BeatsKubeOnly => out.push(
@@ -9461,20 +9485,15 @@ fn scenario_does_not_prove(
             .push("a useful-GPU win over the best kube baseline for this scenario".to_string()),
         WinClassification::BeatsGangAware => {}
     }
-    // Baseline provenance across the two kube baselines (strongest wins). A cached source embeds
-    // the KSS name ("cached kube-scheduler-simulator ..."), so live must exclude the cached prefix.
-    let is_cached = |s: &str| s.starts_with("cached ");
-    let is_live =
-        |s: &str| s.contains("kube-scheduler-simulator") && !is_cached(s) && !s.contains("failed");
-    if !(is_live(kube_source) || is_live(kube_binpack_source)) {
-        if is_cached(kube_source) || is_cached(kube_binpack_source) {
-            out.push("a live result — the kube baseline is a cached KSS run".to_string());
-        } else {
-            out.push(
-                "anything against real kube — the baseline is a deterministic local fixture, not KSS"
-                    .to_string(),
-            );
+    match provenance {
+        ProofProvenance::LiveKss => {}
+        ProofProvenance::CachedKss => {
+            out.push("a live result — the kube baseline is a cached KSS run".to_string())
         }
+        ProofProvenance::DeterministicFixture => out.push(
+            "anything against real kube — the baseline is a deterministic local fixture, not KSS"
+                .to_string(),
+        ),
     }
     out
 }
@@ -9490,6 +9509,11 @@ pub struct WinClassificationSummary {
     /// True while no gang-aware baseline is wired: `beats_gang_aware` is 0 BY CONSTRUCTION (not
     /// earnable yet), so the demo never overstates the differentiator claim.
     pub gang_aware_baseline_pending: bool,
+    /// Phase 8 provenance rollup: how many scenarios were compared against a live KSS run, a cached
+    /// KSS run, or only a deterministic local fixture. Customer dollar claims require live/cached.
+    pub live_kss_scenarios: usize,
+    pub cached_kss_scenarios: usize,
+    pub deterministic_fixture_scenarios: usize,
     pub headline: String,
 }
 
@@ -9505,11 +9529,23 @@ fn summarize_win_classification(results: &[ScenarioResult]) -> WinClassification
             WinClassification::BeatsKubeOnly => summary.beats_kube_only += 1,
             WinClassification::NotProven => summary.not_proven += 1,
         }
+        match proof_provenance(&r.kube.source, &r.kube_binpack.source) {
+            ProofProvenance::LiveKss => summary.live_kss_scenarios += 1,
+            ProofProvenance::CachedKss => summary.cached_kss_scenarios += 1,
+            ProofProvenance::DeterministicFixture => summary.deterministic_fixture_scenarios += 1,
+        }
     }
     summary.headline = format!(
         "{} scenarios: {} beats-kube-only, {} not-proven, {} beats-gang-aware \
-         (no gang-aware baseline wired yet, so beats-gang-aware is not yet earnable)",
-        summary.total, summary.beats_kube_only, summary.not_proven, summary.beats_gang_aware
+         (no gang-aware baseline wired yet, so beats-gang-aware is not yet earnable); \
+         provenance: {} live-KSS, {} cached-KSS, {} deterministic-fixture (customer $ claims need live/cached)",
+        summary.total,
+        summary.beats_kube_only,
+        summary.not_proven,
+        summary.beats_gang_aware,
+        summary.live_kss_scenarios,
+        summary.cached_kss_scenarios,
+        summary.deterministic_fixture_scenarios
     );
     summary
 }
@@ -9585,28 +9621,45 @@ mod tests {
         assert_eq!(s.beats_gang_aware, 0);
         assert!(s.gang_aware_baseline_pending);
         assert!(s.headline.contains("beats-gang-aware is not yet earnable"));
+        // empty_engine sources ("") -> deterministic fixture provenance for all three.
+        assert_eq!(s.deterministic_fixture_scenarios, 3);
+        assert_eq!(s.live_kss_scenarios, 0);
+        assert!(s.headline.contains("provenance:"));
+    }
+
+    #[test]
+    fn proof_provenance_classifies_baseline_source() {
+        let live = "kube-scheduler-simulator spread";
+        let cached = "cached kube-scheduler-simulator spread";
+        let fixture = "local greedy-spread test fixture (not KSS)";
+        assert_eq!(proof_provenance(live, live), ProofProvenance::LiveKss);
+        // A cached source embeds the KSS name but must NOT read as live.
+        assert_eq!(proof_provenance(cached, cached), ProofProvenance::CachedKss);
+        assert_eq!(proof_provenance(fixture, fixture), ProofProvenance::DeterministicFixture);
+        // Strongest of the two baselines wins: one live -> live; one cached (no live) -> cached.
+        assert_eq!(proof_provenance(cached, live), ProofProvenance::LiveKss);
+        assert_eq!(proof_provenance(fixture, cached), ProofProvenance::CachedKss);
     }
 
     #[test]
     fn does_not_prove_reflects_classification_and_provenance() {
-        let live = "kube-scheduler-simulator spread";
-        let cached = "cached kube-scheduler-simulator spread";
-        let fixture = "local greedy-spread test fixture (not KSS)";
         // beats-kube-only + live baseline -> only the gang-aware disclaimer.
-        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, live, live);
+        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::LiveKss);
         assert_eq!(r.len(), 1);
         assert!(r[0].contains("gang-aware"));
         // not-proven + cached -> a win disclaimer AND a cached-provenance disclaimer.
-        let r = scenario_does_not_prove(WinClassification::NotProven, cached, cached);
+        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::CachedKss);
         assert!(r.iter().any(|s| s.contains("useful-GPU win")));
         assert!(r.iter().any(|s| s.contains("cached")));
         // deterministic fixture -> fixture disclaimer.
-        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, fixture, fixture);
+        let r =
+            scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::DeterministicFixture);
         assert!(r.iter().any(|s| s.contains("deterministic local fixture")));
-        // beats-gang-aware + a live baseline -> nothing to disclaim.
-        assert!(scenario_does_not_prove(WinClassification::BeatsGangAware, live, live).is_empty());
-        // one live baseline across the two is enough (no provenance disclaimer).
-        assert!(scenario_does_not_prove(WinClassification::BeatsGangAware, cached, live).is_empty());
+        // beats-gang-aware + live -> nothing to disclaim.
+        assert!(
+            scenario_does_not_prove(WinClassification::BeatsGangAware, ProofProvenance::LiveKss)
+                .is_empty()
+        );
     }
 
     fn empty_engine(engine: &str) -> EngineResult {
