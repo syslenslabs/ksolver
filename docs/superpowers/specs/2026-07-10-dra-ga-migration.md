@@ -6,16 +6,37 @@ DRA demand modeling (`ksolver/src/dra.rs`, `collector.rs`) reads `resource.k8s.i
 `k8s-openapi` is pinned to `v1_32`. On a cluster serving only GA DRA, ksolver's demand modeling
 silently no-ops (it fails safe — warns and skips — so no over-admit, but it's incoherent long-term).
 
-## Verified version matrix (2026-07-10, via `cargo add --dry-run`)
+## Verified version matrix + empirical blast radius (2026-07-10)
+
+Measured by actually bumping the deps and building (then reverting — main is untouched):
 
 | Need | Version |
 |------|---------|
-| DRA `resource.k8s.io/v1` types (feature `v1_34`) | `k8s-openapi` **0.26 or 0.27** (0.24 → max `v1_32`; 0.25 → max `v1_33` = DRA v1beta only) |
-| `kube-rs` paired with k8s-openapi 0.26/0.27 | **0.101+** (currently `kube 0.98`; resolve exact pin at migration time) |
+| DRA `resource.k8s.io/v1` types | k8s-openapi feature `v1_34` |
+| k8s-openapi carrying `v1_34` **that kube 4.0 pulls** | **0.28** (0.26/0.27 also expose `v1_34`, but `kube 4.0` depends on 0.28, and only one k8s-openapi may carry the feature — so pin 0.28) |
+| kube-rs | **4.0** — kube went major since 0.98; latest is 4.0.0 (a multi-major jump, NOT 0.10x as first guessed) |
 
-So this is a **coupled major dependency upgrade** (`k8s-openapi` 0.24→0.26/0.27 **and** `kube-rs`
-0.98→0.101+), not a Cargo feature flip. `kube` is used across ~13 files; its 0.9x→0.10x bumps carry
-breaking API changes (Api/watcher/discovery signatures have churned).
+Toolchain is fine (rustc 1.91; kube 4.0 + k8s-openapi 0.28 resolve and their own code compiles).
+
+**Empirical breakage: 51 compile errors in our code**, across:
+
+| File | errors | nature |
+|------|--------|--------|
+| `scheduler/gpu_scenarios.rs` | 20 | kube/k8s-openapi type + time changes |
+| `dra.rs` | 13 | the v1alpha3 → v1 API shape port |
+| `collector.rs` | 11 | **chrono → jiff** time handling + kube Api changes |
+| `scheduler/leader.rs` | 3 | chrono → jiff (lease renew time math) |
+| `scheduler/binder.rs` | 2 | `create_subresource` now takes 2 generics (`::<serde_json::Value, T>`) |
+| `scheduler/pod_filter.rs` | 1 | type change |
+
+**Biggest surprise:** k8s-openapi 0.28 switched its time types from `chrono` to **`jiff::Timestamp`**
+(`Time`/`MicroTime` now wrap `jiff`). Our code interops k8s times with `chrono` (`.timestamp()`,
+`signed_duration_since`) — those break and need jiff↔chrono conversion (or moving our time handling
+to jiff). This is the meatiest sub-task, beyond the DRA port itself.
+
+So: a coupled major upgrade (`kube` 0.98→4.0, `k8s-openapi` 0.24→0.28), ~51 mechanical-to-moderate
+fixes across 6 files, dominated by the DRA v1 port + a chrono→jiff time migration. Bounded and
+doable (roughly a day), but a real breaking-dependency decision — hence the go-ahead gate.
 
 ## Scope of work
 
