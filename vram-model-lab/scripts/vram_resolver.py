@@ -43,6 +43,9 @@ MAX_PLAUSIBLE_SINGLE_GPU_MIB = 144 * 1024
 # Tier 4: how many prior observations of the same workload fingerprint we require before we
 # trust the measured peak as a hard constraint (a promotion threshold).
 FINGERPRINT_MIN_SAMPLES = 3
+# Cap the live per-fingerprint window so a long-running predictor stays bounded; p95 over the most
+# recent runs also tracks current behavior rather than stale history.
+MAX_OBSERVATIONS_PER_FINGERPRINT = 50
 
 
 def fingerprint_key(fp: dict[str, Any]) -> str:
@@ -77,7 +80,10 @@ def index_observation(observations: dict[str, list[float]], pod: dict[str, Any],
     """Add an observation to an in-memory store index (so a running predictor sees it immediately).
     Returns the fingerprint key. Pair with record_observation() to also persist it."""
     key = fingerprint_key(pod_fingerprint(pod))
-    observations.setdefault(key, []).append(float(peak_mib))
+    samples = observations.setdefault(key, [])
+    samples.append(float(peak_mib))
+    if len(samples) > MAX_OBSERVATIONS_PER_FINGERPRINT:
+        del samples[: len(samples) - MAX_OBSERVATIONS_PER_FINGERPRINT]  # keep most recent
     return key
 
 

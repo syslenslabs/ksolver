@@ -168,6 +168,15 @@ class ResolveCascadeTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_index_observation_caps_window(self):
+        pod = gpu_pod(args=["--w", "1"])
+        obs: dict = {}
+        for i in range(vr.MAX_OBSERVATIONS_PER_FINGERPRINT + 20):
+            vr.index_observation(obs, pod, float(1000 + i))
+        key = vr.fingerprint_key(vr.pod_fingerprint(pod))
+        self.assertEqual(len(obs[key]), vr.MAX_OBSERVATIONS_PER_FINGERPRINT)
+        self.assertEqual(obs[key][-1], float(1000 + vr.MAX_OBSERVATIONS_PER_FINGERPRINT + 19))  # most recent kept
+
     def test_index_observation_makes_tier4_fire_in_memory(self):
         pod = gpu_pod(args=["--live", "x"])
         obs: dict = {}
