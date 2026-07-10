@@ -35,6 +35,16 @@ def route(path, payload, observations, store_path=None):
         return 200, va.render_admission_response(
             payload, lambda pod: vr.resolve(pod, observations=observations)
         )
+    if path == "/claim":
+        # Return the right-sized DRA ResourceClaimTemplate for a pod (the DRA-native artifact an
+        # operator/GitOps flow applies alongside the pod). Null when there's no confident estimate.
+        res = vr.resolve(payload, observations=observations)
+        if res.get("vram_gib") is None:
+            return 200, {"claim": None, "reason": f"{res['source']}/{res['confidence']}: no VRAM estimate", "resolution": res}
+        meta = payload.get("metadata") or {}
+        name = (meta.get("name") or "pod") + "-vram"
+        namespace = meta.get("namespace") or "default"
+        return 200, {"claim": va.build_resource_claim_template(namespace, name, res["vram_gib"]), "resolution": res}
     if path == "/observe":
         pod = payload.get("pod") or {}
         try:
@@ -91,7 +101,7 @@ def main() -> int:
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), _make_handler(observations, args.observations)
     )
-    print(f"vram admission service on 127.0.0.1:{args.port} (/predict, /admit, /observe)")
+    print(f"vram admission service on 127.0.0.1:{args.port} (/predict, /admit, /observe, /claim)")
     server.serve_forever()
     return 0
 

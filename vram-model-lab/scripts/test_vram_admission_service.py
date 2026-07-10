@@ -49,6 +49,25 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_claim_returns_sized_dra_template(self):
+        pod = gpu_pod({"ksolver.dev/predicted-peak-vram-gib": "17.3"})
+        pod["metadata"]["name"] = "job"
+        pod["metadata"]["namespace"] = "team"
+        status, body = svc.route("/claim", pod, {})
+        self.assertEqual(status, 200)
+        rct = body["claim"]
+        self.assertEqual(rct["kind"], "ResourceClaimTemplate")
+        self.assertEqual(rct["metadata"], {"name": "job-vram", "namespace": "team"})
+        self.assertEqual(
+            rct["spec"]["spec"]["devices"]["requests"][0]["exactly"]["capacity"]["requests"]["memory"],
+            "18Gi",  # ceil(17.3)
+        )
+
+    def test_claim_null_when_no_estimate(self):
+        status, body = svc.route("/claim", gpu_pod(args=["--epochs", "3"]), {})
+        self.assertEqual(status, 200)
+        self.assertIsNone(body["claim"])
+
     def test_unknown_path_404(self):
         status, body = svc.route("/nope", {}, {})
         self.assertEqual(status, 404)
