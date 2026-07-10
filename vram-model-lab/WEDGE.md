@@ -82,4 +82,14 @@ Remaining / not done:
   source (DCGM / probe sidecar) that sets `ksolver.dev/observed-peak-vram-mib` — ksolver does
   not measure VRAM itself.
 - Full DRA allocation loop (needs a GPU DRA driver; node-affinity is the enforceable fallback).
+- **DRA API version split (decision needed).** This wedge emits `resource.k8s.io/v1` claims (GA in
+  k8s 1.34; the `exactly:` nesting — see `examples/dra-bundle.yaml`, dry-run-validated on 1.36).
+  ksolver's own DRA *demand* modeling (`ksolver/src/dra.rs`, `collector.rs`) reads
+  `resource.k8s.io/v1alpha3`, because `k8s-openapi` is pinned to feature `v1_32` (Kubernetes 1.32),
+  under which the v1 DRA types don't exist. Consequence: on a cluster serving only one of the two
+  versions, only one side engages (the collector already emits a warning and skips DRA augmentation
+  when the v1alpha3 API is absent, so it fails safe — no silent over-admit). To unify on GA, bump
+  `k8s-openapi` to feature `v1_34`+ and port `dra.rs` from v1alpha3 to v1 (flat request fields move
+  under `exactly` / `firstAvailable`). That is a repo-wide version-target change, so it needs an
+  explicit call, not an autonomous edit.
 - Model breadth: single-SKU (4090), no true CUDA-OOM labels yet.
