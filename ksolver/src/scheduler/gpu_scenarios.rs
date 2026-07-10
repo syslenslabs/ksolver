@@ -12378,5 +12378,29 @@ mod tests {
                 .all(|a| !a.evidence.is_empty()),
             "every assertion should include operator-readable evidence"
         );
+
+        // Phase 3 win classification is wired end-to-end and honest: the summary counts every
+        // scenario, the per-scenario classification agrees with useful-GPU vs the best kube
+        // baseline, and beats-gang-aware is NEVER claimed while no gang-aware baseline is wired.
+        let wc = &report.win_classification_summary;
+        assert_eq!(wc.total, report.scenarios.len());
+        assert_eq!(
+            wc.beats_gang_aware + wc.beats_kube_only + wc.not_proven,
+            wc.total
+        );
+        assert_eq!(
+            wc.beats_gang_aware, 0,
+            "beats-gang-aware must not be claimed without a gang-aware baseline"
+        );
+        assert!(wc.gang_aware_baseline_pending);
+        for s in &report.scenarios {
+            let best_kube = s.kube.metrics.useful_gpu.max(s.kube_binpack.metrics.useful_gpu);
+            let expected = classify_win(s.ksolver.metrics.useful_gpu, best_kube, None);
+            assert_eq!(
+                s.win_classification, expected,
+                "scenario {} classification disagrees with useful-GPU vs best kube baseline",
+                s.name
+            );
+        }
     }
 }
