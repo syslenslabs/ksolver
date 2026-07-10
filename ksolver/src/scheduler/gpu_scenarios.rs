@@ -16,8 +16,6 @@ use crate::scheduler::trace::{
     QuotaMetrics, RepairMetrics, TenantFairnessMetrics,
 };
 use anyhow::Context;
-use k8s_openapi::api::resource::v1alpha3 as dra;
-use kube::api::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -7818,26 +7816,18 @@ fn dra_approximation_scenario_proof() -> DraApproximationProof {
     }
 }
 
-fn dra_attr_str(value: &str) -> dra::DeviceAttribute {
-    dra::DeviceAttribute {
-        string: Some(value.to_string()),
-        ..Default::default()
-    }
+// DRA scenario fixtures build the same JSON shape the version-adaptive `crate::dra` parser consumes
+// (v1alpha3 shape: flat requests, `basic.attributes`). camelCase keys, like the real API.
+fn dra_attr_str(value: &str) -> serde_json::Value {
+    serde_json::json!({ "string": value })
 }
 
-fn dra_device(name: &str, attrs: &[(&str, dra::DeviceAttribute)]) -> dra::Device {
-    dra::Device {
-        name: name.to_string(),
-        basic: Some(dra::BasicDevice {
-            attributes: Some(
-                attrs
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect(),
-            ),
-            ..Default::default()
-        }),
-    }
+fn dra_device(name: &str, attrs: &[(&str, serde_json::Value)]) -> serde_json::Value {
+    let map: serde_json::Map<String, serde_json::Value> = attrs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    serde_json::json!({ "name": name, "basic": { "attributes": map } })
 }
 
 fn dra_slice(
@@ -7845,61 +7835,31 @@ fn dra_slice(
     driver: &str,
     pool: &str,
     generation: i64,
-    devices: Vec<dra::Device>,
-) -> dra::ResourceSlice {
-    dra::ResourceSlice {
-        spec: dra::ResourceSliceSpec {
-            driver: driver.to_string(),
-            node_name: Some(node.to_string()),
-            pool: dra::ResourcePool {
-                name: pool.to_string(),
-                generation,
-                resource_slice_count: 1,
-            },
-            devices: Some(devices),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+    devices: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "spec": {
+            "driver": driver,
+            "nodeName": node,
+            "pool": { "name": pool, "generation": generation, "resourceSliceCount": 1 },
+            "devices": devices,
+        }
+    })
 }
 
-fn dra_class(name: &str, expr: &str) -> dra::DeviceClass {
-    dra::DeviceClass {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            ..Default::default()
-        },
-        spec: dra::DeviceClassSpec {
-            selectors: Some(vec![dra::DeviceSelector {
-                cel: Some(dra::CELDeviceSelector {
-                    expression: expr.to_string(),
-                }),
-            }]),
-            ..Default::default()
-        },
-    }
+fn dra_class(name: &str, expr: &str) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": { "name": name },
+        "spec": { "selectors": [ { "cel": { "expression": expr } } ] },
+    })
 }
 
-fn dra_allocated_claim(driver: &str, pool: &str, device: &str) -> dra::ResourceClaim {
-    dra::ResourceClaim {
-        status: Some(dra::ResourceClaimStatus {
-            allocation: Some(dra::AllocationResult {
-                devices: Some(dra::DeviceAllocationResult {
-                    results: Some(vec![dra::DeviceRequestAllocationResult {
-                        device: device.to_string(),
-                        driver: driver.to_string(),
-                        pool: pool.to_string(),
-                        request: "req".to_string(),
-                        ..Default::default()
-                    }]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
+fn dra_allocated_claim(driver: &str, pool: &str, device: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": { "allocation": { "devices": { "results": [
+            { "device": device, "driver": driver, "pool": pool, "request": "req" }
+        ] } } }
+    })
 }
 
 fn dra_allocation_scenario_proof() -> DraAllocationProof {

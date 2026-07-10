@@ -392,30 +392,63 @@ impl KubeCollector {
         Ok(snapshot)
     }
 
-    /// DRA F3a augmentation (non-fatal): list ResourceSlices/DeviceClasses/ResourceClaims/Templates
-    /// (resource.k8s.io/v1alpha3), compute per-node per-class availability + per-pod demand via the
-    /// pure `crate::dra` module, and fold them into node `extended_resources` and pod
-    /// `extended_resource_requests` (keyed `dra.ksolver/<class>`). Any listing error (API absent /
-    /// feature-gate off / RBAC) ⇒ skip DRA entirely, leaving the snapshot unchanged.
+    /// Which `resource.k8s.io` API version the cluster serves, best-first
+    /// (`v1` > `v1beta2` > `v1beta1` > `v1alpha3`), or `None` if the group isn't served. This is
+    /// what lets one binary support DRA across k8s 1.31–1.35, whose DRA group-versions differ.
+    async fn discover_dra_version(&self) -> Option<String> {
+        let groups = self.client.list_api_groups().await.ok()?;
+        let group = groups.groups.iter().find(|g| g.name == "resource.k8s.io")?;
+        let served: Vec<&str> = group.versions.iter().map(|v| v.version.as_str()).collect();
+        for pref in ["v1", "v1beta2", "v1beta1", "v1alpha3"] {
+            if served.contains(&pref) {
+                return Some(pref.to_string());
+            }
+        }
+        // Unknown but present version — fall back to the server's preferred (or first served).
+        group
+            .preferred_version
+            .as_ref()
+            .map(|v| v.version.clone())
+            .or_else(|| served.first().map(|s| s.to_string()))
+    }
+
+    /// List one DRA kind as untyped `DynamicObject`s at the given served version, returned as full
+    /// JSON objects for the version-adaptive `crate::dra` parser.
+    async fn list_dra_kind(
+        &self,
+        version: &str,
+        kind: &str,
+        plural: &str,
+    ) -> Result<Vec<Value>, kube::Error> {
+        let gvk = GroupVersionKind::gvk("resource.k8s.io", version, kind);
+        let ar = ApiResource::from_gvk_with_plural(&gvk, plural);
+        let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &ar);
+        let list = api.list(&ListParams::default()).await?;
+        Ok(list
+            .items
+            .iter()
+            .map(|o| serde_json::to_value(o).unwrap_or(Value::Null))
+            .collect())
+    }
+
+    /// DRA F3a augmentation (non-fatal): discover the served `resource.k8s.io` version, list
+    /// ResourceSlices/DeviceClasses/ResourceClaims/Templates as `DynamicObject`, compute per-node
+    /// per-class availability + per-pod demand via the version-adaptive `crate::dra` module, and fold
+    /// them into node `extended_resources` and pod `extended_resource_requests` (keyed
+    /// `dra.ksolver/<class>`). Any absence/listing error ⇒ skip DRA entirely (snapshot unchanged).
     async fn augment_with_dra(&self, snapshot: &mut ClusterSnapshot) {
-        use k8s_openapi::api::resource::v1alpha3 as dra;
-        let slices_api: Api<dra::ResourceSlice> = Api::all(self.client.clone());
-        let classes_api: Api<dra::DeviceClass> = Api::all(self.client.clone());
-        let claims_api: Api<dra::ResourceClaim> = Api::all(self.client.clone());
-        let templates_api: Api<dra::ResourceClaimTemplate> = Api::all(self.client.clone());
-        let lp = ListParams::default();
-        let (slices, classes, claims, templates) = tokio::join!(
-            slices_api.list(&lp),
-            classes_api.list(&lp),
-            claims_api.list(&lp),
-            templates_api.list(&lp),
-        );
-        let (slices, classes, claims) = match (slices, classes, claims) {
-            (Ok(s), Ok(c), Ok(cl)) => (s.items, c.items, cl.items),
+        let Some(version) = self.discover_dra_version().await else {
+            debug!("resource.k8s.io API group not served; skipping DRA augmentation");
+            return;
+        };
+        let (slices, classes, claims) = match tokio::join!(
+            self.list_dra_kind(&version, "ResourceSlice", "resourceslices"),
+            self.list_dra_kind(&version, "DeviceClass", "deviceclasses"),
+            self.list_dra_kind(&version, "ResourceClaim", "resourceclaims"),
+        ) {
+            (Ok(s), Ok(c), Ok(cl)) => (s, c, cl),
             _ => {
-                debug!(
-                    "DRA API not available (resource.k8s.io/v1alpha3); skipping DRA augmentation"
-                );
+                debug!(%version, "DRA list failed at resource.k8s.io; skipping DRA augmentation");
                 return;
             }
         };
@@ -426,8 +459,11 @@ impl KubeCollector {
         // contract): anything that makes DRA demand/capacity approximate or incomplete is surfaced.
         let mut dra_warnings: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
-        let templates = match templates {
-            Ok(t) => t.items,
+        let templates = match self
+            .list_dra_kind(&version, "ResourceClaimTemplate", "resourceclaimtemplates")
+            .await
+        {
+            Ok(t) => t,
             Err(_) => {
                 dra_warnings.insert(
                     "DRA: could not list ResourceClaimTemplates; template-backed pod demand not modeled"
@@ -468,29 +504,26 @@ impl KubeCollector {
 
         // Pod demand: resolve each pod's spec.resourceClaims to a ResourceClaim or Template, sum
         // per-class demand, and add as extended requests keyed dra.ksolver/<class>.
-        let claim_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaim> = claims
+        let obj_ns_name = |o: &Value| -> Option<(String, String)> {
+            let meta = o.get("metadata")?;
+            let ns = meta.get("namespace")?.as_str()?.to_string();
+            let name = meta.get("name")?.as_str()?.to_string();
+            Some((ns, name))
+        };
+        let claim_by_ns_name: BTreeMap<(String, String), &Value> = claims
             .iter()
-            .filter_map(|c| {
-                let ns = c.metadata.namespace.clone()?;
-                let name = c.metadata.name.clone()?;
-                Some(((ns, name), c))
-            })
+            .filter_map(|c| obj_ns_name(c).map(|k| (k, c)))
             .collect();
-        let template_by_ns_name: BTreeMap<(String, String), &dra::ResourceClaimTemplate> =
-            templates
-                .iter()
-                .filter_map(|t| {
-                    let ns = t.metadata.namespace.clone()?;
-                    let name = t.metadata.name.clone()?;
-                    Some(((ns, name), t))
-                })
-                .collect();
+        let template_by_ns_name: BTreeMap<(String, String), &Value> = templates
+            .iter()
+            .filter_map(|t| obj_ns_name(t).map(|k| (k, t)))
+            .collect();
         // Raw pod specs (the model Pod drops resourceClaims), keyed by (ns, name). If the pod list
         // fails, DRA pod demand cannot be modeled — disclose it (nodes still carry real capacity,
         // so unmodeled demand would otherwise silently over-admit).
         let raw_pod_claims: BTreeMap<(String, String), Vec<corev1::PodResourceClaim>> = {
             let pods_api: Api<corev1::Pod> = Api::all(self.client.clone());
-            match pods_api.list(&lp).await {
+            match pods_api.list(&ListParams::default()).await {
                 Ok(list) => list
                     .items
                     .into_iter()
@@ -522,9 +555,10 @@ impl KubeCollector {
                         .get(&(pod.namespace.clone(), cn.clone()))
                         .map(|c| crate::dra::claim_demand(c))
                 } else if let Some(tn) = pod_claim.resource_claim_template_name.as_ref() {
+                    // A ResourceClaimTemplate's embedded DeviceClaim lives at spec.spec.devices.
                     template_by_ns_name
                         .get(&(pod.namespace.clone(), tn.clone()))
-                        .and_then(|t| t.spec.spec.devices.as_ref())
+                        .and_then(|t| t.get("spec").and_then(|s| s.get("spec")).and_then(|s| s.get("devices")))
                         .map(crate::dra::demand_from_device_claim)
                 } else {
                     None

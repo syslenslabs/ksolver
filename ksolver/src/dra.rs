@@ -1,4 +1,4 @@
-//! DRA (Dynamic Resource Allocation) F3a — scalar approximation.
+//! DRA (Dynamic Resource Allocation) F3a — scalar approximation, version-adaptive.
 //!
 //! DRA is a matching/assignment problem (claims ↔ devices via CEL selectors), not a scalar
 //! resource. F3a approximates it as synthetic integer extended resources so DRA-requesting pods can
@@ -9,7 +9,18 @@
 //! optimism of a scalar collapse (overlapping classes / request selectors), which is disclosed via
 //! caveats — never silently trusted.
 //!
-//! Contract (v1alpha3):
+//! **Version-adaptive (k8s 1.31–1.35).** The `resource.k8s.io` API changes group-version across this
+//! range (`v1alpha3` → `v1beta1` → `v1beta2` → `v1` GA) and no single served version spans it, so a
+//! single typed `k8s-openapi` build cannot. Instead this module parses DRA objects from
+//! `serde_json::Value` (the collector lists them as `DynamicObject` at the cluster's discovered
+//! served version), navigating fields shape-tolerantly:
+//! - device attributes at `.attributes` (v1beta2/v1) OR `.basic.attributes` (v1alpha3/v1beta1);
+//! - a request's device fields flat on the request (v1alpha3/v1beta1) OR nested under `.exactly`
+//!   (v1beta2/v1), with `.firstAvailable[]` handled as worst-case (first alternative) + caveat.
+//!
+//! JSON keys are Kubernetes camelCase (`nodeName`, `deviceClassName`, `allocationMode`).
+//!
+//! Contract:
 //! - **Selector evaluation:** a `DeviceClass` matches a device iff every class selector matches. A
 //!   selector's CEL `expression` is supported ONLY when it reduces to a single equality
 //!   `device.driver == "<lit>"` or `device.attributes["<domain>"].<name> == <lit>`. Empty selectors
@@ -17,12 +28,12 @@
 //!   pods requesting it are caveated).
 //! - **Allocation source of truth = `ResourceClaim.status.allocation`** (NOT slices). Device identity
 //!   is `(driver, pool, device)`. Availability = matching slice devices − allocated identities.
-//! - **Node scoping:** only `spec.node_name`-scoped slices are attributed to a node (MVP). Only the
+//! - **Node scoping:** only `spec.nodeName`-scoped slices are attributed to a node (MVP). Only the
 //!   highest `pool.generation` per `(driver, pool)` is trusted (stale slices ignored).
 //! - **Demand:** `allocationMode` ExactCount/absent ⇒ `count` (default 1); `All` or unknown ⇒
 //!   caveat + not counted. Request-level selectors / device constraints ⇒ caveat (placement optimistic).
 
-use k8s_openapi::api::resource::v1alpha3 as dra;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Per-node, per-class available device counts plus disclosure flags.
@@ -75,37 +86,27 @@ fn parse_literal(rhs: &str) -> Option<Literal> {
     None
 }
 
-/// Compare a device attribute's typed value to a literal.
-fn attr_equals(attr: &dra::DeviceAttribute, lit: &Literal) -> bool {
+/// Compare a device attribute's typed value (a JSON object like `{"string":"A100"}`) to a literal.
+fn attr_equals(attr: &Value, lit: &Literal) -> bool {
     match lit {
         Literal::Str(s) => {
-            attr.string.as_deref() == Some(s.as_str())
-                || attr.version.as_deref() == Some(s.as_str())
+            attr.get("string").and_then(Value::as_str) == Some(s.as_str())
+                || attr.get("version").and_then(Value::as_str) == Some(s.as_str())
         }
-        Literal::Int(n) => attr.int == Some(*n),
-        Literal::Bool(b) => attr.bool == Some(*b),
+        Literal::Int(n) => attr.get("int").and_then(Value::as_i64) == Some(*n),
+        Literal::Bool(b) => attr.get("bool").and_then(Value::as_bool) == Some(*b),
     }
 }
 
 /// Look up a `device.attributes["<domain>"].<name>` reference in the API attribute map, which keys
 /// entries as `"<domain>/<name>"` (fully qualified) or bare `"<name>"`.
-fn lookup_attr<'a>(
-    attrs: &'a BTreeMap<String, dra::DeviceAttribute>,
-    domain: &str,
-    name: &str,
-) -> Option<&'a dra::DeviceAttribute> {
-    attrs
-        .get(&format!("{domain}/{name}"))
-        .or_else(|| attrs.get(name))
+fn lookup_attr<'a>(attrs: &'a Map<String, Value>, domain: &str, name: &str) -> Option<&'a Value> {
+    attrs.get(&format!("{domain}/{name}")).or_else(|| attrs.get(name))
 }
 
 /// Evaluate one DeviceClass selector CEL `expression` against a device (its owning slice `driver`
 /// and its `attributes`). Supports only single-equality forms; anything else ⇒ `Unevaluable`.
-fn eval_selector(
-    expr: &str,
-    slice_driver: &str,
-    attrs: &BTreeMap<String, dra::DeviceAttribute>,
-) -> SelMatch {
+fn eval_selector(expr: &str, slice_driver: &str, attrs: &Map<String, Value>) -> SelMatch {
     // Strip an optional single wrapping paren pair.
     let mut e = expr.trim();
     if e.starts_with('(') && e.ends_with(')') && e.len() >= 2 {
@@ -180,17 +181,27 @@ fn eval_selector(
     SelMatch::Unevaluable
 }
 
+/// The attribute map of a device, tolerating both shapes: `.attributes` (v1beta2/v1) or
+/// `.basic.attributes` (v1alpha3/v1beta1).
+fn device_attributes(device: &Value) -> Option<&Map<String, Value>> {
+    device
+        .get("attributes")
+        .and_then(Value::as_object)
+        .or_else(|| {
+            device
+                .get("basic")
+                .and_then(|b| b.get("attributes"))
+                .and_then(Value::as_object)
+        })
+}
+
 /// Whether a class matches a device (selectors are ANDed). CEL AND semantics: a definite `No`
 /// makes the class NOT match (returned even if other selectors are Unevaluable — `false && unknown`
 /// is `false`, so the device is safely excluded without a spurious unevaluable caveat). Otherwise
 /// any Unevaluable ⇒ Unevaluable; empty/all-Yes ⇒ Yes.
-fn class_matches(
-    class: &dra::DeviceClass,
-    slice_driver: &str,
-    attrs: &BTreeMap<String, dra::DeviceAttribute>,
-) -> SelMatch {
-    let spec = &class.spec;
-    let Some(selectors) = spec.selectors.as_ref() else {
+fn class_matches(class_spec: &Value, slice_driver: &str, attrs: &Map<String, Value>) -> SelMatch {
+    let selectors = class_spec.get("selectors").and_then(Value::as_array);
+    let Some(selectors) = selectors else {
         return SelMatch::Yes;
     };
     if selectors.is_empty() {
@@ -198,11 +209,15 @@ fn class_matches(
     }
     let mut any_unevaluable = false;
     for sel in selectors {
-        let Some(cel) = sel.cel.as_ref() else {
+        let Some(expr) = sel
+            .get("cel")
+            .and_then(|c| c.get("expression"))
+            .and_then(Value::as_str)
+        else {
             any_unevaluable = true;
             continue;
         };
-        match eval_selector(&cel.expression, slice_driver, attrs) {
+        match eval_selector(expr, slice_driver, attrs) {
             SelMatch::Yes => {}
             // A definite No short-circuits the AND: the device does not match this class.
             SelMatch::No => return SelMatch::No,
@@ -218,12 +233,15 @@ fn class_matches(
 }
 
 /// Highest `pool.generation` per `(driver, pool_name)` — later slices supersede stale ones.
-fn latest_generations(slices: &[dra::ResourceSlice]) -> BTreeMap<(String, String), i64> {
+fn latest_generations(slices: &[Value]) -> BTreeMap<(String, String), i64> {
     let mut g: BTreeMap<(String, String), i64> = BTreeMap::new();
     for s in slices {
-        let spec = &s.spec;
-        let key = (spec.driver.clone(), spec.pool.name.clone());
-        let gen = spec.pool.generation;
+        let spec = s.get("spec").unwrap_or(&Value::Null);
+        let driver = spec.get("driver").and_then(Value::as_str).unwrap_or_default();
+        let pool = spec.get("pool").unwrap_or(&Value::Null);
+        let pool_name = pool.get("name").and_then(Value::as_str).unwrap_or_default();
+        let gen = pool.get("generation").and_then(Value::as_i64).unwrap_or(0);
+        let key = (driver.to_string(), pool_name.to_string());
         g.entry(key)
             .and_modify(|cur| {
                 if gen > *cur {
@@ -236,79 +254,87 @@ fn latest_generations(slices: &[dra::ResourceSlice]) -> BTreeMap<(String, String
 }
 
 /// Allocated device identities `(driver, pool, device)` from all claim statuses.
-fn allocated_identities(claims: &[dra::ResourceClaim]) -> BTreeSet<(String, String, String)> {
+fn allocated_identities(claims: &[Value]) -> BTreeSet<(String, String, String)> {
     let mut out = BTreeSet::new();
     for c in claims {
-        let Some(alloc) = c.status.as_ref().and_then(|s| s.allocation.as_ref()) else {
-            continue;
-        };
-        let Some(dev) = alloc.devices.as_ref() else {
-            continue;
-        };
-        let Some(results) = dev.results.as_ref() else {
+        let Some(results) = c
+            .get("status")
+            .and_then(|s| s.get("allocation"))
+            .and_then(|a| a.get("devices"))
+            .and_then(|d| d.get("results"))
+            .and_then(Value::as_array)
+        else {
             continue;
         };
         for r in results {
-            out.insert((r.driver.clone(), r.pool.clone(), r.device.clone()));
+            let driver = r.get("driver").and_then(Value::as_str).unwrap_or_default();
+            let pool = r.get("pool").and_then(Value::as_str).unwrap_or_default();
+            let device = r.get("device").and_then(Value::as_str).unwrap_or_default();
+            out.insert((driver.to_string(), pool.to_string(), device.to_string()));
         }
     }
     out
 }
 
-/// Compute per-node, per-class available (unallocated, matching) device counts.
-pub fn compute_availability(
-    slices: &[dra::ResourceSlice],
-    classes: &[dra::DeviceClass],
-    claims: &[dra::ResourceClaim],
-) -> DraAvailability {
+/// Compute per-node, per-class available (unallocated, matching) device counts. Each input is a full
+/// DRA object as `serde_json::Value` (ResourceSlice / DeviceClass / ResourceClaim), at whatever
+/// `resource.k8s.io` version the cluster serves — field access is shape-tolerant.
+pub fn compute_availability(slices: &[Value], classes: &[Value], claims: &[Value]) -> DraAvailability {
     let latest = latest_generations(slices);
     let allocated = allocated_identities(claims);
     let mut out = DraAvailability::default();
+    let empty = Map::new();
 
     for s in slices {
-        let spec = &s.spec;
+        let spec = s.get("spec").unwrap_or(&Value::Null);
         // MVP node scoping: only nodeName-scoped slices are attributed to a node.
-        let Some(node) = spec.node_name.as_ref().filter(|n| !n.is_empty()) else {
-            continue;
+        let node = match spec.get("nodeName").and_then(Value::as_str) {
+            Some(n) if !n.is_empty() => n,
+            _ => continue,
         };
+        let driver = spec.get("driver").and_then(Value::as_str).unwrap_or_default();
+        let pool = spec.get("pool").unwrap_or(&Value::Null);
+        let pool_name = pool.get("name").and_then(Value::as_str).unwrap_or_default();
+        let generation = pool.get("generation").and_then(Value::as_i64).unwrap_or(0);
         // Trust only the newest generation for this (driver, pool).
-        let key = (spec.driver.clone(), spec.pool.name.clone());
-        if latest.get(&key).copied() != Some(spec.pool.generation) {
+        let key = (driver.to_string(), pool_name.to_string());
+        if latest.get(&key).copied() != Some(generation) {
             continue;
         }
-        let Some(devices) = spec.devices.as_ref() else {
+        let Some(devices) = spec.get("devices").and_then(Value::as_array) else {
             continue;
         };
         for device in devices {
+            let dev_name = device.get("name").and_then(Value::as_str).unwrap_or_default();
             let id = (
-                spec.driver.clone(),
-                spec.pool.name.clone(),
-                device.name.clone(),
+                driver.to_string(),
+                pool_name.to_string(),
+                dev_name.to_string(),
             );
             if allocated.contains(&id) {
                 continue; // already allocated to a claim
             }
-            let empty = BTreeMap::new();
-            let attrs = device
-                .basic
-                .as_ref()
-                .and_then(|b| b.attributes.as_ref())
-                .unwrap_or(&empty);
+            let attrs = device_attributes(device).unwrap_or(&empty);
             let mut matched_here = 0;
             for class in classes {
-                let Some(class_name) = class.metadata.name.as_ref() else {
+                let Some(class_name) = class
+                    .get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .and_then(Value::as_str)
+                else {
                     continue;
                 };
-                match class_matches(class, &spec.driver, attrs) {
+                let class_spec = class.get("spec").unwrap_or(&Value::Null);
+                match class_matches(class_spec, driver, attrs) {
                     SelMatch::Yes => {
                         *out.by_node_class
-                            .entry((node.to_string(), class_name.clone()))
+                            .entry((node.to_string(), class_name.to_string()))
                             .or_default() += 1;
                         matched_here += 1;
                     }
                     SelMatch::No => {}
                     SelMatch::Unevaluable => {
-                        out.unevaluable_classes.insert(class_name.clone());
+                        out.unevaluable_classes.insert(class_name.to_string());
                     }
                 }
             }
@@ -327,57 +353,87 @@ pub struct ClaimDemand {
     pub caveats: Vec<String>,
 }
 
-/// Sum a claim's device demand per DeviceClass. ExactCount/absent allocationMode ⇒ count (default
-/// 1); `All`/unknown ⇒ caveat + not counted. Request selectors / device constraints ⇒ caveat
-/// (placement is optimistic — the scalar model ignores which specific devices are eligible).
-pub fn claim_demand(claim: &dra::ResourceClaim) -> ClaimDemand {
-    match claim.spec.devices.as_ref() {
+/// Sum a claim's device demand per DeviceClass from a full `ResourceClaim` JSON object.
+pub fn claim_demand(claim: &Value) -> ClaimDemand {
+    match claim.get("spec").and_then(|s| s.get("devices")) {
         Some(devices) => demand_from_device_claim(devices),
         None => ClaimDemand::default(),
     }
 }
 
-/// Same as [`claim_demand`] but over a `DeviceClaim` directly — so a pending pod's
-/// `ResourceClaimTemplate` (whose embedded `spec.devices` has no materialized claim yet) can be
-/// scored identically to a live `ResourceClaim`.
-pub fn demand_from_device_claim(devices: &dra::DeviceClaim) -> ClaimDemand {
+/// Add one request's device fields (flat/`exactly` shape) to the demand. `req` here is the object
+/// carrying `deviceClassName` / `count` / `allocationMode` / `selectors` — either the request itself
+/// (v1alpha3/v1beta1) or its `.exactly` sub-object (v1beta2/v1). Preserves the caveat discipline.
+fn add_exact_request(out: &mut ClaimDemand, name: &str, req: &Value) {
+    let mode = req
+        .get("allocationMode")
+        .and_then(Value::as_str)
+        .unwrap_or("ExactCount");
+    if mode != "ExactCount" {
+        out.caveats.push(format!(
+            "DRA: request '{name}' allocationMode={mode} not modeled"
+        ));
+        return;
+    }
+    if req
+        .get("selectors")
+        .and_then(Value::as_array)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
+        out.caveats.push(format!(
+            "DRA: request '{name}' selector not fully evaluated (placement optimistic)"
+        ));
+    }
+    let count = req.get("count").and_then(Value::as_i64).unwrap_or(1).max(0);
+    let Some(class) = req.get("deviceClassName").and_then(Value::as_str) else {
+        out.caveats.push(format!(
+            "DRA: request '{name}' has no deviceClassName; not counted"
+        ));
+        return;
+    };
+    *out.by_class.entry(class.to_string()).or_default() += count;
+}
+
+/// Sum a `DeviceClaim` JSON object's demand per DeviceClass. Shape-tolerant across versions:
+/// - `ExactCount`/absent allocationMode ⇒ `count` (default 1); `All`/unknown ⇒ caveat + not counted.
+/// - request device fields flat on the request (v1alpha3/v1beta1) OR under `.exactly` (v1beta2/v1).
+/// - `.firstAvailable[]` (v1beta2/v1 alternatives) ⇒ count only the first (worst-case) + caveat.
+/// - request selectors / device constraints ⇒ caveat (placement optimistic).
+pub fn demand_from_device_claim(devices: &Value) -> ClaimDemand {
     let mut out = ClaimDemand::default();
     if devices
-        .constraints
-        .as_ref()
+        .get("constraints")
+        .and_then(Value::as_array)
         .map(|c| !c.is_empty())
         .unwrap_or(false)
     {
         out.caveats
             .push("DRA: device constraints not modeled (placement optimistic)".to_string());
     }
-    let Some(requests) = devices.requests.as_ref() else {
+    let Some(requests) = devices.get("requests").and_then(Value::as_array) else {
         return out;
     };
     for req in requests {
-        let mode = req.allocation_mode.as_deref().unwrap_or("ExactCount");
-        if mode != "ExactCount" {
+        let name = req.get("name").and_then(Value::as_str).unwrap_or_default();
+        if let Some(exactly) = req.get("exactly") {
+            // v1beta2 / v1 basic request.
+            add_exact_request(&mut out, name, exactly);
+        } else if let Some(alts) = req.get("firstAvailable").and_then(Value::as_array) {
+            // v1beta2 / v1 alternatives: model the first (highest-priority) as worst-case demand
+            // and disclose that the rest aren't modeled — fail-safe rather than sum (overcount) or
+            // drop (undercount).
             out.caveats.push(format!(
-                "DRA: request '{}' allocationMode={} not modeled",
-                req.name, mode
+                "DRA: request '{name}' firstAvailable alternatives not fully modeled (counted first only)"
             ));
-            continue;
+            if let Some(first) = alts.first() {
+                let sub_name = first.get("name").and_then(Value::as_str).unwrap_or(name);
+                add_exact_request(&mut out, sub_name, first);
+            }
+        } else {
+            // v1alpha3 / v1beta1 flat request.
+            add_exact_request(&mut out, name, req);
         }
-        if req
-            .selectors
-            .as_ref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            out.caveats.push(format!(
-                "DRA: request '{}' selector not fully evaluated (placement optimistic)",
-                req.name
-            ));
-        }
-        let count = req.count.unwrap_or(1).max(0);
-        *out.by_class
-            .entry(req.device_class_name.clone())
-            .or_default() += count;
     }
     out
 }
@@ -385,79 +441,37 @@ pub fn demand_from_device_claim(devices: &dra::DeviceClaim) -> ClaimDemand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::resource::v1alpha3 as dra;
-    use kube::api::ObjectMeta;
+    use serde_json::json;
 
-    fn attr_str(s: &str) -> dra::DeviceAttribute {
-        dra::DeviceAttribute {
-            string: Some(s.to_string()),
-            ..Default::default()
-        }
+    // ---- v1alpha3/v1beta1 "flat + basic" shape helpers ----
+    fn slice_basic(node: &str, driver: &str, pool: &str, gen: i64, devices: Value) -> Value {
+        json!({
+            "spec": {
+                "driver": driver,
+                "nodeName": node,
+                "pool": {"name": pool, "generation": gen, "resourceSliceCount": 1},
+                "devices": devices,
+            }
+        })
     }
-
-    fn device(name: &str, attrs: &[(&str, dra::DeviceAttribute)]) -> dra::Device {
-        dra::Device {
-            name: name.to_string(),
-            basic: Some(dra::BasicDevice {
-                attributes: Some(
-                    attrs
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
-                        .collect(),
-                ),
-                ..Default::default()
-            }),
-        }
+    fn device_basic(name: &str, attrs: Value) -> Value {
+        json!({"name": name, "basic": {"attributes": attrs}})
     }
-
-    fn slice(
-        node: &str,
-        driver: &str,
-        pool: &str,
-        gen: i64,
-        devices: Vec<dra::Device>,
-    ) -> dra::ResourceSlice {
-        dra::ResourceSlice {
-            spec: dra::ResourceSliceSpec {
-                driver: driver.to_string(),
-                node_name: Some(node.to_string()),
-                pool: dra::ResourcePool {
-                    name: pool.to_string(),
-                    generation: gen,
-                    resource_slice_count: 1,
-                },
-                devices: Some(devices),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+    // ---- v1beta2/v1 "nested + direct attributes" shape helpers ----
+    fn device_v1(name: &str, attrs: Value) -> Value {
+        json!({"name": name, "attributes": attrs})
     }
-
-    fn class(name: &str, exprs: &[&str]) -> dra::DeviceClass {
-        dra::DeviceClass {
-            metadata: ObjectMeta {
-                name: Some(name.to_string()),
-                ..Default::default()
-            },
-            spec: dra::DeviceClassSpec {
-                selectors: Some(
-                    exprs
-                        .iter()
-                        .map(|e| dra::DeviceSelector {
-                            cel: Some(dra::CELDeviceSelector {
-                                expression: e.to_string(),
-                            }),
-                        })
-                        .collect(),
-                ),
-                ..Default::default()
-            },
-        }
+    fn class(name: &str, exprs: &[&str]) -> Value {
+        let selectors: Vec<Value> = exprs
+            .iter()
+            .map(|e| json!({"cel": {"expression": e}}))
+            .collect();
+        json!({"metadata": {"name": name}, "spec": {"selectors": selectors}})
     }
 
     #[test]
     fn selector_driver_equality() {
-        let a = BTreeMap::new();
+        let a = Map::new();
         assert_eq!(
             eval_selector(r#"device.driver == "gpu.nvidia.com""#, "gpu.nvidia.com", &a),
             SelMatch::Yes
@@ -470,121 +484,108 @@ mod tests {
 
     #[test]
     fn selector_attribute_equality_grouped() {
-        let mut a = BTreeMap::new();
-        a.insert("gpu.nvidia.com/model".to_string(), attr_str("A100"));
+        let a = json!({"gpu.nvidia.com/model": {"string": "A100"}})
+            .as_object()
+            .unwrap()
+            .clone();
         assert_eq!(
-            eval_selector(
-                r#"device.attributes["gpu.nvidia.com"].model == "A100""#,
-                "d",
-                &a
-            ),
+            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "A100""#, "d", &a),
             SelMatch::Yes
         );
         assert_eq!(
-            eval_selector(
-                r#"device.attributes["gpu.nvidia.com"].model == "H100""#,
-                "d",
-                &a
-            ),
+            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "H100""#, "d", &a),
             SelMatch::No
         );
         // absent attribute ⇒ predicate false ⇒ No
         assert_eq!(
-            eval_selector(
-                r#"device.attributes["gpu.nvidia.com"].vendor == "x""#,
-                "d",
-                &a
-            ),
+            eval_selector(r#"device.attributes["gpu.nvidia.com"].vendor == "x""#, "d", &a),
             SelMatch::No
         );
     }
 
     #[test]
     fn selector_unsupported_is_unevaluable() {
-        let a = BTreeMap::new();
+        let a = Map::new();
         for e in [
             r#"device.attributes["x"].count > 5"#,
             r#"device.driver == "a" && device.attributes["x"].y == "z""#,
             r#"device.attributes["x"].y in ["a","b"]"#,
             r#"has(device.attributes["x"].y)"#,
         ] {
-            assert_eq!(
-                eval_selector(e, "d", &a),
-                SelMatch::Unevaluable,
-                "expr: {e}"
-            );
+            assert_eq!(eval_selector(e, "d", &a), SelMatch::Unevaluable, "expr: {e}");
         }
     }
 
     #[test]
-    fn availability_counts_and_subtracts_allocation() {
-        let slices = vec![slice(
+    fn availability_counts_and_subtracts_allocation_v1alpha3_shape() {
+        let slices = vec![slice_basic(
             "n1",
             "gpu.nvidia.com",
             "p",
             1,
-            vec![
-                device("gpu0", &[("gpu.nvidia.com/model", attr_str("A100"))]),
-                device("gpu1", &[("gpu.nvidia.com/model", attr_str("A100"))]),
-            ],
+            json!([
+                device_basic("gpu0", json!({"gpu.nvidia.com/model": {"string": "A100"}})),
+                device_basic("gpu1", json!({"gpu.nvidia.com/model": {"string": "A100"}})),
+            ]),
         )];
         let classes = vec![class(
             "a100",
             &[r#"device.attributes["gpu.nvidia.com"].model == "A100""#],
         )];
         // gpu0 already allocated to a claim.
-        let claims = vec![dra::ResourceClaim {
-            status: Some(dra::ResourceClaimStatus {
-                allocation: Some(dra::AllocationResult {
-                    devices: Some(dra::DeviceAllocationResult {
-                        results: Some(vec![dra::DeviceRequestAllocationResult {
-                            device: "gpu0".into(),
-                            driver: "gpu.nvidia.com".into(),
-                            pool: "p".into(),
-                            request: "req".into(),
-                            ..Default::default()
-                        }]),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }];
+        let claims = vec![json!({
+            "status": {"allocation": {"devices": {"results": [
+                {"device": "gpu0", "driver": "gpu.nvidia.com", "pool": "p", "request": "req"}
+            ]}}}
+        })];
         let avail = compute_availability(&slices, &classes, &claims);
-        assert_eq!(
-            avail.by_node_class.get(&("n1".into(), "a100".into())),
-            Some(&1)
-        );
+        assert_eq!(avail.by_node_class.get(&("n1".into(), "a100".into())), Some(&1));
         assert!(!avail.overlapping_classes);
         assert!(avail.unevaluable_classes.is_empty());
     }
 
     #[test]
+    fn availability_v1_shape_direct_attributes_matches_v1alpha3() {
+        // Same devices, but expressed in the v1 shape (direct .attributes, no .basic wrapper).
+        let slices = vec![slice_basic(
+            "n1",
+            "gpu.nvidia.com",
+            "p",
+            1,
+            json!([
+                device_v1("gpu0", json!({"gpu.nvidia.com/model": {"string": "A100"}})),
+                device_v1("gpu1", json!({"gpu.nvidia.com/model": {"string": "A100"}})),
+            ]),
+        )];
+        let classes = vec![class(
+            "a100",
+            &[r#"device.attributes["gpu.nvidia.com"].model == "A100""#],
+        )];
+        let avail = compute_availability(&slices, &classes, &[]);
+        // both devices counted (v1 attribute shape read correctly)
+        assert_eq!(avail.by_node_class.get(&("n1".into(), "a100".into())), Some(&2));
+    }
+
+    #[test]
     fn stale_generation_ignored() {
         let slices = vec![
-            slice("n1", "d", "p", 1, vec![device("g0", &[])]),
-            slice(
+            slice_basic("n1", "d", "p", 1, json!([device_basic("g0", json!({}))])),
+            slice_basic(
                 "n1",
                 "d",
                 "p",
                 2,
-                vec![device("g0", &[]), device("g1", &[])],
+                json!([device_basic("g0", json!({})), device_basic("g1", json!({}))]),
             ),
         ];
         let classes = vec![class("all", &[])]; // empty selectors ⇒ matches all
         let avail = compute_availability(&slices, &classes, &[]);
-        // only gen 2 counted ⇒ 2 devices
-        assert_eq!(
-            avail.by_node_class.get(&("n1".into(), "all".into())),
-            Some(&2)
-        );
+        assert_eq!(avail.by_node_class.get(&("n1".into(), "all".into())), Some(&2));
     }
 
     #[test]
     fn overlap_flagged_when_device_matches_two_classes() {
-        let slices = vec![slice("n1", "d", "p", 1, vec![device("g0", &[])])];
+        let slices = vec![slice_basic("n1", "d", "p", 1, json!([device_basic("g0", json!({}))]))];
         let classes = vec![class("c1", &[]), class("c2", &[])]; // both empty ⇒ both match g0
         let avail = compute_availability(&slices, &classes, &[]);
         assert!(avail.overlapping_classes);
@@ -592,16 +593,7 @@ mod tests {
 
     #[test]
     fn definite_no_wins_over_unevaluable_selector() {
-        // A class whose first selector is a definite No (driver mismatch) plus a second unevaluable
-        // selector must resolve to No (device excluded) — NOT unevaluable — so it is neither counted
-        // nor flagged unevaluable.
-        let slices = vec![slice(
-            "n1",
-            "gpu.other.com",
-            "p",
-            1,
-            vec![device("g0", &[])],
-        )];
+        let slices = vec![slice_basic("n1", "gpu.other.com", "p", 1, json!([device_basic("g0", json!({}))]))];
         let classes = vec![class(
             "c",
             &[
@@ -619,70 +611,75 @@ mod tests {
 
     #[test]
     fn unevaluable_class_not_counted() {
-        let slices = vec![slice("n1", "d", "p", 1, vec![device("g0", &[])])];
+        let slices = vec![slice_basic("n1", "d", "p", 1, json!([device_basic("g0", json!({}))]))];
         let classes = vec![class("weird", &[r#"device.attributes["x"].y > 3"#])];
         let avail = compute_availability(&slices, &classes, &[]);
         assert!(avail.unevaluable_classes.contains("weird"));
         assert!(avail.by_node_class.is_empty());
     }
 
-    fn claim_with(reqs: Vec<dra::DeviceRequest>) -> dra::ResourceClaim {
-        dra::ResourceClaim {
-            spec: dra::ResourceClaimSpec {
-                devices: Some(dra::DeviceClaim {
-                    requests: Some(reqs),
-                    ..Default::default()
-                }),
-            },
-            ..Default::default()
-        }
+    fn claim_with_requests(requests: Value) -> Value {
+        json!({"spec": {"devices": {"requests": requests}}})
     }
 
     #[test]
-    fn claim_demand_sums_exactcount() {
-        let c = claim_with(vec![
-            dra::DeviceRequest {
-                name: "r1".into(),
-                device_class_name: "a100".into(),
-                count: Some(2),
-                ..Default::default()
-            },
-            dra::DeviceRequest {
-                name: "r2".into(),
-                device_class_name: "a100".into(),
-                count: None, // default 1
-                ..Default::default()
-            },
-        ]);
+    fn claim_demand_sums_exactcount_flat() {
+        let c = claim_with_requests(json!([
+            {"name": "r1", "deviceClassName": "a100", "count": 2},
+            {"name": "r2", "deviceClassName": "a100"}, // default 1
+        ]));
         let d = claim_demand(&c);
         assert_eq!(d.by_class.get("a100"), Some(&3));
         assert!(d.caveats.is_empty());
     }
 
     #[test]
+    fn claim_demand_sums_exactcount_nested_v1() {
+        // v1 shape: fields under `exactly`.
+        let c = claim_with_requests(json!([
+            {"name": "r1", "exactly": {"deviceClassName": "a100", "count": 2}},
+            {"name": "r2", "exactly": {"deviceClassName": "a100"}},
+        ]));
+        let d = claim_demand(&c);
+        assert_eq!(d.by_class.get("a100"), Some(&3));
+        assert!(d.caveats.is_empty());
+    }
+
+    #[test]
+    fn claim_demand_first_available_counts_first_with_caveat() {
+        let c = claim_with_requests(json!([
+            {"name": "r1", "firstAvailable": [
+                {"name": "big", "deviceClassName": "a100", "count": 2},
+                {"name": "small", "deviceClassName": "t4", "count": 1},
+            ]},
+        ]));
+        let d = claim_demand(&c);
+        assert_eq!(d.by_class.get("a100"), Some(&2)); // first alternative counted
+        assert_eq!(d.by_class.get("t4"), None); // rest not modeled
+        assert!(d.caveats.iter().any(|c| c.contains("firstAvailable")));
+    }
+
+    #[test]
     fn claim_demand_caveats_all_mode_and_request_selector() {
-        let c = claim_with(vec![
-            dra::DeviceRequest {
-                name: "all".into(),
-                device_class_name: "a100".into(),
-                allocation_mode: Some("All".into()),
-                ..Default::default()
-            },
-            dra::DeviceRequest {
-                name: "sel".into(),
-                device_class_name: "a100".into(),
-                count: Some(1),
-                selectors: Some(vec![dra::DeviceSelector {
-                    cel: Some(dra::CELDeviceSelector {
-                        expression: "true".into(),
-                    }),
-                }]),
-                ..Default::default()
-            },
-        ]);
+        let c = claim_with_requests(json!([
+            {"name": "all", "deviceClassName": "a100", "allocationMode": "All"},
+            {"name": "sel", "deviceClassName": "a100", "count": 1,
+             "selectors": [{"cel": {"expression": "true"}}]},
+        ]));
         let d = claim_demand(&c);
         // "All" not counted; selector request counted (1) but caveated.
         assert_eq!(d.by_class.get("a100"), Some(&1));
         assert_eq!(d.caveats.len(), 2);
+    }
+
+    #[test]
+    fn template_devices_scored_via_demand_from_device_claim() {
+        // A ResourceClaimTemplate's embedded DeviceClaim (spec.spec.devices) scores like a claim.
+        let template = json!({"spec": {"spec": {"devices": {"requests": [
+            {"name": "r", "deviceClassName": "a100", "count": 4}
+        ]}}}});
+        let devices = template.get("spec").unwrap().get("spec").unwrap().get("devices").unwrap();
+        let d = demand_from_device_claim(devices);
+        assert_eq!(d.by_class.get("a100"), Some(&4));
     }
 }
