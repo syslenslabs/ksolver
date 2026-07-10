@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,3 +54,45 @@ jobs:
 
       - name: Run tests
         run: cargo test --features rust-cp-sat
+
+  dra-compat-smoke:
+    # Manual only (needs Docker + kind; spins up ephemeral clusters). Live-verifies version-adaptive
+    # DRA across k8s API versions — trigger from the Actions tab. Never runs on push/PR.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - "" # kind default image (recent GA -> resource.k8s.io/v1)
+          - "kindest/node:v1.31.6" # oldest end of the range -> resource.k8s.io/v1alpha3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install OR-Tools
+        run: |
+          curl -fsSL https://github.com/google/or-tools/releases/download/v${ORTOOLS_VERSION}/or-tools_amd64_debian-13_cpp_v${ORTOOLS_VERSION}.tar.gz \
+            | sudo tar xz -C /usr/local --strip-components=1
+          sudo ldconfig
+
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: DRA version-adaptive smoke test
+        run: scripts/dra-version-smoke.sh "${{ matrix.image }}"
