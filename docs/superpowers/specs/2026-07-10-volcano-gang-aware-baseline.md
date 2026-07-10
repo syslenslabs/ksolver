@@ -35,6 +35,24 @@ kind has no real GPUs, so the baseline needs fake GPU nodes. Verified on kind:
 
 Stack for the harness: `kind` + KWOK (fake GPU nodes sized to the scenario) + Volcano.
 
+### Capture tool (verified end-to-end, 2026-07-10)
+
+`scripts/volcano-baseline-capture.sh` implements the "capture" half: stands up the stack, runs a gang
+config through Volcano, polls to steady state, and emits placement metrics as JSON
+(`{volcano_useful_gpu, placed, replicas, min_available, gang_complete}`). Verified both cases:
+- fitting (2×2=4 GPU on a 4-GPU node) → `useful=4, placed=2, gang_complete=true`;
+- over-capacity (3×2=6 > 4) → `useful=0, placed=0, gang_complete=false` (all-or-nothing).
+
+Key implementation finding: **count placement by `spec.nodeName`, not pod phase** — KWOK's
+`stage-fast` fast-forwards scheduled pods to `Succeeded`, so a "Running" count reads 0 even for a
+placed gang (this was a real bug caught by running it; a blocked gang has no `nodeName`). Also set
+`queue: default` on the vcjob and retry the apply until the admission webhook is ready.
+
+Remaining for the full harness: translate the scenario LIBRARY's gangs (Rust
+`jobs_to_volcano_baseline`), size KWOK nodes to each scenario's topology, run the capture per
+scenario, and feed `volcano_useful_gpu` into `classify_win`'s `gang_aware` arg (the honesty layer
+already consumes it).
+
 ## Integration plan (the large part)
 
 The existing KSS baseline path (`run_kube_baseline` → `run_kube_simulator`) POSTs scenarios to the
