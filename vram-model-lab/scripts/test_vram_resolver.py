@@ -122,6 +122,18 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertEqual(r["source"], "historical-fingerprint")
         self.assertAlmostEqual(r["vram_mib"], 9000.0, places=1)
 
+    def test_explicit_annotation_beats_fingerprint_history(self):
+        # Cascade authority invariant: an operator's explicit annotation (tier 1) must win even when
+        # a strong fingerprint history (tier 4) also matches — the operator override is final. Guards
+        # against a future refactor reordering the cascade.
+        pod = gpu_pod(annotations={"ksolver.dev/predicted-peak-vram-gib": "40"})
+        key = vr.fingerprint_key(vr.pod_fingerprint(pod))
+        obs = {key: [9000.0, 9000.0, 9000.0]}  # would give ~9 GiB via tier 4 if it won
+        r = vr.resolve(pod, observations=obs)
+        self.assertEqual(r["source"], "explicit-annotation")
+        self.assertEqual(r["confidence"], "authoritative")
+        self.assertAlmostEqual(r["vram_mib"], 40 * 1024, places=1)
+
     def test_config_docs_extract_hints_deepspeed_and_hf(self):
         deepspeed = {"train_micro_batch_size_per_gpu": 8, "fp16": {"enabled": True}}
         hf = {"per_device_train_batch_size": 16, "max_seq_length": 512, "bf16": True}
