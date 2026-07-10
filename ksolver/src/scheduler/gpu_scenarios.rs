@@ -1267,6 +1267,10 @@ pub struct ScenarioResult {
     pub significantly_better: bool,
     /// Human-readable efficiency deltas vs the best kube baseline (cost %, util, admitted GPU).
     pub efficiency_headline: String,
+    /// Phase 3 win classification (useful-GPU) vs the best of the two kube baselines. Honest by
+    /// construction: `beats-gang-aware` is never emitted until a gang-aware baseline is wired, so
+    /// today a real win reads `beats-kube-only` and a non-win reads `not-proven`.
+    pub win_classification: WinClassification,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1389,6 +1393,13 @@ pub async fn run_benchmark_with_options(
         let base = best_kube(&kube, &kube_binpack);
         let (efficiency_score, significantly_better, efficiency_headline) =
             efficiency(&base.metrics, &ksolver.metrics);
+        // Must beat BOTH kube baselines (spread + binpack) to count as a win; no gang-aware
+        // baseline exists yet, so the strongest honest claim is beats-kube-only.
+        let win_classification = classify_win(
+            ksolver.metrics.useful_gpu,
+            kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
+            None,
+        );
         results.push(ScenarioResult {
             name: scenario.name,
             description: scenario.description,
@@ -1403,6 +1414,7 @@ pub async fn run_benchmark_with_options(
             efficiency_score,
             significantly_better,
             efficiency_headline,
+            win_classification,
         });
     }
     // Rank by efficiency (GPU utilization + cost win) so the scenarios where ksolver most clearly
@@ -9418,9 +9430,88 @@ fn headline(kube: &PlacementMetrics, ksolver: &PlacementMetrics) -> String {
     )
 }
 
+/// Phase 3 win classification for a policy scenario, judged against the baselines that ACTUALLY
+/// exist. The roadmap's thesis is that gang scheduling is table stakes (Volcano/Kueue/YuniKorn have
+/// it), so a win that only beats a gang-blind kube baseline is NOT a differentiator on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WinClassification {
+    /// ksolver strictly beats a gang-aware baseline (the real differentiator claim).
+    BeatsGangAware,
+    /// ksolver strictly beats the kube spread/binpack baseline; no gang-aware baseline available to
+    /// prove more. Honest but not yet a differentiator claim.
+    BeatsKubeOnly,
+    /// The win does not hold against the best available baseline (or is only table-stakes vs a
+    /// gang-aware baseline).
+    NotProven,
+}
+
+impl WinClassification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WinClassification::BeatsGangAware => "beats-gang-aware",
+            WinClassification::BeatsKubeOnly => "beats-kube-only",
+            WinClassification::NotProven => "not-proven",
+        }
+    }
+}
+
+/// Classify a scenario win HONESTLY. `higher_is_better` scores: ksolver vs the kube-only
+/// (spread/binpack) baseline, and an optional gang-aware baseline. `gang_aware` is `None` until a
+/// local gang-aware or real Volcano baseline is wired — so `BeatsGangAware` can only ever be
+/// returned when such a baseline exists AND ksolver strictly beats it. Without it, the strongest
+/// honest claim is `BeatsKubeOnly`. A win that beats kube but not the gang-aware baseline is
+/// table stakes -> `NotProven` (as a differentiator).
+pub fn classify_win(ksolver: i64, kube_only: i64, gang_aware: Option<i64>) -> WinClassification {
+    if ksolver <= kube_only {
+        return WinClassification::NotProven;
+    }
+    match gang_aware {
+        Some(g) if ksolver > g => WinClassification::BeatsGangAware,
+        Some(_) => WinClassification::NotProven,
+        None => WinClassification::BeatsKubeOnly,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn win_classification_is_honest_about_gang_aware_baseline() {
+        // No gang-aware baseline exists yet: the strongest honest claim is beats-kube-only.
+        assert_eq!(
+            classify_win(10, 6, None),
+            WinClassification::BeatsKubeOnly
+        );
+        // No win over kube at all -> not-proven regardless of gang-aware.
+        assert_eq!(classify_win(6, 6, None), WinClassification::NotProven);
+        assert_eq!(classify_win(5, 6, Some(3)), WinClassification::NotProven);
+        // Beats kube AND a gang-aware baseline -> the real differentiator claim.
+        assert_eq!(
+            classify_win(10, 6, Some(8)),
+            WinClassification::BeatsGangAware
+        );
+        // Beats kube but only ties/loses to gang-aware -> table stakes -> not-proven.
+        assert_eq!(classify_win(10, 6, Some(10)), WinClassification::NotProven);
+        assert_eq!(classify_win(10, 6, Some(12)), WinClassification::NotProven);
+    }
+
+    #[test]
+    fn win_classification_strings_match_roadmap_criterion() {
+        assert_eq!(WinClassification::BeatsGangAware.as_str(), "beats-gang-aware");
+        assert_eq!(WinClassification::BeatsKubeOnly.as_str(), "beats-kube-only");
+        assert_eq!(WinClassification::NotProven.as_str(), "not-proven");
+        // The report JSON must carry the same kebab strings, not the Rust variant names.
+        assert_eq!(
+            serde_json::to_string(&WinClassification::BeatsKubeOnly).unwrap(),
+            "\"beats-kube-only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WinClassification::NotProven).unwrap(),
+            "\"not-proven\""
+        );
+    }
 
     fn empty_engine(engine: &str) -> EngineResult {
         EngineResult {
@@ -9744,6 +9835,7 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
             },
             ScenarioResult {
                 name: "equal".to_string(),
@@ -9787,6 +9879,7 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
             },
         ];
 
@@ -9866,6 +9959,7 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
             }
         };
         let scenarios = vec![
@@ -9932,6 +10026,7 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
             }
         };
         let scenarios = vec![
@@ -10068,6 +10163,7 @@ mod tests {
             efficiency_score: 0,
             significantly_better: false,
             efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
         };
 
         let summary = summarize_roi(&[scenario]);
@@ -10371,6 +10467,7 @@ mod tests {
             efficiency_score: score,
             significantly_better: score > 0,
             efficiency_headline: format!("scenario {name} is better"),
+            win_classification: WinClassification::NotProven,
         };
         let scenarios = vec![scenario("top", 100), scenario("second", 50)];
         let hero = HeroDemoSummary {
@@ -11407,6 +11504,7 @@ mod tests {
             efficiency_score: 0,
             significantly_better: false,
             efficiency_headline: String::new(),
+            win_classification: WinClassification::NotProven,
         };
         let tenant_budget = TenantBudgetProof {
             name: "tenant-budget-hard-admission-cap".to_string(),
