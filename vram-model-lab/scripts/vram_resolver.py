@@ -29,6 +29,9 @@ DEFAULT_GPU_TOTAL_MIB = 24563  # a nominal 24 GiB card; only affects the fits/oo
 
 EXPLICIT_BYTES = "ksolver.dev/predicted-peak-vram-bytes"
 EXPLICIT_GIB = "ksolver.dev/predicted-peak-vram-gib"
+# Inline training config (DeepSpeed / HF TrainingArguments / accelerate JSON) — a zero-infra tier-3
+# path, so the config tier fires without a k8s ConfigMap fetch. Merges with any passed config_docs.
+INLINE_CONFIG_ANNOTATION = "ksolver.ai/vram-config"
 MIB = 1024.0 * 1024.0
 
 # A model *prediction* above the largest plausible single-GPU VRAM (or <=0) is almost certainly a
@@ -293,11 +296,19 @@ def resolve(
     row = _row_from_pod(pod)
     sniff_hints = hints_from_row(row, ann, ann)
 
-    # Tier 3 — referenced training config (deepspeed/accelerate/HF) fetched via the k8s API,
-    # merged over the sniffed hints (config fills gaps CLI/env can't).
-    if config_docs:
+    # Tier 3 — referenced training config (deepspeed/accelerate/HF), merged over the sniffed hints
+    # (config fills gaps CLI/env can't). Sources: config_docs passed in (e.g. fetched ConfigMaps)
+    # plus an inline `ksolver.ai/vram-config` annotation (zero-infra path).
+    effective_docs = list(config_docs) if config_docs else []
+    inline = ann.get(INLINE_CONFIG_ANNOTATION)
+    if inline:
+        try:
+            effective_docs.append(json.loads(inline))
+        except (ValueError, TypeError):
+            pass
+    if effective_docs:
         combined = dict(sniff_hints)
-        combined.update({k: v for k, v in hints_from_config_docs(config_docs).items() if v not in (None, "")})
+        combined.update({k: v for k, v in hints_from_config_docs(effective_docs).items() if v not in (None, "")})
         job, _missing = row_from_hints(combined)
         if job:
             return _model_result(predict(job, artifact, gpu_total_mib), "config+model", fingerprint)

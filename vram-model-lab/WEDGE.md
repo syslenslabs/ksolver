@@ -17,7 +17,8 @@ Design spec: `docs/superpowers/specs/2026-07-08-vram-dra-wedge-design.md`.
 - **Resolver** (`vram_resolver.py`) — confidence-ranked cascade, highest available tier wins:
   1. **explicit** annotation `ksolver.dev/predicted-peak-vram-{gib,bytes}` → authoritative
   4. **historical fingerprint** (image + command/env hash) → observed p95 peak → high *(measured beats sniffed)*
-  3. **referenced config** (DeepSpeed/HF/accelerate, read via API) → model → high
+  3. **referenced config** (DeepSpeed/HF/accelerate — via passed `config_docs` or an inline
+     `ksolver.ai/vram-config` JSON annotation) → model → high
   2. **static sniff** (annotations/env/CLI flags) → model → high
   - else → **advisory** only (never a hard constraint on a guess)
 - **Delivery** (`vram_admission.py`) — turns a resolution into a JSONPatch: annotate the estimate;

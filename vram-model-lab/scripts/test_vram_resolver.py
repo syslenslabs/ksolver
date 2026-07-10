@@ -173,6 +173,30 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertEqual(r["source"], "historical-fingerprint")
         self.assertEqual(r["observation_samples"], 3)
 
+    def test_inline_config_annotation_fires_tier3(self):
+        import json as _json
+        # family/hidden/layers via annotations; batch/seq ONLY in an inline deepspeed config.
+        pod = gpu_pod(
+            annotations={
+                "ksolver.ai/vram-family": "transformer",
+                "ksolver.ai/vram-hidden-size": "1024",
+                "ksolver.ai/vram-layers": "12",
+                "ksolver.ai/vram-config": _json.dumps(
+                    {"train_micro_batch_size_per_gpu": 8, "max_seq_length": 512, "fp16": {"enabled": True}}
+                ),
+            }
+        )
+        # sanity: without the inline config it would be unknown
+        r = vr.resolve(pod)
+        self.assertEqual(r["source"], "config+model")
+        self.assertEqual(r["confidence"], "high")
+        self.assertGreater(r["vram_mib"], 0.0)
+
+    def test_malformed_inline_config_is_ignored(self):
+        pod = gpu_pod(annotations={"ksolver.ai/vram-config": "{not json"})
+        r = vr.resolve(pod)  # must not crash; falls through to unknown
+        self.assertEqual(r["source"], "unknown")
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]
