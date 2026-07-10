@@ -1228,6 +1228,11 @@
       box.appendChild(body);
       (liab.oom_risk || []).forEach(function (o) { box.appendChild(el("div", "rec", o.detail)); });
       (liab.split_gangs || []).forEach(function (g) { box.appendChild(el("div", "rec", g.detail)); });
+      // Honest competitive tiering: don't present a split-gang win as beating a gang-aware scheduler.
+      var beatsMost = liab.beats_most_schedulers || 0, beatsKubeOnly = liab.beats_default_kube_only || 0;
+      if (beatsMost || beatsKubeOnly) {
+        box.appendChild(el("div", "rec", "Competitive strength: " + beatsMost + " beat ~any scheduler (incl. gang-aware), " + beatsKubeOnly + " beat default kube only."));
+      }
       if (underAdmits) {
         var note = el("div", "rec");
         var moreTxt = gpuDelta < 0 ? ((-gpuDelta) + " more GPU") : (podDelta + " more pod" + (podDelta === 1 ? "" : "s"));
