@@ -1806,13 +1806,14 @@ pub fn print_table(report: &BenchmarkReport) {
         println!();
     }
     println!(
-        "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [win/provenance] headline",
+        "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [win/provenance/proof-type] headline",
         "#", "scenario", "score", "kube useful", "ksolver useful", "kube bad", "ks bad", "K regret"
     );
     for (i, r) in report.scenarios.iter().enumerate() {
         let prov = proof_provenance(&r.kube.source, &r.kube_binpack.source).as_str();
+        let character = r.proof_characters.join("+");
         println!(
-            "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [{}/{}] {}",
+            "{:<3} {:<28} {:>7} {:>13} {:>13} {:>11} {:>11} {:>10}  [{}/{}/{}] {}",
             i + 1,
             r.name,
             r.benefit_score,
@@ -1823,6 +1824,7 @@ pub fn print_table(report: &BenchmarkReport) {
             r.regret.useful_gpu_regret,
             r.win_classification.as_str(),
             prov,
+            character,
             r.headline
         );
     }
