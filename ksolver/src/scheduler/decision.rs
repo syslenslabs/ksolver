@@ -224,11 +224,13 @@ pub fn build_decision_trace(
     let mut caveats_for: HashMap<String, Vec<String>> = HashMap::new();
     let mut binding_group_for: HashMap<String, String> = HashMap::new();
     let mut queue_score_by_scope: HashMap<String, i64> = HashMap::new();
+    let mut fair_share_deficit_by_scope: HashMap<String, i64> = HashMap::new();
     let mut admitted_priority_by_scope: HashMap<String, i64> = HashMap::new();
     let mut admitted_business_value_by_scope: HashMap<String, i64> = HashMap::new();
     let mut admitted_queue_score_by_scope: HashMap<String, i64> = HashMap::new();
     let mut admitted_queue_wait_by_scope: HashMap<String, i64> = HashMap::new();
     let mut admitted_latest_start_by_scope: HashMap<String, i64> = HashMap::new();
+    let mut admitted_fair_share_deficit_by_scope: HashMap<String, i64> = HashMap::new();
     let quota_notes_by_workload = quota_exhausted_notes(input, solution);
     let budget_notes_by_workload = budget_exhausted_notes(input, solution);
     let now_unix = Utc::now().timestamp();
@@ -255,6 +257,8 @@ pub fn build_decision_trace(
         members.sort_by(|a, b| a.name.cmp(&b.name));
         for m in &members {
             queue_score_by_scope.insert(pod_key(&m.namespace, &m.name), workload.queue_score);
+            fair_share_deficit_by_scope
+                .insert(pod_key(&m.namespace, &m.name), workload.fair_share_deficit);
         }
 
         if admitted {
@@ -311,6 +315,8 @@ pub fn build_decision_trace(
                         .insert(pod_key(&m.namespace, &m.name), workload.queue_score);
                     admitted_queue_wait_by_scope
                         .insert(pod_key(&m.namespace, &m.name), workload.queue_wait_seconds);
+                    admitted_fair_share_deficit_by_scope
+                        .insert(pod_key(&m.namespace, &m.name), workload.fair_share_deficit);
                     if workload.deadline_unix_seconds > 0 {
                         admitted_latest_start_by_scope.insert(
                             pod_key(&m.namespace, &m.name),
@@ -374,6 +380,11 @@ pub fn build_decision_trace(
         .copied()
         .max()
         .unwrap_or(0);
+    let max_admitted_fair_share_deficit = admitted_fair_share_deficit_by_scope
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0);
     let earliest_admitted_latest_start = admitted_latest_start_by_scope.values().copied().min();
     let mut decisions = Vec::with_capacity(pending.len());
     for p in pending {
@@ -425,6 +436,13 @@ pub fn build_decision_trace(
         } else if solve_ok && p.queue_wait_seconds < max_admitted_queue_wait_seconds {
             caveats.push(format!(
                 "deferred below admitted longer-waiting work (max admitted queue wait {max_admitted_queue_wait_seconds}s)"
+            ));
+        } else if solve_ok
+            && fair_share_deficit_by_scope.get(&scope).copied().unwrap_or(0)
+                < max_admitted_fair_share_deficit
+        {
+            caveats.push(format!(
+                "deferred below admitted more under-fair-share work (max admitted fair-share deficit {max_admitted_fair_share_deficit})"
             ));
         } else if solve_ok && p.deadline_unix_seconds > 0 {
             if let Some(earliest_latest_start) = earliest_admitted_latest_start {
@@ -1235,6 +1253,76 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("deferred below admitted higher-business-value work")),
             "low-business-value unplaced pod should explain business-value deferral"
+        );
+    }
+
+    #[test]
+    fn lower_fair_share_deficit_unplaced_pod_gets_deferred_caveat() {
+        // Equal on priority/business-value/queue/queue-wait, differing ONLY in fair-share deficit:
+        // the deferred pod must be told it lost to more under-fair-share (under-served tenant) work.
+        let low = OptimizationWorkload {
+            id: "over-share/low".into(),
+            namespace: "over-share".into(),
+            name: "low".into(),
+            group_size: 1,
+            members: vec![member("over-share", "low")],
+            priority: 5,
+            business_value: 5,
+            fair_share_deficit: 1,
+            feasible_nodes: vec!["n1".into()],
+            ..Default::default()
+        };
+        let high = OptimizationWorkload {
+            id: "under-share/high".into(),
+            namespace: "under-share".into(),
+            name: "high".into(),
+            group_size: 1,
+            members: vec![member("under-share", "high")],
+            priority: 5,
+            business_value: 5,
+            fair_share_deficit: 20,
+            feasible_nodes: vec!["n1".into()],
+            ..Default::default()
+        };
+        let input = OptimizationInput {
+            workloads: vec![low, high],
+            ..Default::default()
+        };
+        let mut counts = HashMap::new();
+        counts.insert("n1".to_string(), 1);
+        let mut assignment_counts = HashMap::new();
+        assignment_counts.insert("under-share/high".to_string(), counts);
+        let solution = OptimizationSolution {
+            assignment_counts,
+            ..Default::default()
+        };
+        let mut low_pending = ppod("over-share", "low");
+        low_pending.priority = 5;
+        low_pending.business_value = 5;
+        let mut high_pending = ppod("under-share", "high");
+        high_pending.priority = 5;
+        high_pending.business_value = 5;
+        let t = build_decision_trace(
+            1,
+            &[low_pending, high_pending],
+            &input,
+            &solution,
+            "OPTIMAL",
+            true,
+            5,
+            5,
+            1,
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        let low_decision = t.decisions.iter().find(|d| d.name == "low").unwrap();
+        assert!(
+            low_decision
+                .caveats
+                .iter()
+                .any(|c| c.contains("deferred below admitted more under-fair-share work")),
+            "over-share unplaced pod should explain fair-share deferral, got: {:?}",
+            low_decision.caveats
         );
     }
 
