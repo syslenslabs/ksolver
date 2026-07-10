@@ -250,6 +250,19 @@ class ResolveCascadeTest(unittest.TestCase):
         unknown = vr.resolve(gpu_pod(args=["--epochs", "3"]))
         self.assertIn("no VRAM signal", unknown["explanation"])
 
+    def test_guard_boundary_exact_threshold_vs_over(self):
+        fp = {"image": "i", "command_hash": "h"}
+        job = {"family": "transformer", "hidden_size": 1024, "layers": 12, "batch_size": 8, "seq_len": 512, "precision": "fp16"}
+        at = {"conservative_estimate_mib": vr.MAX_PLAUSIBLE_SINGLE_GPU_MIB, "point_estimate_mib": 1.0, "selected_model": "m", "input": job}
+        r_at = vr._model_result(at, "static-sniff+model", fp, promote=True)
+        self.assertEqual(r_at["confidence"], "high")  # exactly at threshold is NOT guarded
+        self.assertNotIn("guard", r_at)
+        over = dict(at, conservative_estimate_mib=vr.MAX_PLAUSIBLE_SINGLE_GPU_MIB + 1)
+        r_over = vr._model_result(over, "static-sniff+model", fp, promote=True)
+        self.assertEqual(r_over["confidence"], "advisory")  # just over -> guarded even when promoted
+        self.assertIn("guard", r_over)
+        self.assertFalse(r_over["hard"])
+
     def test_fingerprint_is_stable_and_present(self):
         pod = gpu_pod(args=["--batch-size", "8"])
         a = vr.resolve(pod)["fingerprint"]
