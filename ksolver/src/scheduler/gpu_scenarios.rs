@@ -9591,6 +9591,82 @@ mod tests {
         );
     }
 
+    // Phase 3 acceptance criterion: "weight-zero tests prove metadata is inert by default." With a
+    // dimension's weight at zero, its per-job metadata must not change the outcome at all — running
+    // with the metadata present must produce identical metrics AND placements to running with it
+    // stripped. Mirrors priority_metadata_is_inert_when_priority_weight_is_zero for the other opt-in
+    // metadata dimensions (business value, queue, queue-wait, fair share).
+    #[cfg(feature = "rust-cp-sat")]
+    fn assert_metadata_inert(
+        scenario: &str,
+        zero_weight: impl Fn(&mut ScenarioSpec),
+        strip: impl Fn(&mut JobSpec),
+    ) {
+        let base = deterministic_scenarios()
+            .into_iter()
+            .find(|s| s.name == scenario)
+            .unwrap_or_else(|| panic!("scenario {scenario} should exist"));
+        let mut weight_zero = base.clone();
+        zero_weight(&mut weight_zero);
+        let mut stripped = weight_zero.clone();
+        for job in &mut stripped.jobs {
+            strip(job);
+        }
+        let with_meta = run_ksolver(&weight_zero).expect("solve with metadata");
+        let without_meta = run_ksolver(&stripped).expect("solve stripped");
+        assert_eq!(
+            with_meta.metrics, without_meta.metrics,
+            "{scenario}: metrics differ when weight is zero (metadata not inert)"
+        );
+        assert_eq!(
+            with_meta.placements, without_meta.placements,
+            "{scenario}: placements differ when weight is zero (metadata not inert)"
+        );
+    }
+
+    #[cfg(feature = "rust-cp-sat")]
+    #[test]
+    fn business_value_metadata_is_inert_when_weight_is_zero() {
+        assert_metadata_inert(
+            "business-value-over-fifo",
+            |s| s.ksolver_business_value_weight = 0,
+            |j| j.business_value = 0,
+        );
+    }
+
+    #[cfg(feature = "rust-cp-sat")]
+    #[test]
+    fn queue_metadata_is_inert_when_weight_is_zero() {
+        assert_metadata_inert(
+            "queue-urgent-over-fifo",
+            |s| s.ksolver_queue_weight = 0,
+            |j| {
+                j.queue.clear();
+                j.queue_score = 0;
+            },
+        );
+    }
+
+    #[cfg(feature = "rust-cp-sat")]
+    #[test]
+    fn queue_wait_metadata_is_inert_when_weight_is_zero() {
+        assert_metadata_inert(
+            "queue-wait-over-fifo",
+            |s| s.ksolver_queue_wait_weight = 0,
+            |j| j.queue_wait_seconds = 0,
+        );
+    }
+
+    #[cfg(feature = "rust-cp-sat")]
+    #[test]
+    fn fair_share_metadata_is_inert_when_weight_is_zero() {
+        assert_metadata_inert(
+            "fair-share-over-fifo",
+            |s| s.ksolver_fair_share_weight = 0,
+            |j| j.fair_share_deficit = 0,
+        );
+    }
+
     #[cfg(feature = "rust-cp-sat")]
     #[test]
     fn priority_weight_changes_scenario_value_for_urgent_gang() {
