@@ -88,8 +88,11 @@ Remaining / not done:
   `resource.k8s.io/v1alpha3`, because `k8s-openapi` is pinned to feature `v1_32` (Kubernetes 1.32),
   under which the v1 DRA types don't exist. Consequence: on a cluster serving only one of the two
   versions, only one side engages (the collector already emits a warning and skips DRA augmentation
-  when the v1alpha3 API is absent, so it fails safe — no silent over-admit). To unify on GA, bump
-  `k8s-openapi` to feature `v1_34`+ and port `dra.rs` from v1alpha3 to v1 (flat request fields move
-  under `exactly` / `firstAvailable`). That is a repo-wide version-target change, so it needs an
-  explicit call, not an autonomous edit.
+  when the v1alpha3 API is absent, so it fails safe — no silent over-admit). Unifying on GA is a
+  **coupled dependency upgrade**, not a feature flip (verified 2026-07-10): `k8s-openapi 0.24` tops
+  out at feature `v1_32` and has no v1 DRA types, so it must go to `k8s-openapi` 0.25/0.26, which is
+  version-locked to a `kube-rs` bump (currently `kube 0.98`) — kube is used across ~13 files and its
+  0.9x bumps carry breaking API changes. Plus porting `dra.rs` from v1alpha3 to v1 (flat request
+  fields move under `exactly` / `firstAvailable`). So this is a real migration project gated on an
+  explicit decision, not an autonomous edit.
 - Model breadth: single-SKU (4090), no true CUDA-OOM labels yet.
