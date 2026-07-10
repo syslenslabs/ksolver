@@ -2,6 +2,32 @@
 
 > **For agentic workers:** This is a ranked product/engineering roadmap, not a single implementation ticket. When executing, split each phase into a focused implementation plan with tests, KSS proof criteria, demo criteria, and rollback notes. UI implementation must be delegated to Claude; Codex can do backend, tests, docs, and proof harness work.
 
+## Status update (2026-07-10)
+
+Delivered 2026-07-10 (this session):
+
+- **Kubernetes resource-accounting conformance (7 fixes).** GPU demand/capacity now matches
+  `resourcehelper.PodRequests`: limits-only GPU pods detected; per-resource (not per-map) effective
+  request; restartable init-container (sidecar) GPUs counted additively (KEP-753); RuntimeClass pod
+  overhead included; MIG-only node capacity; init/sidecar demand in the core normalizer; init/sidecar
+  GPUs in simulator baseline blockers. Several were silent *over-placement* bugs — the exact failure
+  the "safer than kube" story rules out.
+- **Phase 3 complete.** Zero-weight inertness proofs for all 6 opt-in objective dimensions;
+  win-classification (`beats-kube-only`/`beats-gang-aware`/`not-proven`, honest-gated); per-scenario
+  deferral attribution for all 6 dimensions.
+- **Phase 6 binding-safety gate.** Real binding is blocked when candidate-pruning regret is unknown.
+- **DRA 1.31–1.35 backwards-compat (version-adaptive, ONE binary, no dep bump).** The scheduler
+  discovers the served `resource.k8s.io` version and reads DRA objects dynamically with
+  shape-tolerant parsing (`v1alpha3`→`v1beta1`→`v1beta2`→`v1`); the wedge emits GA-only claims and
+  degrades to node-affinity on pre-GA clusters. **Live-verified across all four API versions** (kind
+  1.31/1.32/1.33/1.34) with a repeatable smoke script + on-demand CI matrix. Supersedes the
+  `kube 0.98→4.0` typed migration (kept as an unmerged reference branch).
+- **Phase 8 honesty layer complete + locked.** Every scenario now carries win-classification, a
+  "what this does not prove" statement, proof provenance (live/cached/deterministic KSS — gates
+  customer $ claims), and proof-type ingredients (gang/vram/policy/binpack) — surfaced in both JSON
+  and the human CLI, unit-tested and verified end-to-end on the real scenario library. The report
+  cannot overclaim.
+
 ## Status update (2026-07-09)
 
 Delivered since the roadmap was written:
