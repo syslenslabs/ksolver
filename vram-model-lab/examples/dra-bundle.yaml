@@ -1,0 +1,51 @@
+# Worked example of the VRAM -> DRA wedge output (validated with `kubectl apply --dry-run=server`
+# on k8s 1.36). Generate the equivalent for your own pod via the predictor service:
+#
+#   curl -s -XPOST http://<predictor>/claim -d @pod.json | jq
+#     -> { "claim": <ResourceClaimTemplate>, "pod_patch": <JSONPatch>, "resolution": {...} }
+#
+# GitOps flow: apply the ResourceClaimTemplate, then apply the pod with the pod_patch applied
+# (spec.resourceClaims + the GPU container's resources.claims reference the template). A GPU DRA
+# driver then allocates the claim's consumable-capacity memory at schedule time.
+#
+# The memory here (20Gi) is the predicted peak VRAM for the workload; ksolver sizes it so DRA
+# stops making users guess GPU memory.
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: trainer-vram
+  namespace: default
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.ksolver
+            capacity:
+              requests:
+                memory: 20Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trainer
+  namespace: default
+  annotations:
+    ksolver.dev/predicted-peak-vram-gib: "20"
+    ksolver.dev/predicted-peak-vram-source: static-sniff+model
+spec:
+  resourceClaims:
+    - name: ksolver-vram
+      resourceClaimTemplateName: trainer-vram
+  containers:
+    - name: trainer
+      image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+        claims:
+          - name: ksolver-vram

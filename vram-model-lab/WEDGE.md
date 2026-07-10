@@ -51,6 +51,14 @@ KUBECONFIG=... KSOLVER_VRAM_PREDICTOR_URL=http://127.0.0.1:8091 \
 Deps: `numpy`, `pyyaml`. `KSOLVER_VRAM_PREDICTOR_URL` unset ⇒ VRAM injection disabled (no
 behavior change).
 
+## Using the DRA path
+
+`POST /claim {pod}` returns `{claim: <ResourceClaimTemplate sized to predicted VRAM>, pod_patch:
+<JSONPatch wiring the pod to the claim>, resolution: {...}}`. GitOps flow: apply the RCT, then
+apply the pod with the patch (adds `spec.resourceClaims` + the GPU container's `resources.claims`).
+A GPU DRA driver then allocates the claim's consumable-capacity memory at schedule time. A
+validated worked example is in `examples/dra-bundle.yaml`.
+
 ## Populating the tier-4 store
 
 - Forward (primary): `vram_resolver.record_observation(store, pod, peak_mib)` on each completed
