@@ -11,6 +11,9 @@ export PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
 PY="${PY:-/tmp/vram-venv/bin/python}"
 PORT="${PORT:-8091}"
 STORE="$here/../data/observations.jsonl"
+# Serve from a temp COPY so /observe writes never mutate the committed store.
+DEMO_STORE="/tmp/wedge-obs-$$.jsonl"
+cp "$STORE" "$DEMO_STORE" 2>/dev/null || : > "$DEMO_STORE"
 
 "$PY" -c "import numpy, yaml" 2>/dev/null || { echo "need numpy+pyyaml (set PY=<venv python>)"; exit 1; }
 
@@ -31,9 +34,11 @@ for line in (vr.ROOT / "data" / "results.jsonl").read_text().splitlines():
 PY
 
 lsof -ti "tcp:$PORT" 2>/dev/null | xargs kill -9 2>/dev/null || true
-( cd "$here" && "$PY" vram_admission_service.py --port "$PORT" --observations "$STORE" >/tmp/wedge-svc.log 2>&1 ) &
+# Promoted mode so model-predicted tiers hard-constrain (default is advisory until calibration
+# is operator-promoted). Tier 1 (explicit) and tier 4 (measured) hard-constrain regardless.
+( cd "$here" && KSOLVER_VRAM_HARD_ADMIT=true "$PY" vram_admission_service.py --port "$PORT" --observations "$DEMO_STORE" >/tmp/wedge-svc.log 2>&1 ) &
 SVC=$!
-trap 'kill "$SVC" 2>/dev/null || true' EXIT
+trap 'kill "$SVC" 2>/dev/null || true; rm -f "$DEMO_STORE"' EXIT
 sleep 2
 
 admit() { # $1=label  $2=pod-json
@@ -62,7 +67,7 @@ admit "unknown (advisory only)" \
 
 # Learning loop: a brand-new workload is unknown, then becomes historical after 3 observations.
 echo "== learning loop (/observe): same workload before vs after 3 measured runs =="
-LP="{\"metadata\":{},\"spec\":{\"containers\":[{\"name\":\"t\",\"image\":\"acme/new:1\",\"command\":[\"python\",\"run.py\"],\"args\":[\"--custom\",\"1\"],$GPU}]}}"
+LP="{\"metadata\":{},\"spec\":{\"containers\":[{\"name\":\"t\",\"image\":\"acme/new:${RANDOM}${RANDOM}\",\"command\":[\"python\",\"run.py\"],\"args\":[\"--custom\",\"1\"],$GPU}]}}"
 src() { curl -s -X POST "http://127.0.0.1:$PORT/predict" -d "$1" | "$PY" -c "import json,sys;d=json.load(sys.stdin);print(f\"  {sys.argv[1]}: source={d['source']} vram_gib={d['vram_gib']}\")" "$2"; }
 src "$LP" "before"
 for p in 6000 6100 6200; do

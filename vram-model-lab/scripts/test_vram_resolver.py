@@ -41,7 +41,7 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertEqual(r["confidence"], "authoritative")
         self.assertAlmostEqual(r["vram_gib"], 20.0, places=1)
 
-    def test_tier2_static_sniff_predicts_high_and_hard(self):
+    def test_tier2_static_sniff_advisory_by_default_hard_when_promoted(self):
         # family/hidden/layers via annotations; batch/seq via CLI args -> full feature set.
         pod = gpu_pod(
             annotations={
@@ -51,13 +51,16 @@ class ResolveCascadeTest(unittest.TestCase):
             },
             args=["--batch-size", "8", "--seq-len", "512", "--precision", "fp16"],
         )
-        r = vr.resolve(pod)
+        r = vr.resolve(pod)  # model prediction: advisory by default (not calibration-promoted)
         self.assertEqual(r["source"], "static-sniff+model")
-        self.assertEqual(r["confidence"], "high")
-        self.assertTrue(r["hard"])
+        self.assertEqual(r["confidence"], "advisory")
+        self.assertFalse(r["hard"])
         self.assertIsNotNone(r["vram_gib"])
         self.assertGreater(r["vram_mib"], 0.0)
-        self.assertEqual(r["missing"], [])
+        # promoting the model turns the prediction into a hard constraint
+        rp = vr.resolve(pod, hard_admit_model=True)
+        self.assertEqual(rp["confidence"], "high")
+        self.assertTrue(rp["hard"])
 
     def test_extrapolated_prediction_is_downgraded_to_advisory(self):
         # A very large transformer extrapolates far beyond training -> implausible single-GPU VRAM.
@@ -145,9 +148,10 @@ class ResolveCascadeTest(unittest.TestCase):
         docs = [{"train_micro_batch_size_per_gpu": 8, "max_seq_length": 512, "fp16": {"enabled": True}}]
         r = vr.resolve(pod, config_docs=docs)
         self.assertEqual(r["source"], "config+model")
-        self.assertEqual(r["confidence"], "high")
-        self.assertTrue(r["hard"])
+        self.assertEqual(r["confidence"], "advisory")  # advisory until promoted
+        self.assertFalse(r["hard"])
         self.assertGreater(r["vram_mib"], 0.0)
+        self.assertTrue(vr.resolve(pod, config_docs=docs, hard_admit_model=True)["hard"])
 
     def test_record_then_resolve_round_trip_fires_tier4(self):
         pod = gpu_pod(args=["--custom-flag", "x"])  # unsniffable
@@ -186,10 +190,9 @@ class ResolveCascadeTest(unittest.TestCase):
                 ),
             }
         )
-        # sanity: without the inline config it would be unknown
         r = vr.resolve(pod)
         self.assertEqual(r["source"], "config+model")
-        self.assertEqual(r["confidence"], "high")
+        self.assertEqual(r["confidence"], "advisory")  # model-predicted -> advisory by default
         self.assertGreater(r["vram_mib"], 0.0)
 
     def test_malformed_inline_config_is_ignored(self):
@@ -220,7 +223,7 @@ class ResolveCascadeTest(unittest.TestCase):
         pod = gpu_pod(args=["--model", "gpt2-large", "--batch-size", "4", "--seq-len", "1024"])
         r = vr.resolve(pod)
         self.assertEqual(r["source"], "static-sniff+model")
-        self.assertEqual(r["confidence"], "high")
+        self.assertEqual(r["confidence"], "advisory")
         self.assertGreater(r["vram_mib"], 0.0)
 
     def test_model_name_with_org_prefix_is_normalized(self):

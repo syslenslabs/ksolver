@@ -22,6 +22,12 @@ Design spec: `docs/superpowers/specs/2026-07-08-vram-dra-wedge-design.md`.
   2. **static sniff** (annotations/env/CLI flags; a known model name like `--model gpt2-large`
      auto-fills family/hidden/layers) → model → high
   - else → **advisory** only (never a hard constraint on a guess)
+
+  **Promotion gate:** model-predicted tiers (2/3) are **advisory by default** (soft — annotated but
+  no hard node constraint), because the model isn't calibration-gated yet. Set
+  `KSOLVER_VRAM_HARD_ADMIT=true` to let them hard-constrain. **Explicit** (tier 1) and **measured**
+  (tier 4) always hard-constrain. This mirrors the roadmap's "advisory until calibration" principle
+  and the dashboard's `hard-admit=blocked` state.
 - **Delivery** (`vram_admission.py`) — turns a resolution into a JSONPatch: annotate the estimate;
   at high/authoritative confidence add `nodeAffinity ksolver.dev/gpu-vram-gib Gt floor(est)-1`
   (enforceable today, no DRA driver needed) plus a DRA consumable-capacity `ResourceClaimTemplate`

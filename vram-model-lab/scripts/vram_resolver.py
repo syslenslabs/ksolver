@@ -17,6 +17,7 @@ mis-sniff can never strand a workload. This module is the single source of the m
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -321,10 +322,18 @@ def resolve(
     observations: dict[str, list[float]] | None = None,
     fingerprint_min_samples: int = FINGERPRINT_MIN_SAMPLES,
     config_docs: list[Any] | None = None,
+    hard_admit_model: bool | None = None,
 ) -> dict[str, Any]:
-    """Resolve a pod's expected peak VRAM through the confidence cascade (tiers 1, 4, 3, 2)."""
+    """Resolve a pod's expected peak VRAM through the confidence cascade (tiers 1, 4, 3, 2).
+
+    Model-predicted tiers (2/3) stay advisory (soft) until the operator promotes them via
+    hard_admit_model=True (default from KSOLVER_VRAM_HARD_ADMIT), because the model is not yet
+    calibration-gated. Explicit (tier 1) and measured (tier 4) always hard-constrain.
+    """
     if artifact is None:
         artifact = json.loads(DEFAULT_MODEL.read_text())
+    if hard_admit_model is None:
+        hard_admit_model = os.environ.get("KSOLVER_VRAM_HARD_ADMIT", "").lower() in {"1", "true", "yes", "on"}
     ann = _pod_annotations(pod)
     fingerprint = pod_fingerprint(pod)
 
@@ -376,12 +385,12 @@ def resolve(
         combined.update({k: v for k, v in hints_from_config_docs(effective_docs).items() if v not in (None, "")})
         job, _missing = row_from_hints(combined)
         if job:
-            return _model_result(predict(job, artifact, gpu_total_mib), "config+model", fingerprint)
+            return _model_result(predict(job, artifact, gpu_total_mib), "config+model", fingerprint, hard_admit_model)
 
     # Tier 2 — static spec sniff (annotations/env/CLI) -> linear model.
     job, missing = row_from_hints(sniff_hints)
     if job:
-        return _model_result(predict(job, artifact, gpu_total_mib), "static-sniff+model", fingerprint)
+        return _model_result(predict(job, artifact, gpu_total_mib), "static-sniff+model", fingerprint, hard_admit_model)
 
     # Nothing resolvable -> advisory only (never hard-admit on a guess).
     missing_txt = ", ".join(missing) if missing else "no usable hints"
@@ -391,9 +400,12 @@ def resolve(
     )
 
 
-def _model_result(pred: dict[str, Any], source: str, fingerprint: dict[str, Any]) -> dict[str, Any]:
-    """Build a tier-2/tier-3 model result, downgrading implausible extrapolations to advisory so a
-    bad prediction can never become a hard constraint that strands the job."""
+def _model_result(
+    pred: dict[str, Any], source: str, fingerprint: dict[str, Any], promote: bool
+) -> dict[str, Any]:
+    """Build a tier-2/tier-3 model result. The prediction only becomes a HARD constraint when the
+    model is operator-promoted (promote=True); otherwise it stays advisory (soft), and any
+    implausible extrapolation is advisory regardless — a bad prediction can never strand a job."""
     mib = pred.get("conservative_estimate_mib")
     job = pred.get("input") or {}
     shape = f"seq {job.get('seq_len')}" if job.get("seq_len") else f"image {job.get('image_size')}"
@@ -412,6 +424,10 @@ def _model_result(pred: dict[str, Any], source: str, fingerprint: dict[str, Any]
         extra["explanation"] = explanation + "; exceeds plausible single-GPU VRAM, advisory only"
         keep = mib if (mib is not None and mib > 0) else None
         return _result(keep, source, "advisory", [], fingerprint, extra=extra)
+    if not promote:
+        # Uncalibrated model prediction -> advisory (roadmap promotion gate); still annotated.
+        extra["explanation"] = explanation + "; model-predicted, advisory until calibration promoted (KSOLVER_VRAM_HARD_ADMIT)"
+        return _result(mib, source, "advisory", [], fingerprint, extra=extra)
     return _result(mib, source, "high", [], fingerprint, extra=extra)
 
 
