@@ -12001,6 +12001,51 @@ mod tests {
 
     #[cfg(feature = "rust-cp-sat")]
     #[tokio::test]
+    async fn volcano_baseline_flips_wins_to_beats_gang_aware_end_to_end() {
+        // Full consumption path: feed a Volcano gang-aware baseline (every scenario -> 0 useful GPU,
+        // so ksolver beats it wherever it beats kube) and confirm the report reclassifies. Uses the
+        // same offline KSS cache as the other integration test — no cluster, no batch.
+        let cache_path = write_test_simulator_cache();
+        let volcano: BTreeMap<String, i64> = serde_json::from_value(dump_scenario_library())
+            .map(|v: Vec<serde_json::Value>| {
+                v.into_iter()
+                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|n| (n.to_string(), 0)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(!volcano.is_empty(), "expected scenario names for the mock baseline");
+        let baseline = run_benchmark_with_options(BenchmarkOptions {
+            simulator_cache_path: Some(write_test_simulator_cache()),
+            ..Default::default()
+        })
+        .await
+        .expect("baseline report");
+        let with_volcano = run_benchmark_with_options(BenchmarkOptions {
+            simulator_cache_path: Some(cache_path),
+            volcano_baseline_useful_gpu: volcano,
+            ..Default::default()
+        })
+        .await
+        .expect("volcano-baselined report");
+
+        let base_kube_only = baseline.win_classification_summary.beats_kube_only;
+        assert!(base_kube_only > 0, "need at least one beats-kube-only win to reclassify");
+        let s = &with_volcano.win_classification_summary;
+        // With a Volcano baseline of 0, every beats-kube-only win (ksolver > kube > 0) becomes
+        // beats-gang-aware; none remain beats-kube-only; the summary is no longer pending.
+        assert_eq!(s.beats_kube_only, 0, "beats-kube-only should reclassify against a gang-aware baseline");
+        assert_eq!(s.beats_gang_aware, base_kube_only, "those wins should become beats-gang-aware");
+        assert!(!s.gang_aware_baseline_pending);
+        assert!(s.headline.contains("Volcano gang-aware baseline"));
+        // And the per-scenario field agrees.
+        assert!(with_volcano
+            .scenarios
+            .iter()
+            .any(|sc| sc.win_classification == WinClassification::BeatsGangAware));
+    }
+
+    #[cfg(feature = "rust-cp-sat")]
+    #[tokio::test]
     async fn feature_assertions_capture_priority_and_report_gates() {
         let cache_path = write_test_simulator_cache();
         let report = run_benchmark_with_options(BenchmarkOptions {
