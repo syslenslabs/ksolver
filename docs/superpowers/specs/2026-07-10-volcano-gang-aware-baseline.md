@@ -1,6 +1,10 @@
 # Volcano gang-aware baseline — feasibility + integration plan
 
-**Status:** feasibility SPIKED + confirmed (2026-07-10); full integration proposed — needs a go-ahead.
+**Status:** HARNESS VERIFIED END-TO-END (2026-07-11). `scripts/volcano-baseline-run.sh <scenario>`
+runs a real scenario through Volcano on KWOK fake GPU nodes and outputs VRAM-safe useful GPU — full
+pipeline confirmed on `colocated-gang-vs-large` (`volcano_safe_useful_gpu: 14`, cluster auto-torn-down).
+Remaining: loop over the whole scenario library + join each `volcano_safe_useful_gpu` into
+`classify_win`'s `gang_aware` arg (mechanical — every component is built and verified).
 **Why:** ksolver's win classification only ever emits `beats-kube-only` today because there is no
 gang-aware baseline (`classify_win(..., gang_aware = None)`). The roadmap's own no-strawman honesty
 stance forbids a hand-rolled local gang scheduler (the greedy kube fallback was deliberately
