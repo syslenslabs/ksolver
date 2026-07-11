@@ -51,7 +51,27 @@ placed gang (this was a real bug caught by running it; a blocked gang has no `no
 Remaining for the full harness: translate the scenario LIBRARY's gangs (Rust
 `jobs_to_volcano_baseline`), size KWOK nodes to each scenario's topology, run the capture per
 scenario, and feed `volcano_useful_gpu` into `classify_win`'s `gang_aware` arg (the honesty layer
-already consumes it).
+already consumes it). Scenario topology + jobs are now exportable via `ksolver dump-scenarios`
+(`dump_scenario_library()`) — the harness reproduces each scenario from that JSON.
+
+### CRITICAL fairness finding (2026-07-11): VRAM-safe scoring
+
+**Volcano schedules on GPU *count* only — it ignores VRAM.** So on VRAM-constrained scenarios it
+will PLACE gangs that ksolver correctly REFUSES (OOM risk). A naive `volcano_useful_gpu` (raw
+placement) would therefore count VRAM-unsafe placements as "useful," making Volcano look better and
+**understating `beats-gang-aware` dishonestly** — the same over/under-claim failure the honesty layer
+exists to prevent, just in the other direction.
+
+So the baseline MUST score Volcano's placements with the SAME safety criterion ksolver applies:
+a placed pod counts as useful only if its predicted peak VRAM fits the node's per-GPU VRAM
+(`pending_input::vram_fits_node` / `node_peak_vram_bytes`). The harness knows each placement's node
+(from `spec.nodeName`) and the scenario's node VRAM (from `dump-scenarios`) and the pod's VRAM
+(predicted), so it can recompute `volcano_useful_gpu` counting only VRAM-safe complete gangs.
+
+Implication: the scoring/join step should **reuse ksolver's Rust VRAM-feasibility logic** rather than
+reimplement it in bash — pointing to a Rust-native scoring step (read Volcano placements back, score
+with `vram_fits_node`) even if cluster orchestration stays in a script. Getting this wrong produces
+dishonest `beats-gang-aware` verdicts, so it must be exact.
 
 ## Integration plan (the large part)
 
