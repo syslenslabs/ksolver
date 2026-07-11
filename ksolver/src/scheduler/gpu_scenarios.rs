@@ -9555,6 +9555,59 @@ fn scenario_does_not_prove(win: WinClassification, provenance: ProofProvenance) 
     out
 }
 
+/// Score a gang-aware baseline's (Volcano's) placements the SAME way ksolver counts useful GPU re:
+/// VRAM safety — the honesty-critical crux of the gang-aware baseline
+/// (docs/superpowers/specs/2026-07-10-volcano-gang-aware-baseline.md). Volcano schedules on GPU
+/// count only, so it may PLACE gangs ksolver refuses on VRAM-constrained nodes; those unsafe
+/// placements must NOT count as useful, or `beats-gang-aware` would be understated dishonestly.
+///
+/// Input JSON:
+///   {"nodes": {"<node>": <per_gpu_vram_bytes>, ...},
+///    "gangs": [{"name":.., "gpus_per_pod":N, "predicted_peak_vram_bytes":V, "min_available":M,
+///               "placements":[{"node":"<node>"}, ...]}]}
+/// A gang contributes `placed * gpus_per_pod` only if it is COMPLETE (placements >= min_available)
+/// AND every placement's node satisfies `pending_input::vram_fits` for the pod's predicted VRAM.
+pub fn score_gang_baseline(input: &serde_json::Value) -> serde_json::Value {
+    use crate::scheduler::pending_input::vram_fits;
+    let node_vram = input
+        .get("nodes")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let empty = Vec::new();
+    let gangs = input.get("gangs").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let mut total = 0i64;
+    let mut per_gang = Vec::new();
+    for g in gangs {
+        let name = g.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let gpp = g.get("gpus_per_pod").and_then(|v| v.as_i64()).unwrap_or(0);
+        let pred = g
+            .get("predicted_peak_vram_bytes")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let min_avail = g.get("min_available").and_then(|v| v.as_i64()).unwrap_or(1);
+        let placements = g.get("placements").and_then(|v| v.as_array());
+        let placed = placements.map(|p| p.len() as i64).unwrap_or(0);
+        let complete = placed > 0 && placed >= min_avail;
+        let all_safe = placements
+            .map(|ps| {
+                ps.iter().all(|p| {
+                    let node = p.get("node").and_then(|v| v.as_str()).unwrap_or("");
+                    let nv = node_vram.get(node).and_then(|v| v.as_i64()).unwrap_or(0);
+                    vram_fits(pred, nv)
+                })
+            })
+            .unwrap_or(false);
+        let useful = if complete && all_safe { placed * gpp } else { 0 };
+        total += useful;
+        per_gang.push(serde_json::json!({
+            "name": name, "placed": placed, "complete": complete,
+            "vram_safe": all_safe, "useful_gpu": useful
+        }));
+    }
+    serde_json::json!({ "volcano_safe_useful_gpu": total, "per_gang": per_gang })
+}
+
 /// Report-level rollup of per-scenario [`WinClassification`], so an operator/demo sees the honest
 /// win picture at a glance instead of scanning every scenario.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -9704,6 +9757,33 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    #[test]
+    fn score_gang_baseline_counts_only_complete_and_vram_safe_gangs() {
+        let gib = 1024_i64 * 1024 * 1024;
+        let input = serde_json::json!({
+            "nodes": { "big": 80 * gib, "small": 16 * gib },
+            "gangs": [
+                // complete + VRAM-safe (20 GiB pod on 80 GiB nodes) -> useful = 2 placed * 2 gpu = 4
+                {"name": "safe", "gpus_per_pod": 2, "predicted_peak_vram_bytes": 20 * gib,
+                 "min_available": 2, "placements": [{"node": "big"}, {"node": "big"}]},
+                // complete but one member on a too-small node (20 > 16) -> UNSAFE -> 0 (the crux)
+                {"name": "unsafe", "gpus_per_pod": 2, "predicted_peak_vram_bytes": 20 * gib,
+                 "min_available": 2, "placements": [{"node": "big"}, {"node": "small"}]},
+                // incomplete (1 < min_available 2) -> 0
+                {"name": "partial", "gpus_per_pod": 2, "predicted_peak_vram_bytes": 20 * gib,
+                 "min_available": 2, "placements": [{"node": "big"}]},
+            ]
+        });
+        let out = score_gang_baseline(&input);
+        assert_eq!(out["volcano_safe_useful_gpu"], serde_json::json!(4));
+        let per = out["per_gang"].as_array().unwrap();
+        assert_eq!(per[0]["useful_gpu"], serde_json::json!(4)); // safe
+        assert_eq!(per[1]["useful_gpu"], serde_json::json!(0)); // unsafe placement -> not useful
+        assert_eq!(per[1]["vram_safe"], serde_json::json!(false));
+        assert_eq!(per[2]["useful_gpu"], serde_json::json!(0)); // incomplete
+        assert_eq!(per[2]["complete"], serde_json::json!(false));
     }
 
     #[test]

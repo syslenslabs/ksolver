@@ -450,12 +450,24 @@ async fn main() -> Result<()> {
             serde_json::to_writer_pretty(std::io::stdout(), &lib)?;
             println!();
         }
+        Some("score-gang-baseline") => {
+            // Read a gang-aware baseline's placements (from the Volcano harness) as JSON on stdin and
+            // score VRAM-safe useful GPU the same way ksolver counts it (see the volcano baseline
+            // spec). Keeps beats-gang-aware honest: unsafe Volcano placements don't count.
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            let input: serde_json::Value = serde_json::from_str(&buf)?;
+            let scored = ksolver::scheduler::gpu_scenarios::score_gang_baseline(&input);
+            serde_json::to_writer_pretty(std::io::stdout(), &scored)?;
+            println!();
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver score-gang-baseline  (reads placements JSON on stdin)\n  syslens-solver version"
             );
         }
     }

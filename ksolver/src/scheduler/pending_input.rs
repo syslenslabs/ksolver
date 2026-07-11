@@ -395,21 +395,28 @@ pub(crate) fn node_peak_vram_bytes(labels: &BTreeMap<String, String>) -> i64 {
     .unwrap_or(0)
 }
 
+/// The core per-GPU VRAM feasibility criterion, in one place so every caller (the scheduler AND the
+/// gang-aware baseline scorer) applies the SAME rule: a pod fits a node's per-GPU VRAM unless its
+/// predicted peak strictly exceeds it. Unknown prediction or unknown node capacity ⇒ fits (advisory,
+/// never a hard block on a guess).
+pub(crate) fn vram_fits(predicted_peak_vram_bytes: i64, node_vram_bytes: i64) -> bool {
+    predicted_peak_vram_bytes <= 0
+        || node_vram_bytes <= 0
+        || predicted_peak_vram_bytes <= node_vram_bytes
+}
+
 fn vram_fits_node(
     predicted_peak_vram_bytes: i64,
     node_vram_bytes: i64,
     ext_requests: &BTreeMap<String, i64>,
     is_gpu_resource: &dyn Fn(&str) -> bool,
 ) -> bool {
-    if predicted_peak_vram_bytes <= 0 || node_vram_bytes <= 0 {
-        return true;
-    }
     let gpu_units: i64 = ext_requests
         .iter()
         .filter(|(res, _)| is_gpu_resource(res))
         .map(|(_, qty)| *qty)
         .sum();
-    gpu_units <= 0 || predicted_peak_vram_bytes <= node_vram_bytes
+    gpu_units <= 0 || vram_fits(predicted_peak_vram_bytes, node_vram_bytes)
 }
 
 fn vram_rightsizing_score(predicted_peak_vram_bytes: i64, node_vram_bytes: i64) -> i64 {
