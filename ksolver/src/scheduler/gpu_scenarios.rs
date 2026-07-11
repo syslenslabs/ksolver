@@ -31,7 +31,7 @@ pub const DEFAULT_SIMULATOR_LIVE_BASELINE_LIMIT: usize = 4;
 /// schedulers on the SAME fleet matters.
 const GPU_MONTHLY_PER_GPU: i64 = 2000;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct GpuNodeSpec {
     name: String,
     gpus: i64,
@@ -40,7 +40,7 @@ struct GpuNodeSpec {
     monthly_cost: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct JobSpec {
     name: String,
     gpus_per_pod: i64,
@@ -187,7 +187,7 @@ pub enum Tier {
     Large,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct ScenarioSpec {
     name: String,
     description: String,
@@ -1319,6 +1319,14 @@ pub struct BenchmarkReport {
     pub feature_assertions: Vec<FeatureAssertion>,
     pub win_classification_summary: WinClassificationSummary,
     pub scenarios: Vec<ScenarioResult>,
+}
+
+/// Dump the deterministic scenario library (node topology + gang jobs + policy weights) as JSON, so
+/// an external baseline harness — e.g. the Volcano gang-aware baseline
+/// (docs/superpowers/specs/2026-07-10-volcano-gang-aware-baseline.md) — can reproduce each scenario
+/// faithfully (fake GPU nodes sized to `nodes`, gangs from `jobs`). Also handy for inspection.
+pub fn dump_scenario_library() -> serde_json::Value {
+    serde_json::to_value(deterministic_scenarios()).unwrap_or(serde_json::Value::Null)
 }
 
 pub async fn run_benchmark(simulator_url: Option<&str>) -> anyhow::Result<BenchmarkReport> {

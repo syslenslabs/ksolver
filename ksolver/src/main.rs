@@ -443,12 +443,19 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        Some("dump-scenarios") => {
+            // Emit the deterministic scenario library (node topology + gang jobs) as JSON, for an
+            // external gang-aware baseline harness (Volcano) to reproduce scenarios faithfully.
+            let lib = ksolver::scheduler::gpu_scenarios::dump_scenario_library();
+            serde_json::to_writer_pretty(std::io::stdout(), &lib)?;
+            println!();
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver version"
             );
         }
     }
