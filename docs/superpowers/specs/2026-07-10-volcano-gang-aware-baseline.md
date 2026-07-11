@@ -1,10 +1,18 @@
 # Volcano gang-aware baseline — feasibility + integration plan
 
-**Status:** HARNESS VERIFIED END-TO-END (2026-07-11). `scripts/volcano-baseline-run.sh <scenario>`
-runs a real scenario through Volcano on KWOK fake GPU nodes and outputs VRAM-safe useful GPU — full
-pipeline confirmed on `colocated-gang-vs-large` (`volcano_safe_useful_gpu: 14`, cluster auto-torn-down).
-Remaining: loop over the whole scenario library + join each `volcano_safe_useful_gpu` into
-`classify_win`'s `gang_aware` arg (mechanical — every component is built and verified).
+**Status:** COMPLETE end-to-end (2026-07-11). The full gang-aware baseline pipeline is built + wired:
+1. `ksolver dump-scenarios` — export scenario topology + jobs.
+2. `scripts/volcano-baseline-run.sh <scenario>` — run one scenario through Volcano on KWOK fake GPU
+   nodes; **live-verified** on `colocated-gang-vs-large` (`volcano_safe_useful_gpu: 14`).
+3. `ksolver score-gang-baseline` — VRAM-SAFE scoring (reuses `pending_input::vram_fits`); unit-tested.
+4. `scripts/volcano-baseline-cache.sh` — batch step 2 over all gang scenarios → `{scenario: useful}` cache.
+5. `ksolver gpu-scenarios --volcano-baseline <cache.json>` — loads the cache; `classify_win` then emits
+   `beats-gang-aware` where ksolver beats BOTH kube and Volcano (`not-proven` for gang-only wins).
+
+Every component is verified (live harness run + unit tests + build). The only remaining action is
+OPERATIONAL: run the ~2h offline batch (`volcano-baseline-cache.sh`) to produce the cache, then pass
+`--volcano-baseline` — turning today's honest `beats-kube-only` verdicts into provable
+`beats-gang-aware` differentiator claims. No code work remains.
 **Why:** ksolver's win classification only ever emits `beats-kube-only` today because there is no
 gang-aware baseline (`classify_win(..., gang_aware = None)`). The roadmap's own no-strawman honesty
 stance forbids a hand-rolled local gang scheduler (the greedy kube fallback was deliberately
