@@ -280,6 +280,15 @@ async fn main() -> Result<()> {
                         .collect::<std::collections::BTreeSet<_>>()
                 })
                 .filter(|scenarios| !scenarios.is_empty());
+            // Optional gang-aware (Volcano) baseline: a JSON map {scenario_name: volcano_safe_useful_gpu}
+            // captured offline by scripts/volcano-baseline-run.sh. Feeds classify_win's gang_aware arg
+            // so wins can be classified beats-gang-aware.
+            let volcano_baseline_useful_gpu = flag("--volcano-baseline")
+                .and_then(|p| std::fs::read_to_string(&p).ok())
+                .and_then(|s| {
+                    serde_json::from_str::<std::collections::BTreeMap<String, i64>>(&s).ok()
+                })
+                .unwrap_or_default();
             let json = rest.iter().any(|a| a == "--json");
             let options = ksolver::scheduler::gpu_scenarios::BenchmarkOptions {
                 simulator_url: simulator_url.clone(),
@@ -291,6 +300,7 @@ async fn main() -> Result<()> {
                 simulator_progress,
                 simulator_max_live_baselines,
                 simulator_live_scenarios,
+                volcano_baseline_useful_gpu,
                 ..Default::default()
             };
             if rest.iter().any(|a| a == "--refresh-simulator-cache-only") {
@@ -468,7 +478,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver score-gang-baseline  (reads placements JSON on stdin)\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--volcano-baseline <cache.json>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver score-gang-baseline  (reads placements JSON on stdin)\n  syslens-solver version"
             );
         }
     }
