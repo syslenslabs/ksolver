@@ -11217,13 +11217,19 @@ mod tests {
                     .unwrap_or_default(),
                 6
             );
+            // Cached success path is deterministic across calls.
+            assert_eq!(first, second);
         } else {
-            assert_eq!(first["ok"], false);
-            assert_eq!(second["ok"], false);
-            assert_eq!(first["recoverable"], true);
-            assert!(!first["reason"].as_str().unwrap_or_default().is_empty());
+            // No solver: the endpoint reports a recoverable failure. Assert the STABLE fields for
+            // both calls — but NOT full-object equality: the failure `reason` embeds a live-simulator
+            // timeout with nondeterministic timing (elapsed ms / which phase tripped), so first and
+            // second legitimately differ there.
+            for r in [&first, &second] {
+                assert_eq!(r["ok"], false);
+                assert_eq!(r["recoverable"], true);
+                assert!(!r["reason"].as_str().unwrap_or_default().is_empty());
+            }
         }
-        assert_eq!(first, second);
     }
 
     #[tokio::test]
