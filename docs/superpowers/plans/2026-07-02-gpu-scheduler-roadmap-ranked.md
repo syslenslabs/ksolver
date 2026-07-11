@@ -27,6 +27,14 @@ Delivered 2026-07-10 (this session):
   customer $ claims), and proof-type ingredients (gang/vram/policy/binpack) — surfaced in both JSON
   and the human CLI, unit-tested and verified end-to-end on the real scenario library. The report
   cannot overclaim.
+- **Gang-aware (Volcano) baseline — CODE-COMPLETE (2026-07-11).** The roadmap's prerequisite for
+  external `beats-gang-aware` claims. Full pipeline built + verified: `dump-scenarios` (topology) →
+  `volcano-baseline-run.sh` (one scenario through real Volcano on KWOK fake GPU nodes, **live-verified**)
+  → `score-gang-baseline` (VRAM-SAFE scoring reusing `pending_input::vram_fits` — Volcano ignores VRAM
+  and over-admits, so its unsafe placements must not count) → `volcano-baseline-cache.sh` (batch) →
+  `gpu-scenarios --volcano-baseline <cache>` → `classify_win` emits `beats-gang-aware`. Remaining is
+  OPERATIONAL only: run the ~2h offline batch in a KSS-equipped env to produce the cache. Spec:
+  `docs/superpowers/specs/2026-07-10-volcano-gang-aware-baseline.md`.
 
 ## Status update (2026-07-09)
 
