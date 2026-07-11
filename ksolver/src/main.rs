@@ -291,6 +291,7 @@ async fn main() -> Result<()> {
                 simulator_progress,
                 simulator_max_live_baselines,
                 simulator_live_scenarios,
+                ..Default::default()
             };
             if rest.iter().any(|a| a == "--refresh-simulator-cache-only") {
                 let refreshed =

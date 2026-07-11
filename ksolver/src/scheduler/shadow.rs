@@ -851,6 +851,7 @@ fn demo_benchmark_options(
         simulator_progress: false,
         simulator_max_live_baselines,
         simulator_live_scenarios,
+        volcano_baseline_useful_gpu: std::collections::BTreeMap::new(),
     }
 }
 

@@ -301,6 +301,12 @@ pub struct BenchmarkOptions {
     pub simulator_progress: bool,
     pub simulator_max_live_baselines: Option<usize>,
     pub simulator_live_scenarios: Option<BTreeSet<String>>,
+    /// Gang-aware (Volcano) baseline useful-GPU per scenario name, captured offline by
+    /// `scripts/volcano-baseline-run.sh` (the harness is too slow to run inline). When a scenario is
+    /// present, its value feeds `classify_win`'s `gang_aware` arg — so a win over BOTH kube and
+    /// Volcano earns `beats-gang-aware`, and a gang-only win drops to `not-proven`. Empty ⇒ today's
+    /// honest `beats-kube-only`/`not-proven` (no gang-aware baseline wired).
+    pub volcano_baseline_useful_gpu: BTreeMap<String, i64>,
 }
 
 impl Default for BenchmarkOptions {
@@ -315,6 +321,7 @@ impl Default for BenchmarkOptions {
             simulator_progress: false,
             simulator_max_live_baselines: Some(DEFAULT_SIMULATOR_LIVE_BASELINE_LIMIT),
             simulator_live_scenarios: None,
+            volcano_baseline_useful_gpu: BTreeMap::new(),
         }
     }
 }
@@ -1407,12 +1414,14 @@ pub async fn run_benchmark_with_options(
         let base = best_kube(&kube, &kube_binpack);
         let (efficiency_score, significantly_better, efficiency_headline) =
             efficiency(&base.metrics, &ksolver.metrics);
-        // Must beat BOTH kube baselines (spread + binpack) to count as a win; no gang-aware
-        // baseline exists yet, so the strongest honest claim is beats-kube-only.
+        // Must beat BOTH kube baselines (spread + binpack) to count as a win. If a Volcano
+        // (gang-aware) baseline was captured for this scenario, feed it so a win over Volcano too
+        // earns beats-gang-aware; absent it, the strongest honest claim stays beats-kube-only.
+        let gang_aware = options.volcano_baseline_useful_gpu.get(&scenario.name).copied();
         let win_classification = classify_win(
             ksolver.metrics.useful_gpu,
             kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
-            None,
+            gang_aware,
         );
         let does_not_prove = scenario_does_not_prove(
             win_classification,
@@ -1448,7 +1457,8 @@ pub async fn run_benchmark_with_options(
     let benefit_summary = summarize_benefit(&results);
     let roi_summary = summarize_roi(&results);
     let regret_summary = summarize_regret(REGRET_CANDIDATE_LIMIT, &results);
-    let win_classification_summary = summarize_win_classification(&results);
+    let win_classification_summary =
+        summarize_win_classification(&results, !options.volcano_baseline_useful_gpu.is_empty());
     let repair_scenario = fragmented_repair_scenario_proof();
     let repair_scenarios = vec![
         repair_scenario.clone(),
@@ -9627,10 +9637,13 @@ pub struct WinClassificationSummary {
     pub headline: String,
 }
 
-fn summarize_win_classification(results: &[ScenarioResult]) -> WinClassificationSummary {
+fn summarize_win_classification(
+    results: &[ScenarioResult],
+    gang_aware_baseline_present: bool,
+) -> WinClassificationSummary {
     let mut summary = WinClassificationSummary {
         total: results.len(),
-        gang_aware_baseline_pending: true,
+        gang_aware_baseline_pending: !gang_aware_baseline_present,
         ..Default::default()
     };
     for r in results {
@@ -9645,9 +9658,13 @@ fn summarize_win_classification(results: &[ScenarioResult]) -> WinClassification
             ProofProvenance::DeterministicFixture => summary.deterministic_fixture_scenarios += 1,
         }
     }
+    let gang_note = if summary.gang_aware_baseline_pending {
+        "no gang-aware baseline wired yet, so beats-gang-aware is not yet earnable"
+    } else {
+        "scored against a Volcano gang-aware baseline"
+    };
     summary.headline = format!(
-        "{} scenarios: {} beats-kube-only, {} not-proven, {} beats-gang-aware \
-         (no gang-aware baseline wired yet, so beats-gang-aware is not yet earnable); \
+        "{} scenarios: {} beats-kube-only, {} not-proven, {} beats-gang-aware ({gang_note}); \
          provenance: {} live-KSS, {} cached-KSS, {} deterministic-fixture (customer $ claims need live/cached)",
         summary.total,
         summary.beats_kube_only,
@@ -9725,13 +9742,18 @@ mod tests {
             mk(WinClassification::BeatsKubeOnly),
             mk(WinClassification::NotProven),
         ];
-        let s = summarize_win_classification(&results);
+        // No gang-aware baseline provided -> pending.
+        let s = summarize_win_classification(&results, false);
         assert_eq!(s.total, 3);
         assert_eq!(s.beats_kube_only, 2);
         assert_eq!(s.not_proven, 1);
         assert_eq!(s.beats_gang_aware, 0);
         assert!(s.gang_aware_baseline_pending);
         assert!(s.headline.contains("beats-gang-aware is not yet earnable"));
+        // With a gang-aware baseline present, the summary reflects it (not pending).
+        let s2 = summarize_win_classification(&results, true);
+        assert!(!s2.gang_aware_baseline_pending);
+        assert!(s2.headline.contains("Volcano gang-aware baseline"));
         // empty_engine sources ("") -> deterministic fixture provenance for all three.
         assert_eq!(s.deterministic_fixture_scenarios, 3);
         assert_eq!(s.live_kss_scenarios, 0);
@@ -11193,6 +11215,7 @@ mod tests {
             simulator_progress: false,
             simulator_max_live_baselines: Some(0),
             simulator_live_scenarios: None,
+            volcano_baseline_useful_gpu: Default::default(),
         };
         let mut live_baselines = 0_usize;
 
@@ -11236,6 +11259,7 @@ mod tests {
             simulator_progress: false,
             simulator_max_live_baselines: None,
             simulator_live_scenarios: Some(BTreeSet::from(["hero-demo".to_string()])),
+            volcano_baseline_useful_gpu: Default::default(),
         };
         let mut live_baselines = 0_usize;
 
@@ -11291,6 +11315,7 @@ mod tests {
             simulator_progress: false,
             simulator_max_live_baselines: None,
             simulator_live_scenarios: None,
+            volcano_baseline_useful_gpu: Default::default(),
         };
         let mut live_baselines = 0_usize;
 
@@ -11345,6 +11370,7 @@ mod tests {
             simulator_progress: false,
             simulator_max_live_baselines: Some(4),
             simulator_live_scenarios: None,
+            volcano_baseline_useful_gpu: Default::default(),
         };
         let mut live_baselines = 0_usize;
 
