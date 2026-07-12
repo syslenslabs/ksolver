@@ -9761,6 +9761,29 @@ mod tests {
     }
 
     #[test]
+    fn dump_scenario_library_exposes_fields_the_volcano_harness_parses() {
+        // The bash harness (scripts/volcano-baseline-run.sh) reads these EXACT JSON field names to
+        // build KWOK nodes + Volcano jobs + the scorer input. Scripts aren't compile-checked, so a
+        // serde rename in GpuNodeSpec/JobSpec would silently break the harness — lock the contract.
+        let lib = dump_scenario_library();
+        let arr = lib.as_array().expect("array of scenarios");
+        assert!(!arr.is_empty(), "scenario library should not be empty");
+        assert!(arr[0].get("name").and_then(|v| v.as_str()).is_some());
+        let node = arr[0]["nodes"].as_array().expect("nodes").first().expect("a node");
+        for f in ["name", "gpus", "vram_gib_per_gpu"] {
+            assert!(node.get(f).is_some(), "node JSON missing field `{f}` the harness parses");
+        }
+        let with_jobs = arr
+            .iter()
+            .find(|x| x["jobs"].as_array().map(|j| !j.is_empty()).unwrap_or(false))
+            .expect("a scenario with jobs");
+        let job = with_jobs["jobs"].as_array().unwrap().first().unwrap();
+        for f in ["name", "pods", "gpus_per_pod", "colocate", "predicted_peak_vram_gib"] {
+            assert!(job.get(f).is_some(), "job JSON missing field `{f}` the harness parses");
+        }
+    }
+
+    #[test]
     fn proof_characters_derive_from_scenario_jobs() {
         // A co-located gang scenario is tagged gang-scheduling (and, since it uses priority, also
         // policy-weighted) — derived from the real scenario's own jobs, not guessed.
