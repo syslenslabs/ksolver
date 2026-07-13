@@ -3486,6 +3486,11 @@ fn predicted_runtime_for_selected_replicas(job: &JobSpec, selected_replicas: usi
 
 /// The kube baseline HARDEST for ksolver to beat = lowest active-node cost, tie-broken by more
 /// useful GPU admitted then fewer active nodes. Ranking ksolver against this avoids overstating.
+///
+/// Guard against a DEGENERATE comparator: if the cheapest baseline admitted NOTHING (0 useful GPU at
+/// $0) while the other admitted real work, the "cheapest" is a do-nothing baseline and comparing
+/// efficiency against it inflates ksolver's apparent advantage. In that case compare against the
+/// baseline that actually did something. (win_classification is unaffected — it uses max-useful.)
 fn best_kube<'a>(spread: &'a EngineResult, binpack: &'a EngineResult) -> &'a EngineResult {
     let key = |e: &EngineResult| {
         (
@@ -3494,10 +3499,15 @@ fn best_kube<'a>(spread: &'a EngineResult, binpack: &'a EngineResult) -> &'a Eng
             e.metrics.active_nodes as i64,
         )
     };
-    if key(binpack) < key(spread) {
-        binpack
+    let (cheapest, other) = if key(binpack) < key(spread) {
+        (binpack, spread)
     } else {
-        spread
+        (spread, binpack)
+    };
+    if cheapest.metrics.useful_gpu == 0 && other.metrics.useful_gpu > 0 {
+        other
+    } else {
+        cheapest
     }
 }
 
