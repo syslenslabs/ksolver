@@ -1,0 +1,118 @@
+# Frontier F3 — deploy the VRAM->DRA admission webhook (vram_admission_service.py /admit) in-cluster.
+#
+# PREREQUISITES / adjust before applying (untested without a cluster — this is the standard pattern):
+#   1. Build + push the image (see vram-model-lab/Dockerfile.webhook) and set `image:` below to your
+#      registry ref.
+#   2. cert-manager must be installed (this uses a self-signed Issuer + Certificate to provision the
+#      webhook's TLS keypair and inject the CA bundle). Manual-CA alternative: create the tls Secret
+#      yourself and replace the `cert-manager.io/inject-ca-from` annotation with a literal caBundle.
+#   3. The webhook is FAIL-OPEN (failurePolicy: Ignore) and OPT-IN: it only sees pods labelled
+#      `ksolver.ai/vram-admission: "enabled"`. Widen the objectSelector deliberately.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ksolver-system
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vram-webhook-selfsigned
+  namespace: ksolver-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vram-webhook-tls
+  namespace: ksolver-system
+spec:
+  secretName: vram-webhook-tls
+  dnsNames:
+    - vram-admission-webhook.ksolver-system.svc
+    - vram-admission-webhook.ksolver-system.svc.cluster.local
+  issuerRef:
+    name: vram-webhook-selfsigned
+    kind: Issuer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vram-admission-webhook
+  namespace: ksolver-system
+  labels: { app: vram-admission-webhook }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vram-admission-webhook }
+  template:
+    metadata:
+      labels: { app: vram-admission-webhook }
+    spec:
+      containers:
+        - name: webhook
+          # Build + push vram-model-lab/Dockerfile.webhook, then set this to your registry ref.
+          image: REPLACE_ME/ksolver-vram-webhook:dev
+          args:
+            - "--host=0.0.0.0"
+            - "--port=8443"
+            - "--tls-cert=/tls/tls.crt"
+            - "--tls-key=/tls/tls.key"
+          ports:
+            - { containerPort: 8443, name: https }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: tls
+          secret: { secretName: vram-webhook-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vram-admission-webhook
+  namespace: ksolver-system
+spec:
+  selector: { app: vram-admission-webhook }
+  ports:
+    - { port: 443, targetPort: 8443, protocol: TCP }
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: vram-admission-webhook
+  annotations:
+    # cert-manager injects the CA from the Certificate above into every webhook's clientConfig.
+    cert-manager.io/inject-ca-from: ksolver-system/vram-webhook-tls
+webhooks:
+  - name: vram.admission.ksolver.ai
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # FAIL-OPEN: never block pod creation if the webhook is down or errors (matches the handler).
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    # OPT-IN: only pods carrying this label are sent to the webhook.
+    objectSelector:
+      matchLabels:
+        ksolver.ai/vram-admission: "enabled"
+    clientConfig:
+      service:
+        name: vram-admission-webhook
+        namespace: ksolver-system
+        path: /admit
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
