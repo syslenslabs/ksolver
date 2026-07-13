@@ -120,3 +120,49 @@ kube-scheduler-simulator HTTP API. Volcano is a separate scheduler, so it needs 
 - With Volcano absent, behavior is unchanged (`gang_aware = None`, honest `beats-kube-only`).
 - A repeatable script (mirroring `scripts/dra-version-smoke.sh`) stands up Volcano and runs the
   comparison.
+
+## ACHIEVED — full reproduction + results (validated 2026-07-12)
+
+**Result:** the full real report shows **15 beats-kube-only, 12 not-proven, 6 beats-gang-aware**,
+scored against a faithful Volcano baseline, produced entirely in-environment (kind + KWOK + Volcano +
+a self-built arm64 kube-scheduler-simulator). The 6 wins are validated legitimate (pod→node placement
+dumps + run-to-run variance): Volcano's non-gang fillers greedily grab the nodes high-value gangs
+need, stranding the gangs; ksolver's global + priority-aware solve reserves them. ksolver never
+genuinely loses (6 ties fill capacity; weekend-flex-rightsize's 2-vs-8 is intentional rightsizing —
+`flexible_gpu_reduction=6`, a cost win).
+
+**Three Volcano-harness fidelity fixes were required** (all now in `scripts/volcano-baseline-run.sh`):
+1. **Pods must stay Running.** `stage-fast`'s `pod-complete` Stage fast-forwards pods to Succeeded,
+   freeing reservations → Volcano piles more onto a node → cumulative useful-GPU over-count (e.g. 20
+   on 19 GPU, physically impossible). Fix: `kubectl delete stage pod-complete`.
+2. **Colocated gangs need single-node co-location.** `minAvailable` gives all-or-nothing but NOT
+   single-node; without it colocated gangs SCATTER and fragment nodes, crippling Volcano. Fix: self
+   `podAffinity` on `kubernetes.io/hostname` (Volcano schedules the gang atomically → no deadlock).
+3. **Patient settle** before counting placements (pods now stay Running so the count stabilizes).
+Validation: `colocated-gang-vs-large` then places exactly 14 = the feasible optimum.
+
+**A scoring-side per-node GPU cap was tried and REJECTED** — Volcano's KWOK placement is
+non-deterministic, so capping can under-count → false `beats-gang-aware` (over-claim). The three
+harness fixes above are the correct approach; the scorer stays simple.
+
+**Reproduction commands (this arm64 env):**
+1. Build the simulator once: arm64 `simulator-server`/`simulator-scheduler` images (see
+   [[gpu-scheduler-phase1-status]] — `docker buildx --platform=linux/arm64` from simulator source).
+2. KSS baselines (66 = 33 scenarios × spread/binpack). The simulator's `/api/v1/reset` is broken on
+   this arm64 build (never drains), so each container serves ~1 baseline then must restart. Grind:
+   loop `kss-pool.sh start 8 12140 <cache-dir>` → `ksolver gpu-scenarios --simulator-pool <8 urls>
+   --simulator-cache-dir <cache-dir> --refresh-simulator-cache-only --simulator-max-live-baselines
+   all`, restarting the pool each round (cache persists per-baseline on disk) until 66 files exist
+   (~11 rounds). On a WORKING (amd64) simulator this is a single pass, no grind.
+3. Volcano baseline: `scripts/volcano-baseline-cache.sh volcano-baseline-cache.json` (faithful
+   harness; ~18 min for 13 gang scenarios).
+4. Report: `ksolver gpu-scenarios --simulator-cache-dir <kss-cache-dir> --volcano-baseline
+   volcano-baseline-cache.json --json`.
+5. Dashboard / live server (verified end-to-end 2026-07-12): the shadow server needs a readable
+   kubeconfig (it bails otherwise) but the demo report itself uses only the caches + scenario library,
+   so any reachable cluster works (an empty `kind` cluster is fine). From the repo root:
+   `KUBECONFIG=<kubeconfig> KSOLVER_GPU_SCENARIO_SIMULATOR_CACHE_DIR=<kss-cache-dir> ksolver shadow`
+   (observe-only default; HTTP on `127.0.0.1:8090`, override with `KSOLVER_SHADOW_ADDR`). The
+   `volcano-baseline-cache.json` at CWD auto-loads. `GET /api/scheduler/demo-report` then returns the
+   report with `beats_gang_aware: 6, gang_aware_baseline_pending: false` (confirmed live: 200,
+   ~305 KB), and the dashboard's honesty strip renders green "proven" with the 6 wins.

@@ -2,6 +2,85 @@
 
 > **For agentic workers:** This is a ranked product/engineering roadmap, not a single implementation ticket. When executing, split each phase into a focused implementation plan with tests, KSS proof criteria, demo criteria, and rollback notes. UI implementation must be delegated to Claude; Codex can do backend, tests, docs, and proof harness work.
 
+## Status update (2026-07-13) — CLI/display bug fixes + exhaustive validation
+
+Three real correctness/honesty bugs found by running the actual app (all invisible to the 587 passing
+unit tests because they live at the I/O / display boundary) and fixed (uncommitted, on branch
+`scheduler`, all fmt-clean + CI-green):
+
+- **`--cluster <name>` was ignored for connection** — `collector::build_client` always used the
+  kubeconfig current-context (`KubeConfigOptions::default()`), so `analyze/shadow/serve/conform
+  --cluster X` connected to whatever current-context was, not X. Fixed (honors the context when the
+  kubeconfig defines it, else current-context — backward-compatible); regression test added;
+  live-validated against a healthy kind cluster. Covers all 4 cluster-reading paths.
+- **Logs were on stdout, corrupting JSON output** — `analyze | jq` was broken; moved tracing to stderr.
+- **Misleading "cost +0.0%"** in the efficiency headline when a do-nothing baseline costs $0 → now
+  shows "cost n/a" (display-only; scores/sorting unchanged). Affects 4 scenarios.
+
+Everything else validated clean across every lens: honesty (all 8 phases + the dollar/ROI surface,
+win-classification, VRAM row-level labeling, device-correctness exact/approx/unsupported), robustness
+(CLI + both HTTP servers, error paths, bad-input 400/404/415, concurrency, no panics), safety
+(observe-only is the default, `/readyz` gates on watch+solver), performance (whitepaper §10 timings hold;
+pruning 17×; scale degrades honestly to Feasible), determinism (report is reproducible run-to-run),
+and overflow (i128-guarded as claimed). The 6 beats-gang-aware wins are variance-robust (all ≥+50%
+margin; 6/6 confirmed across 12 fresh Volcano runs). Gated follow-ups: surface the honest group-aware
+VRAM number (row-LOO 1037 → group-LOO 1240 MAE; committed-data regen); the `best_kube` efficiency
+baseline-selection for 4 do-nothing-baseline scenarios (changes demo numbers, scenario-dependent
+framing); commit + `cargo fmt --all` (92 pre-existing hunks).
+
+## Status update (2026-07-12) — REAL beats-gang-aware achieved (faithful Volcano baseline)
+
+The gang-aware baseline — the roadmap's prerequisite for external `beats-gang-aware` claims — is now
+**produced, faithful, and validated**, entirely in-environment (kind+KWOK+Volcano + a self-built
+arm64 kube-scheduler-simulator). Result: the full real report shows **15 beats-kube-only, 12
+not-proven, and 6 beats-gang-aware** (scored against a real Volcano gang-aware baseline).
+
+- **Both baselines captured here (no external cluster needed):** the real Volcano cache
+  (`scripts/volcano-baseline-cache.sh`, 13 gang scenarios) and all **66 KSS baselines** (33 scenarios
+  × spread/binpack) via a grind that works around a broken simulator `/reset` (one baseline per fresh
+  container).
+- **Three Volcano-harness fidelity bugs found and fixed** (this was the hard part — an over-counting
+  or under-counting baseline would make the demo lie): (1) `stage-fast`'s `pod-complete` stage
+  fast-forwards pods to Succeeded → cumulative over-count (fixed: delete the stage, pods stay Running);
+  (2) `minAvailable` alone lets colocated gangs SCATTER across nodes → crippled Volcano (fixed:
+  self pod-affinity on hostname); (3) poll patience. Validated: colocated-gang-vs-large places exactly
+  14 (the feasible optimum). A `score_gang_baseline` per-node cap was tried and REVERTED (it could
+  under-count a non-deterministic baseline → false wins).
+- **The 6 wins are legitimate, not artifacts** — 2 deeply validated with pod→node placement dumps +
+  run-to-run variance: Volcano's non-gang fillers greedily grab the nodes high-value gangs need,
+  stranding the gangs (e.g. priority-gang: 4 fillers pile on the 4-GPU node, urgent 4-gang Pending —
+  deterministic across 3 runs; colocated-8gpu: fillers fill the 8-GPU node, the 8-pod training gang
+  stranded). ksolver's global + priority-aware solve reserves nodes for the gangs → beats Volcano.
+- **The honest differentiator:** NOT gang scheduling per se (Volcano has that), but **global
+  optimization that protects high-value gangs from greedy filler starvation** on oversubscribed
+  fleets. Caveat: measured vs Volcano's DEFAULT config; operator priority/preemption tuning could
+  narrow it — captured in the honesty layer's `does_not_prove`.
+
+## Status update (2026-07-11) — demo honesty surfacing + regression guards
+
+Delivered 2026-07-11 (demo polish + hardening; no infra gate opened):
+
+- **Phase 8 honesty layer is now SURFACED in the demo dashboard** (`ksolver/static/shadow.html`).
+  Previously the dashboard consumed the benchmark report but rendered none of the server's
+  authoritative honesty fields, re-deriving a weaker client-side classification instead. Now each
+  scenario card shows the server's `win_classification` (color-coded), its `proof_characters`, and
+  the `does_not_prove` caveat; and a report-level **honesty strip** renders
+  `win_classification_summary.headline` **verbatim** (counts + gang-aware-baseline caveat +
+  live/cached/fixture provenance + the "customer $ claims need live/cached" gate), toned amber while
+  `gang_aware_baseline_pending`. Rendering the server string verbatim means the demo cannot drift
+  from or overclaim beyond the unit-tested wording. Verified end-to-end in a real browser (pending /
+  proven / older-report-without-field states).
+- **Two regression guards** locking the above against silent breakage:
+  - Rust `serialized_report_fields_match_the_dashboard_contract` (non-feature-gated) pins the exact
+    JSON key names + shapes + kebab enum values the dashboard reads; proven to fail on a serde rename.
+  - Python `test_model_quality_gate.py` asserts the committed peak-VRAM model satisfies its own
+    declared `quality_gate` (rows / LOO-p95 / LOO-max), that the gate isn't loosened past policy, and
+    that `evaluation.json` agrees with the model; proven to fail on a regressed model. Reads committed
+    artifacts only (no refit, no data mutation).
+- Full suites green: Rust 535 lib tests + Python 45 tests. Remaining roadmap work is unchanged and
+  still infra/operational-gated (real Volcano cache run, in-cluster webhook + TLS, DCGM exporter, DRA
+  driver) — not code-achievable in this environment.
+
 ## Status update (2026-07-10)
 
 Delivered 2026-07-10 (this session):

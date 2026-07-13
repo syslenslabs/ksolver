@@ -12,7 +12,11 @@ const DEFAULT_SIMULATOR_URL: &str = "http://127.0.0.1:1212";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr so stdout stays clean for the machine-readable JSON reports the subcommands
+    // print (`analyze`, `gpu-scenarios --json`, `score-gang-baseline`, `version`). Without this, the
+    // default fmt() writer is stdout and interleaves logs with the JSON, breaking `ksolver ... | jq`.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::from_default_env().add_directive("ksolver=debug".parse()?))
         .init();
 
@@ -301,7 +305,6 @@ async fn main() -> Result<()> {
                 simulator_max_live_baselines,
                 simulator_live_scenarios,
                 volcano_baseline_useful_gpu,
-                ..Default::default()
             };
             if rest.iter().any(|a| a == "--refresh-simulator-cache-only") {
                 let refreshed =

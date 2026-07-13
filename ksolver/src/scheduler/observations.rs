@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn classifies_observation_framework_and_job_type() {
-        let cases = vec![
+        let cases = [
             (
                 Pod {
                     owner_kind: "PyTorchJob".to_string(),

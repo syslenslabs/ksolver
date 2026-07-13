@@ -21,6 +21,11 @@ pub(crate) const FILTER_RESULT_ANNOTATION: &str =
     "kube-scheduler-simulator.sigs.k8s.io/filter-result";
 const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const VERIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(350);
+// The post-reset drain is a distinct operation from verification polling: the simulator's embedded
+// KWOK re-manages nodes and can be slow to clear objects between scenarios, so it gets its own,
+// longer budget. Kept separate from VERIFICATION_TIMEOUT so scheduling-verification patience is
+// unchanged (a genuinely-infeasible pod still fails fast at 10s).
+const SIMULATOR_RESET_TIMEOUT: Duration = Duration::from_secs(30);
 const SIMULATOR_RESET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SIMULATOR_RESET_STABLE_POLLS: usize = 1;
 #[allow(dead_code)]
@@ -361,7 +366,7 @@ fn normalize_backend_name(value: &str) -> &str {
 }
 
 pub(crate) async fn collect_simulator_resources(kubeconfig: &str) -> Result<SimulatorResources> {
-    let client = build_client(kubeconfig).await?;
+    let client = build_client(kubeconfig, None).await?;
     let list_params = ListParams::default();
 
     let pods_api: Api<corev1::Pod> = Api::all(client.clone());
@@ -477,7 +482,7 @@ pub(crate) async fn reset_simulator(client: &reqwest::Client, base_url: &str) ->
         );
     }
 
-    let deadline = Instant::now() + VERIFICATION_TIMEOUT;
+    let deadline = Instant::now() + SIMULATOR_RESET_TIMEOUT;
     let mut empty_polls = 0_usize;
     loop {
         let response = client
@@ -509,7 +514,7 @@ pub(crate) async fn reset_simulator(client: &reqwest::Client, base_url: &str) ->
         if Instant::now() >= deadline {
             anyhow::bail!(
                 "scheduler-simulator reset did not drain existing objects within {:?}: pods={}, nodes={}, namespaces={}",
-                VERIFICATION_TIMEOUT,
+                SIMULATOR_RESET_TIMEOUT,
                 pod_count,
                 node_count,
                 namespace_count

@@ -1,0 +1,15 @@
+{
+  "colocated-8gpu-training-gang": 10,
+  "colocated-gang-vs-large": 14,
+  "deadline-gang-vs-batch": 4,
+  "fair-share-gang-scarce-gpu": 4,
+  "gang-or-throughput": 10,
+  "oversubscribed-training-day": 12,
+  "priority-gang-over-fillers": 4,
+  "queue-wait-gang-over-new-fillers": 4,
+  "repair-not-enough-total-gpu-kss": 0,
+  "repair-policy-blocked-no-action-kss": 0,
+  "three-gangs-one-fleet": 12,
+  "two-training-gangs-or-fillers": 4,
+  "weekend-flex-rightsize": 8
+}

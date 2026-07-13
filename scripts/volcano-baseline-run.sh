@@ -41,11 +41,14 @@ kind create cluster --name "$NAME" --config "$KC.kind" --kubeconfig "$KC" >/dev/
 export KUBECONFIG="$KC"
 kubectl apply -f "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VER}/kwok.yaml" >/dev/null
 kubectl apply -f "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VER}/stage-fast.yaml" >/dev/null
+# Keep pods RUNNING: stage-fast's pod-complete stage fast-forwards pods to Succeeded, freeing their
+# GPU reservation so Volcano keeps piling more onto a node (cumulative over-count, e.g. 20 on 19 GPU).
+kubectl delete stage pod-complete --ignore-not-found >/dev/null 2>&1
 kubectl -n kube-system rollout status deploy/kwok-controller --timeout=120s >&2
 kubectl apply -f "$VOLCANO_MANIFEST" >/dev/null
 kubectl -n volcano-system rollout status deploy/volcano-scheduler --timeout=180s >&2
 kubectl -n volcano-system rollout status deploy/volcano-admission --timeout=180s >&2
-for _ in $(seq 1 40); do kubectl -n volcano-system get endpoints volcano-admission-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q . && break; sleep 3; done
+for _ in $(seq 1 60); do kubectl -n volcano-system get endpoints volcano-admission-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q . && break; sleep 3; done
 
 echo "==> creating KWOK GPU nodes + Volcano Jobs for the scenario" >&2
 # Emit node + vcjob manifests from the scenario, then apply.
@@ -60,12 +63,20 @@ for n in s["nodes"]:
                 "capacity":{"cpu":"32","memory":"256Gi","pods":"110","nvidia.com/gpu":str(n["gpus"])}}})
 for j in s["jobs"]:
     reqs={"nvidia.com/gpu":str(j["gpus_per_pod"])} if j["gpus_per_pod"]>0 else {}
+    colo = j["colocate"] and j["pods"]>1
+    tspec={"schedulerName":"volcano","nodeSelector":{"type":"kwok"},
+      "tolerations":[{"key":"kwok.x-k8s.io/node","operator":"Exists","effect":"NoSchedule"}],
+      "containers":[{"name":"c","image":"registry.k8s.io/pause:3.10","resources":{"limits":reqs}}]}
+    # Colocated gang => all pods on ONE node (self pod-affinity on hostname). minAvailable gives
+    # all-or-nothing but NOT single-node; without this, colocated gangs scatter and fragment nodes,
+    # crippling Volcano's placement and dishonestly understating its useful GPU.
+    if colo:
+        tspec["affinity"]={"podAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[
+          {"labelSelector":{"matchLabels":{"gang":j["name"]}},"topologyKey":"kubernetes.io/hostname"}]}}
     docs.append({"apiVersion":"batch.volcano.sh/v1alpha1","kind":"Job",
       "metadata":{"name":j["name"],"namespace":"default"},
-      "spec":{"minAvailable": j["pods"] if (j["colocate"] and j["pods"]>1) else 1,"schedulerName":"volcano","queue":"default",
-        "tasks":[{"replicas":j["pods"],"name":"w","template":{"spec":{"schedulerName":"volcano",
-          "nodeSelector":{"type":"kwok"},"tolerations":[{"key":"kwok.x-k8s.io/node","operator":"Exists","effect":"NoSchedule"}],
-          "containers":[{"name":"c","image":"registry.k8s.io/pause:3.10","resources":{"limits":reqs}}]}}}]}})
+      "spec":{"minAvailable": j["pods"] if colo else 1,"schedulerName":"volcano","queue":"default",
+        "tasks":[{"replicas":j["pods"],"name":"w","template":{"metadata":{"labels":{"gang":j["name"]}},"spec":tspec}}]}})
 print("\n---\n".join(json.dumps(d) for d in docs))
 PY
 for a in $(seq 1 20); do kubectl apply -f "$KC.yaml" >/dev/null 2>&1 && break; sleep 3; done
@@ -75,7 +86,7 @@ prev=-1; stable=0
 for _ in $(seq 1 40); do
   cur=$(kubectl get pods -n default -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | grep -c . || true)
   if [ "$cur" -eq "$prev" ]; then stable=$((stable+1)); else stable=0; fi
-  [ "$stable" -ge 3 ] && break; prev="$cur"; sleep 3
+  [ "$stable" -ge 6 ] && break; prev="$cur"; sleep 3
 done
 
 echo "==> reading placements + scoring VRAM-safe useful GPU" >&2

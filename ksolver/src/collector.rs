@@ -119,7 +119,9 @@ impl KubeCollector {
             },
             "collector initializing"
         );
-        let client = build_client(&kubeconfig).await?;
+        // Honor the requested cluster as a kubeconfig context (falls back to current-context if it
+        // isn't a defined context) so `--cluster <name>` actually selects the cluster to read.
+        let client = build_client(&kubeconfig, Some(cluster_name.as_str())).await?;
         Ok(Self {
             cluster_name,
             client,
@@ -717,7 +719,36 @@ fn is_transient_kube_error(err: &Error) -> bool {
         || chain.contains("try again later")
 }
 
-pub(crate) async fn build_client(kubeconfig: &str) -> Result<Client> {
+/// Sentinel `cluster_name` meaning "no specific cluster requested" — `analyze`/`shadow` default the
+/// name to this, so it must map to the kubeconfig's current-context, NOT be looked up as a literal
+/// context (a user could coincidentally have a context named "default", and the no-flag case must
+/// still use current-context).
+const CLUSTER_NAME_SENTINEL: &str = "default";
+
+/// Choose the kube-config options for an explicit kubeconfig. When `context` names a real context the
+/// kubeconfig defines (and isn't the "no cluster requested" sentinel), select it; otherwise fall back
+/// to the current-context. This is the fix for the `--cluster <name>` flag being silently ignored:
+/// previously `build_client` always used `KubeConfigOptions::default()` (current-context), so
+/// `analyze/shadow --cluster X` connected to whatever the kubeconfig's current-context was, not X.
+/// Guarding on existence + the sentinel keeps the no-flag case (default `cluster_name = "default"`)
+/// on current-context exactly as before.
+fn select_kubeconfig_options(doc: &Kubeconfig, context: Option<&str>) -> KubeConfigOptions {
+    match context {
+        Some(name)
+            if !name.is_empty()
+                && name != CLUSTER_NAME_SENTINEL
+                && doc.contexts.iter().any(|c| c.name == name) =>
+        {
+            KubeConfigOptions {
+                context: Some(name.to_string()),
+                ..Default::default()
+            }
+        }
+        _ => KubeConfigOptions::default(),
+    }
+}
+
+pub(crate) async fn build_client(kubeconfig: &str, context: Option<&str>) -> Result<Client> {
     if kubeconfig.is_empty() {
         debug!(source = "default", "building kube client");
         let mut config = Config::infer()
@@ -734,7 +765,8 @@ pub(crate) async fn build_client(kubeconfig: &str) -> Result<Client> {
     );
     let kubeconfig_doc = Kubeconfig::read_from(kubeconfig)
         .with_context(|| format!("read kubeconfig from {kubeconfig}"))?;
-    let mut config = Config::from_custom_kubeconfig(kubeconfig_doc, &KubeConfigOptions::default())
+    let options = select_kubeconfig_options(&kubeconfig_doc, context);
+    let mut config = Config::from_custom_kubeconfig(kubeconfig_doc, &options)
         .await
         .context("build kube config from explicit kubeconfig")?;
     apply_timeouts(&mut config);
@@ -2080,8 +2112,8 @@ async fn list_vertical_pod_autoscalers(
 mod tests {
     use super::{
         extract_extended_resources, modeled_preferred_pod_terms, parse_bytes,
-        parse_vpa_safety_margin_arg, select_dra_version, sum_pod_extended_requests,
-        sum_pod_spec_requests, to_model_pod,
+        parse_vpa_safety_margin_arg, select_dra_version, select_kubeconfig_options,
+        sum_pod_extended_requests, sum_pod_spec_requests, to_model_pod, Kubeconfig,
     };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -2199,7 +2231,6 @@ mod tests {
                         }]),
                         ..Default::default()
                     }),
-                    ..Default::default()
                 }]),
                 ..Default::default()
             }),
@@ -2399,6 +2430,47 @@ mod tests {
         );
         // Nothing served.
         assert_eq!(select_dra_version(&[], None), None);
+    }
+
+    #[test]
+    fn build_client_honors_requested_context_else_current() {
+        // Regression guard for the `--cluster <name>` bug: the collector must select the requested
+        // context when the kubeconfig defines it, and otherwise fall back to current-context (so the
+        // no-flag / "default" sentinel case is unchanged).
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: alpha
+clusters:
+- name: c-alpha
+  cluster: {server: "https://alpha.example:6443"}
+- name: c-beta
+  cluster: {server: "https://beta.example:6443"}
+- name: c-default
+  cluster: {server: "https://default.example:6443"}
+contexts:
+- name: alpha
+  context: {cluster: c-alpha, user: u}
+- name: beta
+  context: {cluster: c-beta, user: u}
+- name: default
+  context: {cluster: c-default, user: u}
+users:
+- name: u
+  user: {}
+"#;
+        let doc = Kubeconfig::from_yaml(yaml).expect("parse test kubeconfig");
+        let ctx = |name| select_kubeconfig_options(&doc, name).context;
+        // A defined context is honored (this is the fix — previously ignored).
+        assert_eq!(ctx(Some("beta")).as_deref(), Some("beta"));
+        // An undefined context falls back to current-context (backward-compatible).
+        assert_eq!(ctx(Some("ghost")), None);
+        // Empty and None both mean current-context.
+        assert_eq!(ctx(Some("")), None);
+        assert_eq!(ctx(None), None);
+        // The "default" sentinel (analyze/shadow's no-flag default) must map to current-context even
+        // when a context literally named "default" EXISTS — the no-flag case must not silently switch.
+        assert_eq!(ctx(Some("default")), None);
     }
 
     #[test]

@@ -1283,6 +1283,12 @@ pub struct ScenarioResult {
     /// `policy-weighted`, `binpack`), derived from the scenario's own job definitions — so an
     /// operator sees WHAT KIND of proof it is. These describe ingredients, not win claims.
     pub proof_characters: Vec<String>,
+    /// VRAM-safe useful GPU the gang-aware (Volcano) baseline achieved, when one was captured for this
+    /// scenario (offline via scripts/volcano-baseline-cache.sh). `Some` only for gang scenarios with a
+    /// cached baseline; `None` otherwise. Surfaced so the demo can VISUALLY substantiate a
+    /// `beats-gang-aware` verdict — the viewer sees ksolver's bar exceed Volcano's, not just a badge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gang_aware_useful_gpu: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1426,6 +1432,8 @@ pub async fn run_benchmark_with_options(
         let does_not_prove = scenario_does_not_prove(
             win_classification,
             proof_provenance(&kube.source, &kube_binpack.source),
+            ksolver.metrics.useful_gpu,
+            kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
         );
         let proof_characters = scenario_proof_characters(&scenario);
         results.push(ScenarioResult {
@@ -1445,6 +1453,7 @@ pub async fn run_benchmark_with_options(
             win_classification,
             does_not_prove,
             proof_characters,
+            gang_aware_useful_gpu: gang_aware,
         });
     }
     // Rank by efficiency (GPU utilization + cost win) so the scenarios where ksolver most clearly
@@ -3508,9 +3517,19 @@ fn efficiency(base: &PlacementMetrics, ks: &PlacementMetrics) -> (i64, bool, Str
         || gang_gain > 0
         || node_reduction >= 2
         || util_gain >= 150;
+    // Display-only: when the baseline costs $0 (e.g. a do-nothing kube baseline that admitted nothing)
+    // but ksolver spends >$0, the cost percentage is undefined — showing "+0.0%" would falsely imply
+    // no cost change. Show "n/a" and let the raw "0->N/mo" transition carry the honest signal. This
+    // does not touch cost_pct_milli, so the efficiency score / significance / sorting are unchanged.
+    let cost_pct_display =
+        if base.cost_active_nodes_monthly == 0 && ks.cost_active_nodes_monthly > 0 {
+            "n/a".to_string()
+        } else {
+            format!("{:+.1}%", cost_pct_milli as f64 / 10.0)
+        };
     let headline = format!(
-        "cost {:+.1}% ({}->{}/mo), util {:+} milli ({}->{}), admitted useful GPU {:+}, active nodes {}->{}",
-        cost_pct_milli as f64 / 10.0,
+        "cost {} ({}->{}/mo), util {:+} milli ({}->{}), admitted useful GPU {:+}, active nodes {}->{}",
+        cost_pct_display,
         base.cost_active_nodes_monthly,
         ks.cost_active_nodes_monthly,
         util_gain,
@@ -9541,11 +9560,27 @@ fn scenario_proof_characters(scenario: &ScenarioSpec) -> Vec<String> {
 
 /// Phase 8 "what this does not prove": derive honest limitation statements for a scenario from its
 /// win classification and its baseline provenance. Keeps demo claims from overreaching.
-fn scenario_does_not_prove(win: WinClassification, provenance: ProofProvenance) -> Vec<String> {
+fn scenario_does_not_prove(
+    win: WinClassification,
+    provenance: ProofProvenance,
+    ksolver_useful: i64,
+    best_kube_useful: i64,
+) -> Vec<String> {
     let mut out = Vec::new();
     match win {
         WinClassification::BeatsKubeOnly => out.push(
             "superiority over a gang-aware scheduler — no Volcano/gang-aware baseline is wired"
+                .to_string(),
+        ),
+        // `not-proven` has two distinct causes; disclose the ACCURATE one. If ksolver beat both kube
+        // baselines but a gang-aware (Volcano) baseline was wired that it did NOT exceed, the honest
+        // gap is vs Volcano, NOT vs kube — saying "no win over kube" would contradict the card's own
+        // "+N useful GPU vs best kube". Only when ksolver failed to beat kube is the kube disclaimer
+        // correct. (A not-proven with ksolver>best_kube can only be the gang-tie case, since otherwise
+        // it would classify beats-kube-only or beats-gang-aware.)
+        WinClassification::NotProven if ksolver_useful > best_kube_useful => out.push(
+            "superiority over the gang-aware (Volcano) baseline — ksolver beats the kube baselines \
+             here but does not exceed Volcano's safe useful-GPU (gang wins are table stakes)"
                 .to_string(),
         ),
         WinClassification::NotProven => out
@@ -9736,6 +9771,7 @@ mod tests {
             win_classification: wc,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
         };
         let results = vec![
             mk(WinClassification::BeatsKubeOnly),
@@ -9758,6 +9794,138 @@ mod tests {
         assert_eq!(s.deterministic_fixture_scenarios, 3);
         assert_eq!(s.live_kss_scenarios, 0);
         assert!(s.headline.contains("provenance:"));
+    }
+
+    #[test]
+    fn efficiency_headline_shows_cost_na_for_zero_base_not_misleading_zero_pct() {
+        // Regression guard: a do-nothing kube baseline costs $0 while ksolver spends >$0. The cost
+        // percentage is undefined, so the headline must show "cost n/a" — NOT a misleading "+0.0%"
+        // that falsely implies no cost change. The raw "0->N/mo" transition must still be shown.
+        let base = PlacementMetrics {
+            cost_active_nodes_monthly: 0,
+            ..Default::default()
+        };
+        let ks = PlacementMetrics {
+            cost_active_nodes_monthly: 16000,
+            useful_gpu: 2,
+            ..Default::default()
+        };
+        let (_score, _significant, headline) = efficiency(&base, &ks);
+        assert!(
+            headline.contains("cost n/a"),
+            "zero-base cost must show 'cost n/a', got: {headline}"
+        );
+        assert!(
+            !headline.contains("+0.0%"),
+            "must not show a misleading +0.0% for a $0->$N change, got: {headline}"
+        );
+        assert!(
+            headline.contains("0->16000/mo"),
+            "raw cost transition must be preserved, got: {headline}"
+        );
+
+        // Normal case: base cost > 0 -> a real percentage is shown (unchanged behavior).
+        let base2 = PlacementMetrics {
+            cost_active_nodes_monthly: 24000,
+            ..Default::default()
+        };
+        let ks2 = PlacementMetrics {
+            cost_active_nodes_monthly: 28000,
+            ..Default::default()
+        };
+        let (_s, _g, headline2) = efficiency(&base2, &ks2);
+        assert!(
+            headline2.contains('%') && !headline2.contains("cost n/a"),
+            "nonzero-base cost must show a real %, got: {headline2}"
+        );
+    }
+
+    #[test]
+    fn serialized_report_fields_match_the_dashboard_contract() {
+        // The shadow dashboard (ksolver/static/shadow.html) reads these fields straight off the
+        // demo-report JSON: per-scenario `sc.win_classification` / `sc.does_not_prove` /
+        // `sc.proof_characters`, and the top-level `report.win_classification_summary` rollup. A
+        // serde rename here would silently blank the UI, so pin the exact JSON key names + shapes.
+        let scenario = ScenarioResult {
+            name: "colocated-gang-vs-large".to_string(),
+            description: String::new(),
+            tier: Tier::Small,
+            benefit_score: 0,
+            headline: String::new(),
+            kube: empty_engine("kube"),
+            kube_binpack: empty_engine("kube-binpack"),
+            ksolver: empty_engine("ksolver"),
+            reduced_ksolver: empty_engine("ksolver"),
+            regret: RegretMetrics::default(),
+            efficiency_score: 0,
+            significantly_better: false,
+            efficiency_headline: String::new(),
+            win_classification: WinClassification::BeatsGangAware,
+            does_not_prove: vec!["policy-weighted preemption".to_string()],
+            proof_characters: vec!["gang-scheduling".to_string(), "vram-prediction".to_string()],
+            gang_aware_useful_gpu: Some(10),
+        };
+        let sc = serde_json::to_value(&scenario).expect("scenario serializes");
+        // Exact snake_case keys the dashboard indexes by.
+        assert_eq!(
+            sc.get("win_classification").and_then(|v| v.as_str()),
+            Some("beats-gang-aware"),
+            "dashboard reads sc.win_classification as the kebab string"
+        );
+        assert_eq!(
+            sc.get("does_not_prove")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1),
+            "dashboard reads sc.does_not_prove as an array of strings"
+        );
+        assert_eq!(
+            sc.get("proof_characters")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+            "dashboard reads sc.proof_characters as an array of strings"
+        );
+        assert_eq!(
+            sc.get("gang_aware_useful_gpu").and_then(|v| v.as_i64()),
+            Some(10),
+            "dashboard reads sc.gang_aware_useful_gpu to draw the Volcano bar substantiating beats-gang-aware",
+        );
+
+        // Top-level rollup object + its fields the dashboard's honesty strip reads.
+        let summary = summarize_win_classification(
+            std::slice::from_ref(&scenario),
+            /* gang_aware_baseline_present */ true,
+        );
+        let js = serde_json::to_value(&summary).expect("summary serializes");
+        for key in [
+            "total",
+            "beats_kube_only",
+            "not_proven",
+            "beats_gang_aware",
+            "gang_aware_baseline_pending",
+            "live_kss_scenarios",
+            "cached_kss_scenarios",
+            "deterministic_fixture_scenarios",
+            "headline",
+        ] {
+            assert!(
+                js.get(key).is_some(),
+                "win_classification_summary must carry `{key}` for the dashboard"
+            );
+        }
+        assert!(
+            js.get("headline")
+                .and_then(|v| v.as_str())
+                .is_some_and(|h| !h.is_empty()),
+            "dashboard renders win_classification_summary.headline verbatim; it must be non-empty"
+        );
+        assert_eq!(
+            js.get("gang_aware_baseline_pending")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "with a gang-aware baseline present the pending flag drives the strip's proven tone"
+        );
     }
 
     #[test]
@@ -9852,20 +10020,25 @@ mod tests {
     #[test]
     fn does_not_prove_reflects_classification_and_provenance() {
         // beats-kube-only + live baseline -> only the gang-aware disclaimer.
-        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::LiveKss);
+        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::LiveKss, 10, 6);
         assert_eq!(r.len(), 1);
         assert!(r[0].contains("gang-aware"));
-        // not-proven + cached -> a win disclaimer AND a cached-provenance disclaimer.
-        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::CachedKss);
-        assert!(r.iter().any(|s| s.contains("useful-GPU win")));
+        // not-proven because ksolver did NOT beat kube (ksolver<=best_kube) -> the KUBE disclaimer.
+        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::CachedKss, 5, 6);
+        assert!(r.iter().any(|s| s.contains("useful-GPU win over the best kube")));
         assert!(r.iter().any(|s| s.contains("cached")));
+        // not-proven because ksolver BEAT kube but not Volcano (ksolver>best_kube) -> the VOLCANO
+        // disclaimer, NOT the kube one (else it would contradict the card's "+N vs best kube").
+        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::LiveKss, 12, 8);
+        assert!(r.iter().any(|s| s.contains("gang-aware (Volcano) baseline")), "got {r:?}");
+        assert!(!r.iter().any(|s| s.contains("win over the best kube")), "must not claim no-kube-win when it beat kube: {r:?}");
         // deterministic fixture -> fixture disclaimer.
         let r =
-            scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::DeterministicFixture);
+            scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::DeterministicFixture, 10, 6);
         assert!(r.iter().any(|s| s.contains("deterministic local fixture")));
         // beats-gang-aware + live -> nothing to disclaim.
         assert!(
-            scenario_does_not_prove(WinClassification::BeatsGangAware, ProofProvenance::LiveKss)
+            scenario_does_not_prove(WinClassification::BeatsGangAware, ProofProvenance::LiveKss, 16, 8)
                 .is_empty()
         );
     }
@@ -10195,6 +10368,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+                gang_aware_useful_gpu: None,
             },
             ScenarioResult {
                 name: "equal".to_string(),
@@ -10241,6 +10415,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+                gang_aware_useful_gpu: None,
             },
         ];
 
@@ -10323,6 +10498,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
             }
         };
         let scenarios = vec![
@@ -10392,6 +10568,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
             }
         };
         let scenarios = vec![
@@ -10531,6 +10708,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
         };
 
         let summary = summarize_roi(&[scenario]);
@@ -10837,6 +11015,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
         };
         let scenarios = vec![scenario("top", 100), scenario("second", 50)];
         let hero = HeroDemoSummary {
@@ -11880,6 +12059,7 @@ mod tests {
             win_classification: WinClassification::NotProven,
             does_not_prove: Vec::new(),
             proof_characters: Vec::new(),
+            gang_aware_useful_gpu: None,
         };
         let tenant_budget = TenantBudgetProof {
             name: "tenant-budget-hard-admission-cap".to_string(),
@@ -12764,7 +12944,12 @@ mod tests {
             let prov = proof_provenance(&s.kube.source, &s.kube_binpack.source);
             assert_eq!(
                 s.does_not_prove,
-                scenario_does_not_prove(s.win_classification, prov),
+                scenario_does_not_prove(
+                    s.win_classification,
+                    prov,
+                    s.ksolver.metrics.useful_gpu,
+                    s.kube.metrics.useful_gpu.max(s.kube_binpack.metrics.useful_gpu),
+                ),
                 "scenario {} does_not_prove is inconsistent with its class/provenance",
                 s.name
             );

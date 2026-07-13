@@ -267,6 +267,23 @@
   .scen-summary .stats { display: flex; gap: 30px; flex-wrap: wrap; flex: 0 1 auto; }
   .scen-summary .stat .v { font-size: 22px; }
   .scen-summary .spacer { flex: 1 1 auto; }
+  .scen-honesty { display: flex; align-items: baseline; gap: 10px; margin: -6px 2px 16px;
+                  font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+  .scen-honesty .lbl { flex: 0 0 auto; font-weight: 600; letter-spacing: .04em;
+                       text-transform: uppercase; font-size: 10.5px; padding: 1px 7px;
+                       border: 1px solid var(--border); border-radius: 999px; opacity: .9; }
+  .scen-honesty.pending .lbl { color: var(--warn); border-color: var(--warn); }
+  .scen-honesty.proven .lbl { color: var(--good); border-color: var(--good); }
+  .scen-honesty .txt { flex: 1 1 auto; }
+  .demo-script { border: 1px solid var(--border); border-radius: var(--radius);
+                 background: linear-gradient(180deg, var(--surface), var(--bg-2)); padding: 14px 16px; margin: 4px 0 16px; }
+  .demo-script .ds-title { font-size: 14px; font-weight: 700; color: var(--ink); }
+  .demo-script .ds-q { color: var(--muted); font-size: 12.5px; margin: 4px 0 10px; }
+  .demo-script ol { margin: 0; padding-left: 20px; display: grid; gap: 7px; }
+  .demo-script li { font-size: 12.5px; line-height: 1.5; }
+  .demo-script .ds-step-q { color: var(--ink); }
+  .demo-script .ds-step-ev { color: var(--muted); }
+  .demo-script .ds-close { margin-top: 10px; color: var(--good); font-size: 12.5px; font-weight: 600; }
   .scen-controls { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0; }
   .scen-page-filter { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
   .scen-page-filter .btn.active {
@@ -671,6 +688,7 @@
       <summary class="hd"><span class="glyph">i</span>How to read these numbers</summary>
       <div class="body">Clusters are <b>fixed</b>: node count and GPU capacity are held constant, with no autoscaling. Cost is an <b>active-node proxy</b> (idle nodes priced at zero), not a cloud bill. A higher ksolver figure is a real win only when it reflects more useful GPU admitted, tighter packing, or correct gangs — cost-only and right-sizing outcomes are labelled as such.</div>
     </details>
+    <div id="demo-script"></div>
     <div class="callout warn hidden" id="scen-prov-banner"></div>
     <div class="scen-summary" id="scen-summary" style="display:none">
       <div class="stats" id="scen-stats"></div>
@@ -688,6 +706,7 @@
         <div class="scen-page-filter" id="scen-page-filter"></div>
       </div>
     </div>
+    <div class="scen-honesty" id="scen-honesty" style="display:none"></div>
     <div class="scenarios" id="scenarios"></div>
     <div class="empty-hint" id="scen-empty">Waiting for the scenario benchmark…</div>
     <!-- vram predictor demo below scenario cards -->
@@ -1309,17 +1328,44 @@
     plans.forEach(function (p) {
       var card = el("div", "card"); card.style.padding = "14px 16px";
       card.appendChild(el("h3", null, (p.target || "target") + " · " + fmt(p.target_gpu_request || 0) + " GPU"));
-      card.appendChild(el("div", "run-note", "would free " + fmt(p.freed_gpu || 0) + " GPU on " + (p.node || "node")));
+      // Freed GPU AND the disruption cost paid to get there — the safety/cost half of the story.
+      card.appendChild(el("div", "run-note", "would free " + fmt(p.freed_gpu || 0) + " GPU on " + (p.node || "node")
+        + " · disruption cost " + fmt(p.disruption_cost || 0)));
       if (p.explanation) card.appendChild(el("div", "section-sub", p.explanation));
       var list = el("dl", "kv"); list.style.marginTop = "8px";
       (p.actions || []).slice(0, 8).forEach(function (a) {
         list.appendChild(el("dt", null, (a.action || "move") + " " + (a.pod || "")));
-        list.appendChild(el("dd", null, fmt(a.gpu_request || 0) + "g @ " + (a.node || "")));
+        // Show the migration target (to_node) + per-action cost + reason so the move is legible.
+        var dest = a.to_node ? ((a.node || "?") + " → " + a.to_node) : (a.node || "");
+        var meta = fmt(a.gpu_request || 0) + "g @ " + dest + " · cost " + fmt(a.disruption_cost || 0)
+          + (a.reason ? " · " + a.reason : "");
+        list.appendChild(el("dd", null, meta));
       });
       card.appendChild(list);
+      // Skipped candidates = the "why it's safe" story: protected pods ksolver refused to disrupt.
+      var skipped = p.skipped_candidates || [];
+      if (skipped.length) {
+        var skHead = el("div", "section-sub"); skHead.style.marginTop = "8px";
+        skHead.textContent = "Protected — not disrupted (" + skipped.length + "):";
+        card.appendChild(skHead);
+        var skList = el("dl", "kv");
+        skipped.slice(0, 8).forEach(function (sk) {
+          skList.appendChild(el("dt", null, (sk.pod || "pod") + (sk.node ? " @ " + sk.node : "")));
+          skList.appendChild(el("dd", null, sk.reason || "protected"));
+        });
+        card.appendChild(skList);
+      }
       grid.appendChild(card);
     });
     host.appendChild(grid);
+    // Fail-closed / unrepairable reasons for targets with no safe plan — the honest "no action" story.
+    var notes = repairPlan.repair_notes || [];
+    if (notes.length) {
+      var noteBox = el("div", "run-note"); noteBox.style.marginTop = "10px";
+      noteBox.appendChild(el("b", null, "Unrepairable / fail-closed: "));
+      noteBox.appendChild(document.createTextNode(notes.slice(0, 6).join(" · ")));
+      host.appendChild(noteBox);
+    }
   }
 
   // ---------- scenarios ----------
@@ -1608,8 +1654,12 @@
     var host = $("proof-rows"); clear(host);
     var preemption = (report && report.preemption_migration_kss_proofs) || [];
     var vram = (report && report.vram_kss_proofs) || [];
-    if (!preemption.length && !vram.length) {
-      host.appendChild(el("div", "proof-empty", "No repair or VRAM proof rows in this report."));
+    // Phase 3 whole-queue policy proofs (priority / deadline / business-value / fair-share admission,
+    // and their weight-zero inertness). Computed report-wide and shown in the CLI; surface them here so
+    // the demo exposes the policy differentiators, not just the repair/VRAM ones.
+    var assertions = (report && report.feature_assertions) || [];
+    if (!preemption.length && !vram.length && !assertions.length) {
+      host.appendChild(el("div", "proof-empty", "No repair, VRAM, or policy proof rows in this report."));
       return;
     }
     var section = el("div", "proof-section");
@@ -1654,8 +1704,32 @@
       tbl.appendChild(tbody); card.appendChild(tbl); section.appendChild(card);
     }
 
+    // Policy/feature proofs have a simpler shape ({name, passed, evidence}); render as a compact
+    // pass/fail list so the priority/deadline/business-value/fair-share differentiators are visible.
+    function buildAssertions(title, rows) {
+      if (!rows.length) return;
+      section.appendChild(el("div", "proof-group-title", title));
+      var card = el("div", "card");
+      var tbl = document.createElement("table");
+      var thead = document.createElement("thead");
+      var hr = el("tr");
+      ["Feature proof", "Passed", "Evidence"].forEach(function (h) { hr.appendChild(el("th", null, h)); });
+      thead.appendChild(hr); tbl.appendChild(thead);
+      var tbody = document.createElement("tbody");
+      rows.forEach(function (row) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, row.name || ""));
+        tr.appendChild(el("td", row.passed ? "proof-passed" : "proof-failed", row.passed ? "PASS" : "FAIL"));
+        var evTd = el("td", "proof-claim", row.evidence || ""); evTd.title = row.evidence || "";
+        tr.appendChild(evTd);
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody); card.appendChild(tbl); section.appendChild(card);
+    }
+
     buildGroup("Preemption / migration repair proof", preemption);
     buildGroup("VRAM prediction proof", vram);
+    buildAssertions("Policy & feature proofs (priority / deadline / business-value / fair-share)", assertions);
     host.appendChild(section);
   }
 
@@ -1713,7 +1787,9 @@
     left.appendChild(el("div", "vram-driver-sub", drivers.summary || "Feature contributions from the fitted peak-VRAM model."));
     head.appendChild(left);
     var quality = drivers.quality || {};
-    head.appendChild(el("span", "chip ks", "LOO p95 " + modelMetric(quality.loo_p95_mib, " MiB")));
+    var qualityChip = el("span", "chip ks", "LOO p95 " + modelMetric(quality.loo_p95_mib, " MiB"));
+    qualityChip.title = "Row-level leave-one-out; optimistic for novel configs (near-duplicate training rows).";
+    head.appendChild(qualityChip);
     box.appendChild(head);
     var list = el("div", "vram-driver-list");
     (drivers.top_drivers || []).slice(0, 6).forEach(function (d) {
@@ -1795,8 +1871,21 @@
     stats.appendChild(stat("Runs", fmt(data.rows || 0), "calibration rows"));
     stats.appendChild(stat("Time-series", fmt(data.time_series_samples || 0), "samples"));
     stats.appendChild(stat("Near capacity", fmt(data.near_capacity_rows_ge_90pct || 0), ">=90% VRAM"));
-    stats.appendChild(stat("LOO MAE", modelMetric(reg.loo_mae_mib, " MiB"), "global"));
-    stats.appendChild(stat("LOO p95", modelMetric(reg.loo_p95_abs_error_mib, " MiB"), "global"));
+    // The committed leave-one-out error is computed over training ROWS. Because the training set has
+    // many near-duplicate rows (repeated samples per config), row-level LOO leaks a config's twins
+    // across train/test and is OPTIMISTIC for novel configs — leave-one-config-out generalization is
+    // higher. Label as "row-level" (non-brittle: no hard number to go stale on refit) so the metric
+    // isn't overread as typical novel-workload error; steer customer accuracy claims to the honest
+    // group-aware number.
+    var looTip = "Leave-one-out over training rows. Training configs repeat (near-duplicate rows), so "
+      + "row-level LOO understates error on novel configs — leave-one-config-out generalization is "
+      + "higher. Use the group-aware number for customer accuracy claims.";
+    var looMae = stat("LOO MAE", modelMetric(reg.loo_mae_mib, " MiB"), "row-level");
+    var looP95 = stat("LOO p95", modelMetric(reg.loo_p95_abs_error_mib, " MiB"), "row-level");
+    looMae.title = looTip;
+    looP95.title = looTip;
+    stats.appendChild(looMae);
+    stats.appendChild(looP95);
     stats.appendChild(stat("Risk recall", modelMetric((oom.recall || 0) * 100, "%"), "OOM/near-cap"));
 	    stats.appendChild(stat("Synthetic headroom probes", fmt(reserve.pressure_rows || 0), "reserve_extra_mib padding rows; not organic model demand"));
 	    stats.appendChild(stat("Max synthetic headroom", modelMetric(reserve.max_synthetic_reserve_extra_mib, " MiB"), "largest synthetic reserve_extra_mib VRAM probe"));
@@ -2036,11 +2125,36 @@
 	      sigs.diag = "";
 	    });
   }
+  // Guided SRE demo narrative (report.sre_demo_script): the computed "what should the SRE do, why is
+  // it safe" walkthrough. Rendered at the top of the Scenarios tab so the demo tells a story, not just
+  // shows panels. Server-composed; the client renders its steps/questions/evidence verbatim.
+  function renderDemoScript(script) {
+    var host = $("demo-script"); clear(host);
+    if (!script || !(script.steps && script.steps.length)) return;
+    var box = el("section", "demo-script");
+    box.appendChild(el("div", "ds-title", script.headline || script.name || "Guided demo"));
+    if (script.primary_question) box.appendChild(el("div", "ds-q", script.primary_question));
+    var ol = document.createElement("ol");
+    script.steps.forEach(function (s) {
+      var li = el("li");
+      li.appendChild(el("span", "ds-step-q", (s.title ? s.title + " — " : "") + (s.operator_question || "")));
+      if (s.evidence) {
+        li.appendChild(document.createTextNode(" "));
+        li.appendChild(el("span", "ds-step-ev", "· " + s.evidence));
+      }
+      ol.appendChild(li);
+    });
+    box.appendChild(ol);
+    if (script.operator_close) box.appendChild(el("div", "ds-close", script.operator_close));
+    host.appendChild(box);
+  }
+
   function renderScenarios(report, calibration) {
     lastReport = report;
     var effectiveCalibration = calibration || lastVramCalibration;
     lastVramCalibration = effectiveCalibration;
     renderProofRows(report);
+    renderDemoScript(report && report.sre_demo_script);
     var vramHost = $("vram-invest");
     clear(vramHost);
     var vramPanel = renderVramInvestmentDemo(report, effectiveCalibration);
@@ -2110,6 +2224,22 @@
     st.appendChild(stat("Avg util Δ", (utilGain >= 0 ? "+" : "") + ((filteredList.length ? utilGain / filteredList.length : 0) / 1000).toFixed(1) + "%"));
     renderScenProvBanner(filteredList, report);
 
+    // Report-level honesty rollup (Phase 8): render the server's own unit-tested `headline`
+    // verbatim — the client never re-derives the counts, so the demo cannot drift or overclaim.
+    var honesty = $("scen-honesty");
+    if (honesty) {
+      clear(honesty);
+      var wcs = report && report.win_classification_summary;
+      if (wcs && wcs.headline) {
+        honesty.style.display = "flex";
+        honesty.className = "scen-honesty " + (wcs.gang_aware_baseline_pending ? "pending" : "proven");
+        honesty.appendChild(el("span", "lbl", "honesty"));
+        honesty.appendChild(el("span", "txt", wcs.headline));
+      } else {
+        honesty.style.display = "none";
+      }
+    }
+
     var sortSel = $("scen-sort-sel"); var mode = sortSel ? sortSel.value : "gain";
     filteredList.sort(function (a, b) {
       if (mode === "name") return String(a.name || "").localeCompare(String(b.name || ""));
@@ -2126,7 +2256,10 @@
       var kube = sc.kube || {}, bp = sc.kube_binpack || {}, ks = sc.ksolver || {};
       var cl = classifyScenario(sc);
       var ksU = metricsOf(ks).useful_gpu || 0, spU = metricsOf(kube).useful_gpu || 0, bpU = metricsOf(bp).useful_gpu || 0;
-      var top = Math.max(ksU, spU, bpU), max = Math.max(top, 1);
+      // Gang-aware (Volcano) baseline useful GPU, when captured for this scenario — lets the card
+      // VISUALLY substantiate a beats-gang-aware verdict (ksolver's bar exceeding Volcano's).
+      var vcU = (typeof sc.gang_aware_useful_gpu === "number") ? sc.gang_aware_useful_gpu : null;
+      var top = Math.max(ksU, spU, bpU, vcU || 0), max = Math.max(top, 1);
       var card = el("article", "sc" + (cl.tone === "up" ? " win" : cl.tone === "down" ? " under" : ""));
       var head = el("div", "sc-head");
       var left = el("div");
@@ -2142,6 +2275,21 @@
         cl.badges.slice(0, 3).forEach(function (b) { bd.appendChild(el("span", "sc-badge " + b.t, b.txt)); });
         left.appendChild(bd);
       }
+      // Server-side authoritative honesty (Phase 8): the win classification vs the best baselines
+      // (incl. the gang-aware baseline when provided) and the explicit "what this does NOT prove".
+      if (sc.win_classification) {
+        var wcCls = sc.win_classification === "beats-gang-aware" ? "good"
+          : (sc.win_classification === "not-proven" ? "warn" : "info");
+        var wcBox = el("div", "sc-badges");
+        wcBox.appendChild(el("span", "sc-badge " + wcCls, sc.win_classification));
+        (sc.proof_characters || []).slice(0, 3).forEach(function (t) {
+          wcBox.appendChild(el("span", "sc-badge info", t));
+        });
+        left.appendChild(wcBox);
+      }
+      if (sc.does_not_prove && sc.does_not_prove.length) {
+        left.appendChild(el("div", "sc-desc", "does not prove: " + sc.does_not_prove.join("; ")));
+      }
       head.appendChild(left);
       var res = el("div", "sc-result " + cl.tone);
       res.textContent = cl.result;
@@ -2153,6 +2301,11 @@
         bars.appendChild(scBar("ksolver", "ks", ksU, max, ksU === top && ksU > 0));
         bars.appendChild(scBar("kube · spread", "kube", spU, max, spU === top && ksU !== top));
         bars.appendChild(scBar("kube · binpack", "kube", bpU, max, bpU === top && ksU !== top && spU !== top));
+        // Volcano gang-aware bar (only when a baseline was captured) — substantiates beats-gang-aware
+        // by showing ksolver's useful GPU exceed Volcano's, not just asserting it in a badge.
+        if (vcU !== null) {
+          bars.appendChild(scBar("volcano · gang-aware", "kube", vcU, max, vcU === top && ksU !== top && spU !== top && bpU !== top));
+        }
         card.appendChild(bars);
       } else {
         card.appendChild(el("div", "sc-empty-note", repairProof

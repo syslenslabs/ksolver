@@ -49,7 +49,7 @@ pub async fn resolve_historical_usage_config(
         let namespace = config.secret_namespace.trim();
         let name = config.secret_name.trim();
         if !namespace.is_empty() && !name.is_empty() {
-            let client = build_client(kubeconfig).await?;
+            let client = build_client(kubeconfig, None).await?;
             let secrets: Api<Secret> = Api::namespaced(client, namespace);
             let secret = secrets
                 .get(name)
