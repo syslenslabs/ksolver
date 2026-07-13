@@ -2260,7 +2260,10 @@ mod tests {
         );
         // Priority: explicit bytes label wins over the GiB and NVIDIA MiB labels.
         let all = BTreeMap::from([
-            ("ksolver.dev/gpu-vram-bytes".to_string(), (24 * gib).to_string()),
+            (
+                "ksolver.dev/gpu-vram-bytes".to_string(),
+                (24 * gib).to_string(),
+            ),
             ("ksolver.dev/gpu-vram-gib".to_string(), "80".to_string()),
             ("nvidia.com/gpu.memory".to_string(), "40960".to_string()),
         ]);
@@ -2286,7 +2289,12 @@ mod tests {
         assert!(vram_fits_node(0, 24 * gib, &gpu(1), &is_gpu));
         assert!(vram_fits_node(25 * gib, 0, &gpu(1), &is_gpu));
         // No GPU requested -> VRAM feasibility is not applicable.
-        assert!(vram_fits_node(25 * gib, 24 * gib, &BTreeMap::new(), &is_gpu));
+        assert!(vram_fits_node(
+            25 * gib,
+            24 * gib,
+            &BTreeMap::new(),
+            &is_gpu
+        ));
     }
 
     #[test]

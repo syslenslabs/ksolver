@@ -114,10 +114,7 @@ pub fn observations_from_pods(pods: &[corev1::Pod]) -> Vec<ObservationRow> {
 }
 
 /// Append observation rows to the JSONL store (one JSON object per line).
-pub fn append_observations(
-    store_path: &str,
-    rows: &[ObservationRow],
-) -> std::io::Result<()> {
+pub fn append_observations(store_path: &str, rows: &[ObservationRow]) -> std::io::Result<()> {
     use std::io::Write;
     if rows.is_empty() {
         return Ok(());

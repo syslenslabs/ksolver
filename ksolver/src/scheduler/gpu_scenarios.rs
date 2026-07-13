@@ -1423,7 +1423,10 @@ pub async fn run_benchmark_with_options(
         // Must beat BOTH kube baselines (spread + binpack) to count as a win. If a Volcano
         // (gang-aware) baseline was captured for this scenario, feed it so a win over Volcano too
         // earns beats-gang-aware; absent it, the strongest honest claim stays beats-kube-only.
-        let gang_aware = options.volcano_baseline_useful_gpu.get(&scenario.name).copied();
+        let gang_aware = options
+            .volcano_baseline_useful_gpu
+            .get(&scenario.name)
+            .copied();
         let win_classification = classify_win(
             ksolver.metrics.useful_gpu,
             kube.metrics.useful_gpu.max(kube_binpack.metrics.useful_gpu),
@@ -1856,7 +1859,10 @@ pub fn print_table(report: &BenchmarkReport) {
         );
     }
     println!();
-    println!("win classification: {}", report.win_classification_summary.headline);
+    println!(
+        "win classification: {}",
+        report.win_classification_summary.headline
+    );
 }
 
 fn simulator_provenance_summary<'a>(
@@ -9620,7 +9626,10 @@ pub fn score_gang_baseline(input: &serde_json::Value) -> serde_json::Value {
         .cloned()
         .unwrap_or_default();
     let empty = Vec::new();
-    let gangs = input.get("gangs").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let gangs = input
+        .get("gangs")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     let mut total = 0i64;
     let mut per_gang = Vec::new();
     for g in gangs {
@@ -9643,7 +9652,11 @@ pub fn score_gang_baseline(input: &serde_json::Value) -> serde_json::Value {
                 })
             })
             .unwrap_or(false);
-        let useful = if complete && all_safe { placed * gpp } else { 0 };
+        let useful = if complete && all_safe {
+            placed * gpp
+        } else {
+            0
+        };
         total += useful;
         per_gang.push(serde_json::json!({
             "name": name, "placed": placed, "complete": complete,
@@ -9719,10 +9732,7 @@ mod tests {
     #[test]
     fn win_classification_is_honest_about_gang_aware_baseline() {
         // No gang-aware baseline exists yet: the strongest honest claim is beats-kube-only.
-        assert_eq!(
-            classify_win(10, 6, None),
-            WinClassification::BeatsKubeOnly
-        );
+        assert_eq!(classify_win(10, 6, None), WinClassification::BeatsKubeOnly);
         // No win over kube at all -> not-proven regardless of gang-aware.
         assert_eq!(classify_win(6, 6, None), WinClassification::NotProven);
         assert_eq!(classify_win(5, 6, Some(3)), WinClassification::NotProven);
@@ -9738,7 +9748,10 @@ mod tests {
 
     #[test]
     fn win_classification_strings_match_roadmap_criterion() {
-        assert_eq!(WinClassification::BeatsGangAware.as_str(), "beats-gang-aware");
+        assert_eq!(
+            WinClassification::BeatsGangAware.as_str(),
+            "beats-gang-aware"
+        );
         assert_eq!(WinClassification::BeatsKubeOnly.as_str(), "beats-kube-only");
         assert_eq!(WinClassification::NotProven.as_str(), "not-proven");
         // The report JSON must carry the same kebab strings, not the Rust variant names.
@@ -9937,17 +9950,33 @@ mod tests {
         let arr = lib.as_array().expect("array of scenarios");
         assert!(!arr.is_empty(), "scenario library should not be empty");
         assert!(arr[0].get("name").and_then(|v| v.as_str()).is_some());
-        let node = arr[0]["nodes"].as_array().expect("nodes").first().expect("a node");
+        let node = arr[0]["nodes"]
+            .as_array()
+            .expect("nodes")
+            .first()
+            .expect("a node");
         for f in ["name", "gpus", "vram_gib_per_gpu"] {
-            assert!(node.get(f).is_some(), "node JSON missing field `{f}` the harness parses");
+            assert!(
+                node.get(f).is_some(),
+                "node JSON missing field `{f}` the harness parses"
+            );
         }
         let with_jobs = arr
             .iter()
             .find(|x| x["jobs"].as_array().map(|j| !j.is_empty()).unwrap_or(false))
             .expect("a scenario with jobs");
         let job = with_jobs["jobs"].as_array().unwrap().first().unwrap();
-        for f in ["name", "pods", "gpus_per_pod", "colocate", "predicted_peak_vram_gib"] {
-            assert!(job.get(f).is_some(), "job JSON missing field `{f}` the harness parses");
+        for f in [
+            "name",
+            "pods",
+            "gpus_per_pod",
+            "colocate",
+            "predicted_peak_vram_gib",
+        ] {
+            assert!(
+                job.get(f).is_some(),
+                "job JSON missing field `{f}` the harness parses"
+            );
         }
     }
 
@@ -9960,8 +9989,14 @@ mod tests {
             .find(|s| s.name == "priority-gang-over-fillers")
             .expect("gang scenario exists");
         let tags = scenario_proof_characters(&gang);
-        assert!(tags.contains(&"gang-scheduling".to_string()), "tags: {tags:?}");
-        assert!(tags.contains(&"policy-weighted".to_string()), "tags: {tags:?}");
+        assert!(
+            tags.contains(&"gang-scheduling".to_string()),
+            "tags: {tags:?}"
+        );
+        assert!(
+            tags.contains(&"policy-weighted".to_string()),
+            "tags: {tags:?}"
+        );
         // Every scenario gets at least one ingredient tag (fallback binpack).
         for s in deterministic_scenarios() {
             assert!(
@@ -10007,40 +10042,80 @@ mod tests {
         assert_eq!(proof_provenance(live, live), ProofProvenance::LiveKss);
         // A cached source embeds the KSS name but must NOT read as live.
         assert_eq!(proof_provenance(cached, cached), ProofProvenance::CachedKss);
-        assert_eq!(proof_provenance(fixture, fixture), ProofProvenance::DeterministicFixture);
+        assert_eq!(
+            proof_provenance(fixture, fixture),
+            ProofProvenance::DeterministicFixture
+        );
         // Strongest of the two baselines wins: one live -> live; one cached (no live) -> cached.
         assert_eq!(proof_provenance(cached, live), ProofProvenance::LiveKss);
-        assert_eq!(proof_provenance(fixture, cached), ProofProvenance::CachedKss);
+        assert_eq!(
+            proof_provenance(fixture, cached),
+            ProofProvenance::CachedKss
+        );
         // Compact tags for human output match the serde kebab form.
         assert_eq!(ProofProvenance::LiveKss.as_str(), "live-kss");
         assert_eq!(ProofProvenance::CachedKss.as_str(), "cached-kss");
-        assert_eq!(ProofProvenance::DeterministicFixture.as_str(), "deterministic-fixture");
+        assert_eq!(
+            ProofProvenance::DeterministicFixture.as_str(),
+            "deterministic-fixture"
+        );
     }
 
     #[test]
     fn does_not_prove_reflects_classification_and_provenance() {
         // beats-kube-only + live baseline -> only the gang-aware disclaimer.
-        let r = scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::LiveKss, 10, 6);
+        let r = scenario_does_not_prove(
+            WinClassification::BeatsKubeOnly,
+            ProofProvenance::LiveKss,
+            10,
+            6,
+        );
         assert_eq!(r.len(), 1);
         assert!(r[0].contains("gang-aware"));
         // not-proven because ksolver did NOT beat kube (ksolver<=best_kube) -> the KUBE disclaimer.
-        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::CachedKss, 5, 6);
-        assert!(r.iter().any(|s| s.contains("useful-GPU win over the best kube")));
+        let r = scenario_does_not_prove(
+            WinClassification::NotProven,
+            ProofProvenance::CachedKss,
+            5,
+            6,
+        );
+        assert!(r
+            .iter()
+            .any(|s| s.contains("useful-GPU win over the best kube")));
         assert!(r.iter().any(|s| s.contains("cached")));
         // not-proven because ksolver BEAT kube but not Volcano (ksolver>best_kube) -> the VOLCANO
         // disclaimer, NOT the kube one (else it would contradict the card's "+N vs best kube").
-        let r = scenario_does_not_prove(WinClassification::NotProven, ProofProvenance::LiveKss, 12, 8);
-        assert!(r.iter().any(|s| s.contains("gang-aware (Volcano) baseline")), "got {r:?}");
-        assert!(!r.iter().any(|s| s.contains("win over the best kube")), "must not claim no-kube-win when it beat kube: {r:?}");
+        let r = scenario_does_not_prove(
+            WinClassification::NotProven,
+            ProofProvenance::LiveKss,
+            12,
+            8,
+        );
+        assert!(
+            r.iter()
+                .any(|s| s.contains("gang-aware (Volcano) baseline")),
+            "got {r:?}"
+        );
+        assert!(
+            !r.iter().any(|s| s.contains("win over the best kube")),
+            "must not claim no-kube-win when it beat kube: {r:?}"
+        );
         // deterministic fixture -> fixture disclaimer.
-        let r =
-            scenario_does_not_prove(WinClassification::BeatsKubeOnly, ProofProvenance::DeterministicFixture, 10, 6);
+        let r = scenario_does_not_prove(
+            WinClassification::BeatsKubeOnly,
+            ProofProvenance::DeterministicFixture,
+            10,
+            6,
+        );
         assert!(r.iter().any(|s| s.contains("deterministic local fixture")));
         // beats-gang-aware + live -> nothing to disclaim.
-        assert!(
-            scenario_does_not_prove(WinClassification::BeatsGangAware, ProofProvenance::LiveKss, 16, 8)
-                .is_empty()
-        );
+        assert!(scenario_does_not_prove(
+            WinClassification::BeatsGangAware,
+            ProofProvenance::LiveKss,
+            16,
+            8
+        )
+        .is_empty());
     }
 
     fn empty_engine(engine: &str) -> EngineResult {
@@ -10365,9 +10440,9 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
-            win_classification: WinClassification::NotProven,
-            does_not_prove: Vec::new(),
-            proof_characters: Vec::new(),
+                win_classification: WinClassification::NotProven,
+                does_not_prove: Vec::new(),
+                proof_characters: Vec::new(),
                 gang_aware_useful_gpu: None,
             },
             ScenarioResult {
@@ -10412,9 +10487,9 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
-            win_classification: WinClassification::NotProven,
-            does_not_prove: Vec::new(),
-            proof_characters: Vec::new(),
+                win_classification: WinClassification::NotProven,
+                does_not_prove: Vec::new(),
+                proof_characters: Vec::new(),
                 gang_aware_useful_gpu: None,
             },
         ];
@@ -10495,10 +10570,10 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
-            win_classification: WinClassification::NotProven,
-            does_not_prove: Vec::new(),
-            proof_characters: Vec::new(),
-            gang_aware_useful_gpu: None,
+                win_classification: WinClassification::NotProven,
+                does_not_prove: Vec::new(),
+                proof_characters: Vec::new(),
+                gang_aware_useful_gpu: None,
             }
         };
         let scenarios = vec![
@@ -10565,10 +10640,10 @@ mod tests {
                 efficiency_score: 0,
                 significantly_better: false,
                 efficiency_headline: String::new(),
-            win_classification: WinClassification::NotProven,
-            does_not_prove: Vec::new(),
-            proof_characters: Vec::new(),
-            gang_aware_useful_gpu: None,
+                win_classification: WinClassification::NotProven,
+                does_not_prove: Vec::new(),
+                proof_characters: Vec::new(),
+                gang_aware_useful_gpu: None,
             }
         };
         let scenarios = vec![
@@ -11364,9 +11439,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("missing-simulator-provenance=1")));
-        assert!(lines
-            .iter()
-            .all(|line| !line.contains("deterministic=1")));
+        assert!(lines.iter().all(|line| !line.contains("deterministic=1")));
         assert!(lines
             .iter()
             .all(|line| !line.contains("timed-out-fallback=1")));
@@ -12212,11 +12285,18 @@ mod tests {
         let volcano: BTreeMap<String, i64> = serde_json::from_value(dump_scenario_library())
             .map(|v: Vec<serde_json::Value>| {
                 v.into_iter()
-                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|n| (n.to_string(), 0)))
+                    .filter_map(|s| {
+                        s.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| (n.to_string(), 0))
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        assert!(!volcano.is_empty(), "expected scenario names for the mock baseline");
+        assert!(
+            !volcano.is_empty(),
+            "expected scenario names for the mock baseline"
+        );
         let baseline = run_benchmark_with_options(BenchmarkOptions {
             simulator_cache_path: Some(write_test_simulator_cache()),
             ..Default::default()
@@ -12232,12 +12312,21 @@ mod tests {
         .expect("volcano-baselined report");
 
         let base_kube_only = baseline.win_classification_summary.beats_kube_only;
-        assert!(base_kube_only > 0, "need at least one beats-kube-only win to reclassify");
+        assert!(
+            base_kube_only > 0,
+            "need at least one beats-kube-only win to reclassify"
+        );
         let s = &with_volcano.win_classification_summary;
         // With a Volcano baseline of 0, every beats-kube-only win (ksolver > kube > 0) becomes
         // beats-gang-aware; none remain beats-kube-only; the summary is no longer pending.
-        assert_eq!(s.beats_kube_only, 0, "beats-kube-only should reclassify against a gang-aware baseline");
-        assert_eq!(s.beats_gang_aware, base_kube_only, "those wins should become beats-gang-aware");
+        assert_eq!(
+            s.beats_kube_only, 0,
+            "beats-kube-only should reclassify against a gang-aware baseline"
+        );
+        assert_eq!(
+            s.beats_gang_aware, base_kube_only,
+            "those wins should become beats-gang-aware"
+        );
         assert!(!s.gang_aware_baseline_pending);
         assert!(s.headline.contains("Volcano gang-aware baseline"));
         // And the per-scenario field agrees.
@@ -12927,7 +13016,11 @@ mod tests {
             wc.total
         );
         for s in &report.scenarios {
-            let best_kube = s.kube.metrics.useful_gpu.max(s.kube_binpack.metrics.useful_gpu);
+            let best_kube = s
+                .kube
+                .metrics
+                .useful_gpu
+                .max(s.kube_binpack.metrics.useful_gpu);
             let expected = classify_win(s.ksolver.metrics.useful_gpu, best_kube, None);
             assert_eq!(
                 s.win_classification, expected,
@@ -12948,7 +13041,10 @@ mod tests {
                     s.win_classification,
                     prov,
                     s.ksolver.metrics.useful_gpu,
-                    s.kube.metrics.useful_gpu.max(s.kube_binpack.metrics.useful_gpu),
+                    s.kube
+                        .metrics
+                        .useful_gpu
+                        .max(s.kube_binpack.metrics.useful_gpu),
                 ),
                 "scenario {} does_not_prove is inconsistent with its class/provenance",
                 s.name

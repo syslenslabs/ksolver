@@ -263,8 +263,7 @@ fn container_gpu(container: &corev1::Container, cfg: &ShadowConfig) -> i64 {
     // else limits[r], applied per resource so requests wins where both are set.
     if let Some(limits) = res.limits.as_ref() {
         for (name, qty) in limits {
-            if cfg.is_gpu_resource(name)
-                && requests.map(|r| !r.contains_key(name)).unwrap_or(true)
+            if cfg.is_gpu_resource(name) && requests.map(|r| !r.contains_key(name)).unwrap_or(true)
             {
                 total += parse_gpu_quantity(&qty.0);
             }
@@ -1165,7 +1164,10 @@ mod tests {
             vec![],
         );
         assert_eq!(effective_gpu_request(&p, &cfg()), 1);
-        assert!(classify(&p, &cfg()).is_some(), "limits-only GPU pod must be in scope");
+        assert!(
+            classify(&p, &cfg()).is_some(),
+            "limits-only GPU pod must be in scope"
+        );
     }
 
     #[test]

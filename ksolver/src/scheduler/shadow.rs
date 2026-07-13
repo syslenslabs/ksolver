@@ -608,7 +608,10 @@ async fn vram_injection_ops_from_predictor(
     .ok()?
     .ok()?;
     let resolution: serde_json::Value = response.json().await.ok()?;
-    Some(crate::scheduler::admission::vram_injection_ops(&pod, &resolution))
+    Some(crate::scheduler::admission::vram_injection_ops(
+        &pod,
+        &resolution,
+    ))
 }
 
 async fn traces_handler(State(s): State<ShadowHttpState>) -> Json<serde_json::Value> {
@@ -857,7 +860,8 @@ fn demo_benchmark_options(
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "volcano-baseline-cache.json".to_string());
-    let volcano_baseline_useful_gpu = load_volcano_baseline_cache(std::path::Path::new(&volcano_path));
+    let volcano_baseline_useful_gpu =
+        load_volcano_baseline_cache(std::path::Path::new(&volcano_path));
     crate::scheduler::gpu_scenarios::BenchmarkOptions {
         simulator_url,
         simulator_urls,
@@ -1045,7 +1049,8 @@ async fn evidence_bundle_handler(State(s): State<ShadowHttpState>) -> Json<serde
     );
     let demo_report = cached_demo_report_value(&s, false, None).await;
     let vram_calibration = vram_calibration_payload();
-    let operator_binding_safety = operator_binding_safety_from_production_safety(&production_safety);
+    let operator_binding_safety =
+        operator_binding_safety_from_production_safety(&production_safety);
     let launch_proof_gate = demo_report
         .get("report")
         .and_then(|report| report.get("roadmap_readiness_summary"))
@@ -1946,14 +1951,8 @@ fn operator_status_from_evidence_bundle(bundle: &serde_json::Value) -> serde_jso
         vram_hard_admission_ready,
     );
     if let Some(status) = operator_status.as_object_mut() {
-        status.insert(
-            "scale_safety".to_string(),
-            scale_safety,
-        );
-        status.insert(
-            "binding_safety".to_string(),
-            binding_safety,
-        );
+        status.insert("scale_safety".to_string(), scale_safety);
+        status.insert("binding_safety".to_string(), binding_safety);
         status.insert("decision_readiness".to_string(), decision_readiness);
     }
     if let Some(vram) = operator_status
@@ -2267,8 +2266,16 @@ fn operator_decision_readiness(
         "demo={}, claim={}, vram-score={}, hard-admit={}, bind={}",
         if demo_ready { "ready" } else { "blocked" },
         if claim_ready { "ready" } else { "blocked" },
-        if vram_advisory_ready { "ready" } else { "blocked" },
-        if vram_hard_admission_ready { "ready" } else { "blocked" },
+        if vram_advisory_ready {
+            "ready"
+        } else {
+            "blocked"
+        },
+        if vram_hard_admission_ready {
+            "ready"
+        } else {
+            "blocked"
+        },
         binding_capability_status,
     );
 
@@ -3875,7 +3882,9 @@ fn evidence_bundle_customer_dollar_claim_ready_from_report(report: &serde_json::
 /// Evaluate the "kube safety advantage" proof gate from the latest computed kube liabilities.
 /// This turns the live-trace safety signal into hashable customer proof: the gate PASSES only when
 /// a live kube baseline was measured and ksolver refused >=1 unsafe placement kube would accept.
-fn safety_gate_status(kube_liabilities: Option<&serde_json::Value>) -> (&'static str, String, &'static str) {
+fn safety_gate_status(
+    kube_liabilities: Option<&serde_json::Value>,
+) -> (&'static str, String, &'static str) {
     match kube_liabilities.and_then(|l| l.get("count")).and_then(serde_json::Value::as_u64) {
         Some(count) if count > 0 => {
             let summary = kube_liabilities
@@ -3954,9 +3963,10 @@ fn evidence_bundle_live_validation_gates(
         ];
     }
     // Always include the kube-safety-advantage gate (proof that ksolver is safer, not just different).
-    if !fallback_rows.iter().any(|r| {
-        r.get("gate").and_then(serde_json::Value::as_str) == Some("kube safety advantage")
-    }) {
+    if !fallback_rows
+        .iter()
+        .any(|r| r.get("gate").and_then(serde_json::Value::as_str) == Some("kube safety advantage"))
+    {
         fallback_rows.push(serde_json::json!({
             "gate": "kube safety advantage",
             "live_endpoint": "/api/scheduler/kube-simulator-plan",
@@ -5107,10 +5117,7 @@ fn simulator_url_port(url: &str) -> Option<u16> {
 fn shell_quote_arg(value: &str) -> String {
     if value.chars().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(
-                c,
-                '_' | '/' | ':' | '.' | ',' | '=' | '@' | '%' | '+' | '-'
-            )
+            || matches!(c, '_' | '/' | ':' | '.' | ',' | '=' | '@' | '%' | '+' | '-')
     }) {
         value.to_string()
     } else {
@@ -7238,7 +7245,10 @@ mod tests {
             status: Some(corev1::NodeStatus {
                 allocatable: Some(std::collections::BTreeMap::from([
                     ("cpu".to_string(), Quantity("8".to_string())),
-                    ("nvidia.com/mig-1g.5gb".to_string(), Quantity("7".to_string())),
+                    (
+                        "nvidia.com/mig-1g.5gb".to_string(),
+                        Quantity("7".to_string()),
+                    ),
                 ])),
                 ..Default::default()
             }),
@@ -7310,8 +7320,14 @@ mod tests {
         assert_eq!(out["oom_risk"].as_array().unwrap().len(), 1);
         assert_eq!(out["oom_risk"][0]["scope"], serde_json::json!("t/big"));
         // competitive-strength classification (roadmap: beats-kube-only vs beats-any-scheduler)
-        assert_eq!(out["oom_risk"][0]["competitive_strength"], serde_json::json!("beats-most-schedulers"));
-        assert_eq!(out["split_gangs"][0]["competitive_strength"], serde_json::json!("beats-default-kube-only"));
+        assert_eq!(
+            out["oom_risk"][0]["competitive_strength"],
+            serde_json::json!("beats-most-schedulers")
+        );
+        assert_eq!(
+            out["split_gangs"][0]["competitive_strength"],
+            serde_json::json!("beats-default-kube-only")
+        );
         assert_eq!(out["beats_most_schedulers"], serde_json::json!(1));
         assert_eq!(out["beats_default_kube_only"], serde_json::json!(1));
     }
@@ -7469,7 +7485,9 @@ mod tests {
             .contains("var priceSource = params.get(\"price_source\") || \"demo default\""));
         assert!(SHADOW_HTML.contains("function gpuHourAssumptionText()"));
         assert!(SHADOW_HTML.contains("GPU-hour proxy assumption: "));
-        assert!(SHADOW_HTML.contains("$(\"price-proxy-note\").textContent = gpuHourAssumptionText()"));
+        assert!(
+            SHADOW_HTML.contains("$(\"price-proxy-note\").textContent = gpuHourAssumptionText()")
+        );
         assert!(SHADOW_HTML.contains("function currentPriceMeta()"));
         assert!(SHADOW_HTML.contains("function priceKey(meta)"));
         assert!(SHADOW_HTML.contains("function priceAssumptionText(meta)"));
@@ -7495,22 +7513,17 @@ mod tests {
         assert!(SHADOW_HTML.contains("configKey"));
         assert!(SHADOW_HTML.contains("cached"));
         assert!(SHADOW_HTML.contains("browser cache"));
-        assert!(SHADOW_HTML.contains(
-            "Restored from this browser's localStorage after a page reload"
-        ));
+        assert!(
+            SHADOW_HTML.contains("Restored from this browser's localStorage after a page reload")
+        );
         assert!(SHADOW_HTML.contains(
             "Restored from browser cache; rerun this configuration to refresh solver and kube baseline evidence."
         ));
-        assert!(SHADOW_HTML.contains(
-            "objective, weights, and pricing assumption match an existing run"
-        ));
-        assert!(SHADOW_HTML.contains(
-            "objective, weights, and pricing assumption are identical"
-        ));
+        assert!(SHADOW_HTML
+            .contains("objective, weights, and pricing assumption match an existing run"));
+        assert!(SHADOW_HTML.contains("objective, weights, and pricing assumption are identical"));
         assert!(SHADOW_HTML.contains("Delta uses the run's GPU-hour proxy assumption"));
-        assert!(SHADOW_HTML.contains(
-            "relative placement comparison only, not a cloud bill"
-        ));
+        assert!(SHADOW_HTML.contains("relative placement comparison only, not a cloud bill"));
         assert!(SHADOW_HTML.contains(
             "Clear browser-cached run comparisons only; live traces and scenario evidence are unchanged."
         ));
@@ -7578,12 +7591,11 @@ mod tests {
         assert!(SHADOW_HTML.contains("return \"operator status\""));
         assert!(SHADOW_HTML.contains("return \"local default\""));
         assert!(SHADOW_HTML.contains("|| simulator.recovery_command"));
-        assert!(SHADOW_HTML.contains(
-            "|| \"scripts/kss-pool.sh status 1 1212 /tmp/ksolver-kss-cache\""
-        ));
-        assert!(SHADOW_HTML.contains(
-            "var recoveryCommand = simulatorRecoveryCommand(lastSafety, refresh)"
-        ));
+        assert!(
+            SHADOW_HTML.contains("|| \"scripts/kss-pool.sh status 1 1212 /tmp/ksolver-kss-cache\"")
+        );
+        assert!(SHADOW_HTML
+            .contains("var recoveryCommand = simulatorRecoveryCommand(lastSafety, refresh)"));
         assert!(SHADOW_HTML.contains("demoRefresh.simulator_recovery_command || \"\""));
         assert!(SHADOW_HTML.contains("|simrec:\" + (simulator.recovery_command || \"\")"));
         assert!(SHADOW_HTML.contains(
@@ -7605,14 +7617,14 @@ mod tests {
             "recCopy.addEventListener(\"click\", function () { copyDiagCommand(recoveryCommand, recCopy); })"
         ));
         assert!(SHADOW_HTML.contains("Full simulator error"));
-        assert!(SHADOW_HTML.contains(
-            "var actionCopy = el(\"button\", \"copy-btn\", \"Copy command\")"
-        ));
+        assert!(
+            SHADOW_HTML.contains("var actionCopy = el(\"button\", \"copy-btn\", \"Copy command\")")
+        );
         assert!(SHADOW_HTML.contains("actionCopy.type = \"button\""));
         assert!(SHADOW_HTML.contains("actionCopy.title = row.command_hint"));
-        assert!(SHADOW_HTML.contains(
-            "var planCopy = el(\"button\", \"copy-btn\", \"Copy command\")"
-        ));
+        assert!(
+            SHADOW_HTML.contains("var planCopy = el(\"button\", \"copy-btn\", \"Copy command\")")
+        );
         assert!(SHADOW_HTML.contains("planCopy.type = \"button\""));
         assert!(SHADOW_HTML.contains("planCopy.title = commands[0]"));
         assert!(SHADOW_HTML.contains("var cmdText = el(\"span\", \"endpoint\", cmd)"));
@@ -7664,7 +7676,9 @@ mod tests {
         assert!(SHADOW_HTML.contains("gpu_utilization_milli"));
         assert!(SHADOW_HTML.contains("simNote"));
         assert!(SHADOW_HTML.contains("function simSourceLabel(plan, simulator)"));
-        assert!(SHADOW_HTML.contains("source.toLowerCase().endsWith(\" \" + variant.toLowerCase())"));
+        assert!(
+            SHADOW_HTML.contains("source.toLowerCase().endsWith(\" \" + variant.toLowerCase())")
+        );
         assert!(SHADOW_HTML.contains("source.slice(0, source.length - variant.length).trim()"));
         assert!(SHADOW_HTML.contains("simTrust"));
         assert!(SHADOW_HTML.contains("prov-badge"));
@@ -7683,9 +7697,7 @@ mod tests {
         assert!(SHADOW_HTML.contains("invalid fallback baselines"));
         assert!(SHADOW_HTML.contains("label === \"active-node cost/mo\""));
         assert!(SHADOW_HTML.contains("Active-node cost is a fixed-fleet proxy"));
-        assert!(SHADOW_HTML.contains(
-            "no autoscaler, idle nodes priced at zero, not a cloud bill"
-        ));
+        assert!(SHADOW_HTML.contains("no autoscaler, idle nodes priced at zero, not a cloud bill"));
         assert!(SHADOW_HTML.contains("if (costProxyTitle) cell.title = costProxyTitle"));
         assert!(SHADOW_HTML.contains("if (costProxyTitle) dv.title = costProxyTitle"));
         assert!(SHADOW_HTML.contains("if (costProxyTitle) sub.title = costProxyTitle"));
@@ -7714,8 +7726,9 @@ mod tests {
         assert!(SHADOW_HTML.contains(
             "stale means expired reservation entries must be reconciled before trusting bind readiness."
         ));
-        assert!(SHADOW_HTML
-            .contains("blocking means the reservation ledger rejected at least one planned placement."));
+        assert!(SHADOW_HTML.contains(
+            "blocking means the reservation ledger rejected at least one planned placement."
+        ));
         assert!(SHADOW_HTML.contains("function reservePressureScopeNote(binding)"));
         assert!(SHADOW_HTML.contains("reservation_pressure_scope"));
         assert!(SHADOW_HTML.contains(
@@ -7790,9 +7803,7 @@ mod tests {
         assert!(SHADOW_HTML.contains("debugCommands.forEach"));
         assert!(SHADOW_HTML.contains("copyDiagCommand"));
         assert!(SHADOW_HTML.contains("diagCommand"));
-        assert!(SHADOW_HTML.contains(
-            "row.title = [title, value].filter(Boolean).join(\" | \")"
-        ));
+        assert!(SHADOW_HTML.contains("row.title = [title, value].filter(Boolean).join(\" | \")"));
         assert!(SHADOW_HTML.contains("text.title = value"));
         assert!(SHADOW_HTML.contains("toast(ok ? \"Copied command\" : \"Copy failed\")"));
         assert!(SHADOW_HTML.contains("Copy command"));
@@ -7880,29 +7891,16 @@ mod tests {
             .contains("((binding.reservations && binding.reservations.reserved_gpus) || 0)"));
         assert!(SHADOW_HTML.contains("binding reservation pressure "));
         assert!(SHADOW_HTML.contains("chip.title"));
-        assert!(SHADOW_HTML.contains(
-            "var readyReserveMeta = reservePressureBannerMeta(binding)"
-        ));
-        assert!(SHADOW_HTML.contains(
-            "if (readyReserveMeta) readyMeta.push(readyReserveMeta)"
-        ));
+        assert!(SHADOW_HTML.contains("var readyReserveMeta = reservePressureBannerMeta(binding)"));
+        assert!(SHADOW_HTML.contains("if (readyReserveMeta) readyMeta.push(readyReserveMeta)"));
         assert!(SHADOW_HTML.contains("var summaryReadyMeta = ["));
-        assert!(SHADOW_HTML.contains(
-            "if (summaryReserveMeta) summaryReadyMeta.push(summaryReserveMeta)"
-        ));
+        assert!(SHADOW_HTML
+            .contains("if (summaryReserveMeta) summaryReadyMeta.push(summaryReserveMeta)"));
         assert!(SHADOW_HTML.contains("evidence.operator_reservation_pressure || \"\""));
-        assert!(SHADOW_HTML.contains(
-            "evidence.operator_reservation_pressure_description || \"\""
-        ));
-        assert!(SHADOW_HTML.contains(
-            "evidence.operator_reservation_pressure_scope || \"\""
-        ));
-        assert!(SHADOW_HTML.contains(
-            "evidence.operator_reservation_pressure_reason || \"\""
-        ));
-        assert!(SHADOW_HTML.contains(
-            "evidence.operator_reservation_pressure_next_action || \"\""
-        ));
+        assert!(SHADOW_HTML.contains("evidence.operator_reservation_pressure_description || \"\""));
+        assert!(SHADOW_HTML.contains("evidence.operator_reservation_pressure_scope || \"\""));
+        assert!(SHADOW_HTML.contains("evidence.operator_reservation_pressure_reason || \"\""));
+        assert!(SHADOW_HTML.contains("evidence.operator_reservation_pressure_next_action || \"\""));
         assert!(SHADOW_HTML.contains("proof_gates"));
         assert!(SHADOW_HTML.contains("proof gates"));
         assert!(SHADOW_HTML.contains("proofGates.blocked"));
@@ -7918,7 +7916,8 @@ mod tests {
         assert!(SHADOW_HTML.contains("copyable_command_rows"));
         assert!(SHADOW_HTML.contains("diag-cmd-meta"));
         assert!(SHADOW_HTML.contains("function diagCommand(value, title, meta)"));
-        assert!(SHADOW_HTML.contains("if (meta) body.appendChild(el(\"span\", \"diag-cmd-meta\", meta));"));
+        assert!(SHADOW_HTML
+            .contains("if (meta) body.appendChild(el(\"span\", \"diag-cmd-meta\", meta));"));
         assert!(SHADOW_HTML.contains("function runbookCommandRowsSig(runbook)"));
         assert!(SHADOW_HTML.contains("runbookCommandRowsSig(runbook)"));
         assert!(SHADOW_HTML.contains("row.category || \"\""));
@@ -7934,7 +7933,9 @@ mod tests {
         assert!(SHADOW_HTML.contains("row.artifact,"));
         assert!(SHADOW_HTML.contains("row.next_action"));
         assert!(SHADOW_HTML.contains("var commandMeta = ["));
-        assert!(SHADOW_HTML.contains("commandList.appendChild(diagCommand(row.command, commandTitle, commandMeta))"));
+        assert!(SHADOW_HTML.contains(
+            "commandList.appendChild(diagCommand(row.command, commandTitle, commandMeta))"
+        ));
         assert!(SHADOW_HTML.contains(
             "kvRow(dl5, \"next shell command\", shortText(operatorRunbook.next_shell_command, 120), \"warn\", operatorRunbook.next_shell_command)"
         ));
@@ -8090,7 +8091,9 @@ mod tests {
         assert!(SHADOW_HTML.contains("headroom probe"));
         assert!(SHADOW_HTML.contains("not organic model demand"));
         assert!(SHADOW_HTML.contains("aria-label"));
-        assert!(SHADOW_HTML.contains("var effectiveCalibration = calibration || lastVramCalibration"));
+        assert!(
+            SHADOW_HTML.contains("var effectiveCalibration = calibration || lastVramCalibration")
+        );
         assert!(SHADOW_HTML.contains("renderVramInvestmentDemo(report, effectiveCalibration)"));
         assert!(SHADOW_HTML.contains("renderScenarios(lastReport, lastVramCalibration)"));
         assert!(SHADOW_HTML.contains("var prevHtml = btn ? btn.innerHTML : \"\""));
@@ -8123,12 +8126,9 @@ mod tests {
         assert!(SHADOW_HTML.contains("p.reason || \"\""));
         assert!(SHADOW_HTML.contains("((d.caveats || []).join(\",\"))"));
         assert!(SHADOW_HTML.contains("var liveTrace = traces[0] || null"));
-        assert!(SHADOW_HTML.contains(
-            "\"empty:\" + clusterSig(r[1]) + \"|\" + kubeSig(r[2])"
-        ));
-        assert!(SHADOW_HTML.contains(
-            "if (changed(\"live\", liveKey)) renderLive(liveTrace, r[1], r[2])"
-        ));
+        assert!(SHADOW_HTML.contains("\"empty:\" + clusterSig(r[1]) + \"|\" + kubeSig(r[2])"));
+        assert!(SHADOW_HTML
+            .contains("if (changed(\"live\", liveKey)) renderLive(liveTrace, r[1], r[2])"));
         assert!(SHADOW_HTML.contains("if (!trace)"));
         assert!(SHADOW_HTML.contains("no pending GPU decisions"));
         assert!(SHADOW_HTML.contains("waiting for trace"));
@@ -8146,13 +8146,15 @@ mod tests {
         assert!(SHADOW_HTML.contains("a.pod || \"\""));
         assert!(SHADOW_HTML.contains("a.gpu_request || 0"));
         assert!(SHADOW_HTML.contains("a.node || \"\""));
-        assert!(SHADOW_HTML.contains("proof.headline || ((repairPlan && repairPlan.hero_reference)"));
-        assert!(SHADOW_HTML.contains("proof.operator_question || proof.evidence || proof.claim_guard"));
+        assert!(
+            SHADOW_HTML.contains("proof.headline || ((repairPlan && repairPlan.hero_reference)")
+        );
+        assert!(
+            SHADOW_HTML.contains("proof.operator_question || proof.evidence || proof.claim_guard")
+        );
         assert!(SHADOW_HTML.contains("proof.evidence ? \"evidence: \" + proof.evidence : \"\""));
         assert!(SHADOW_HTML.contains("proof.operator_question || \"\""));
-        assert!(SHADOW_HTML.contains(
-            "((rp && rp.proof_status) || {}).operator_question || \"\""
-        ));
+        assert!(SHADOW_HTML.contains("((rp && rp.proof_status) || {}).operator_question || \"\""));
         assert!(SHADOW_HTML.contains("((rp && rp.proof_status) || {}).evidence || \"\""));
         assert!(SHADOW_HTML.contains("((rp && rp.proof_status) || {}).headline || \"\""));
         assert!(SHADOW_HTML.contains("((rp && rp.proof_status) || {}).claim_guard || \"\""));
@@ -8165,9 +8167,8 @@ mod tests {
         assert!(
             SHADOW_HTML.contains(".proof-section .card { margin-bottom: 10px; overflow-x: auto; }")
         );
-        assert!(SHADOW_HTML.contains(
-            "id=\"toast\" role=\"status\" aria-live=\"polite\" aria-atomic=\"false\""
-        ));
+        assert!(SHADOW_HTML
+            .contains("id=\"toast\" role=\"status\" aria-live=\"polite\" aria-atomic=\"false\""));
         assert!(SHADOW_HTML.contains(".scen-page-filter .btn.active"));
         assert!(SHADOW_HTML.contains("aria-pressed"));
         assert!(SHADOW_HTML.contains("aria-controls=\"panel-scen\""));
@@ -8180,9 +8181,7 @@ mod tests {
         assert!(SHADOW_HTML.contains("addEventListener(\"keydown\""));
         assert!(SHADOW_HTML.contains("ArrowRight"));
         assert!(SHADOW_HTML.contains("ArrowLeft"));
-        assert!(SHADOW_HTML.contains(
-            "var pagePart = (report && report.scenario_pages || []).map"
-        ));
+        assert!(SHADOW_HTML.contains("var pagePart = (report && report.scenario_pages || []).map"));
         assert!(SHADOW_HTML.contains("page.slug || \"\""));
         assert!(SHADOW_HTML.contains("page.title || \"\""));
         assert!(SHADOW_HTML.contains("((page.scenario_names || []).join(\",\"))"));
@@ -8343,19 +8342,32 @@ mod tests {
         // Row-count floors (data grows as more probes are collected); >= keeps the test valid after
         // a data-collection sweep. Honesty invariants (real-framework / fingerprint rows) stay exact.
         let dataset_rows = payload["dataset"]["rows"].as_u64().expect("dataset rows");
-        assert!(dataset_rows >= 228, "dataset rows should be >= 228: {dataset_rows}");
         assert!(
-            payload["dataset"]["gpu_sku_labels"]["rtx-4090"].as_u64().expect("rtx-4090 rows") >= 228
+            dataset_rows >= 228,
+            "dataset rows should be >= 228: {dataset_rows}"
         );
         assert!(
-            payload["dataset"]["gpu_total_gib"]["23.99"].as_u64().expect("23.99 GiB rows") >= 228
+            payload["dataset"]["gpu_sku_labels"]["rtx-4090"]
+                .as_u64()
+                .expect("rtx-4090 rows")
+                >= 228
         );
         assert!(
-            payload["dataset"]["near_capacity_rows_ge_90pct"].as_u64().expect("near-capacity rows")
+            payload["dataset"]["gpu_total_gib"]["23.99"]
+                .as_u64()
+                .expect("23.99 GiB rows")
+                >= 228
+        );
+        assert!(
+            payload["dataset"]["near_capacity_rows_ge_90pct"]
+                .as_u64()
+                .expect("near-capacity rows")
                 >= 11
         );
         assert!(
-            payload["dataset"]["reserve_pressure"]["pressure_rows"].as_u64().expect("pressure rows")
+            payload["dataset"]["reserve_pressure"]["pressure_rows"]
+                .as_u64()
+                .expect("pressure rows")
                 >= 37
         );
         assert_eq!(
@@ -8382,7 +8394,9 @@ mod tests {
         );
         // Real-framework data now exists (torchvision probes); this used to guard "still 0".
         assert!(
-            payload["dataset"]["verified_real_framework_rows"].as_u64().expect("verified real rows")
+            payload["dataset"]["verified_real_framework_rows"]
+                .as_u64()
+                .expect("verified real rows")
                 >= 1,
             "expected >=1 verified real-framework row after the torchvision sweep"
         );
@@ -8396,7 +8410,10 @@ mod tests {
             serde_json::json!(true)
         );
         assert!(
-            payload["model_drivers"]["training_rows"].as_u64().expect("model training rows") >= 228,
+            payload["model_drivers"]["training_rows"]
+                .as_u64()
+                .expect("model training rows")
+                >= 228,
             "model should be fit on >= 228 rows"
         );
         assert!(payload["model_drivers"]["top_drivers"]
@@ -8407,7 +8424,8 @@ mod tests {
                 |row| row["feature"] == serde_json::json!("reserve_extra_gib")
                     && row["class"] == serde_json::json!("synthetic-pressure")
                     && row["label"] == serde_json::json!("synthetic VRAM headroom probe")
-                    && row["description"] == serde_json::json!("synthetic VRAM headroom probe allocation")
+                    && row["description"]
+                        == serde_json::json!("synthetic VRAM headroom probe allocation")
                     && row["impact_mib_per_std"].is_number()
             ));
         assert!(payload["model_drivers"]["top_drivers"]
@@ -9267,8 +9285,9 @@ mod tests {
             widened: false,
             edge_reduction_milli: 75_000,
             regret_status: "pruned_regret_unknown".to_string(),
-            explanation: "candidate pruning was active; compare with a full solve to measure regret"
-                .to_string(),
+            explanation:
+                "candidate pruning was active; compare with a full solve to measure regret"
+                    .to_string(),
         };
         trace.binding_reservation_metrics.created = 3;
         trace.binding_outcome_metrics.validated = 2;
@@ -9416,10 +9435,7 @@ mod tests {
         assert_eq!(binding["real_binding_dry_run"], serde_json::json!(true));
         assert_eq!(binding["latest_outcome_count"], serde_json::json!(3));
         assert_eq!(binding["validated"], serde_json::json!(2));
-        assert_eq!(
-            binding["reservation_pressure"],
-            serde_json::json!("active")
-        );
+        assert_eq!(binding["reservation_pressure"], serde_json::json!("active"));
         assert!(binding["reservation_pressure_description"]
             .as_str()
             .expect("reservation pressure description")
@@ -11749,15 +11765,15 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("capture a live shadow trace"));
-        assert_eq!(value["binding_safety"]["status"], serde_json::json!("read-only"));
+        assert_eq!(
+            value["binding_safety"]["status"],
+            serde_json::json!("read-only")
+        );
         assert_eq!(
             value["binding_safety"]["mutation_allowed"],
             serde_json::json!(false)
         );
-        assert_eq!(
-            value["binding_safety"]["bound"],
-            serde_json::json!(0)
-        );
+        assert_eq!(value["binding_safety"]["bound"], serde_json::json!(0));
         assert_eq!(
             value["binding_safety"]["reservation_pressure"],
             serde_json::json!("none")

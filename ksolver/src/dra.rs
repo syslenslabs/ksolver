@@ -101,7 +101,9 @@ fn attr_equals(attr: &Value, lit: &Literal) -> bool {
 /// Look up a `device.attributes["<domain>"].<name>` reference in the API attribute map, which keys
 /// entries as `"<domain>/<name>"` (fully qualified) or bare `"<name>"`.
 fn lookup_attr<'a>(attrs: &'a Map<String, Value>, domain: &str, name: &str) -> Option<&'a Value> {
-    attrs.get(&format!("{domain}/{name}")).or_else(|| attrs.get(name))
+    attrs
+        .get(&format!("{domain}/{name}"))
+        .or_else(|| attrs.get(name))
 }
 
 /// Evaluate one DeviceClass selector CEL `expression` against a device (its owning slice `driver`
@@ -237,7 +239,10 @@ fn latest_generations(slices: &[Value]) -> BTreeMap<(String, String), i64> {
     let mut g: BTreeMap<(String, String), i64> = BTreeMap::new();
     for s in slices {
         let spec = s.get("spec").unwrap_or(&Value::Null);
-        let driver = spec.get("driver").and_then(Value::as_str).unwrap_or_default();
+        let driver = spec
+            .get("driver")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let pool = spec.get("pool").unwrap_or(&Value::Null);
         let pool_name = pool.get("name").and_then(Value::as_str).unwrap_or_default();
         let gen = pool.get("generation").and_then(Value::as_i64).unwrap_or(0);
@@ -279,7 +284,11 @@ fn allocated_identities(claims: &[Value]) -> BTreeSet<(String, String, String)> 
 /// Compute per-node, per-class available (unallocated, matching) device counts. Each input is a full
 /// DRA object as `serde_json::Value` (ResourceSlice / DeviceClass / ResourceClaim), at whatever
 /// `resource.k8s.io` version the cluster serves — field access is shape-tolerant.
-pub fn compute_availability(slices: &[Value], classes: &[Value], claims: &[Value]) -> DraAvailability {
+pub fn compute_availability(
+    slices: &[Value],
+    classes: &[Value],
+    claims: &[Value],
+) -> DraAvailability {
     let latest = latest_generations(slices);
     let allocated = allocated_identities(claims);
     let mut out = DraAvailability::default();
@@ -292,7 +301,10 @@ pub fn compute_availability(slices: &[Value], classes: &[Value], claims: &[Value
             Some(n) if !n.is_empty() => n,
             _ => continue,
         };
-        let driver = spec.get("driver").and_then(Value::as_str).unwrap_or_default();
+        let driver = spec
+            .get("driver")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let pool = spec.get("pool").unwrap_or(&Value::Null);
         let pool_name = pool.get("name").and_then(Value::as_str).unwrap_or_default();
         let generation = pool.get("generation").and_then(Value::as_i64).unwrap_or(0);
@@ -305,7 +317,10 @@ pub fn compute_availability(slices: &[Value], classes: &[Value], claims: &[Value
             continue;
         };
         for device in devices {
-            let dev_name = device.get("name").and_then(Value::as_str).unwrap_or_default();
+            let dev_name = device
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let id = (
                 driver.to_string(),
                 pool_name.to_string(),
@@ -489,16 +504,28 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "A100""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].model == "A100""#,
+                "d",
+                &a
+            ),
             SelMatch::Yes
         );
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].model == "H100""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].model == "H100""#,
+                "d",
+                &a
+            ),
             SelMatch::No
         );
         // absent attribute ⇒ predicate false ⇒ No
         assert_eq!(
-            eval_selector(r#"device.attributes["gpu.nvidia.com"].vendor == "x""#, "d", &a),
+            eval_selector(
+                r#"device.attributes["gpu.nvidia.com"].vendor == "x""#,
+                "d",
+                &a
+            ),
             SelMatch::No
         );
     }
@@ -512,7 +539,11 @@ mod tests {
             r#"device.attributes["x"].y in ["a","b"]"#,
             r#"has(device.attributes["x"].y)"#,
         ] {
-            assert_eq!(eval_selector(e, "d", &a), SelMatch::Unevaluable, "expr: {e}");
+            assert_eq!(
+                eval_selector(e, "d", &a),
+                SelMatch::Unevaluable,
+                "expr: {e}"
+            );
         }
     }
 
@@ -539,7 +570,10 @@ mod tests {
             ]}}}
         })];
         let avail = compute_availability(&slices, &classes, &claims);
-        assert_eq!(avail.by_node_class.get(&("n1".into(), "a100".into())), Some(&1));
+        assert_eq!(
+            avail.by_node_class.get(&("n1".into(), "a100".into())),
+            Some(&1)
+        );
         assert!(!avail.overlapping_classes);
         assert!(avail.unevaluable_classes.is_empty());
     }
@@ -563,7 +597,10 @@ mod tests {
         )];
         let avail = compute_availability(&slices, &classes, &[]);
         // both devices counted (v1 attribute shape read correctly)
-        assert_eq!(avail.by_node_class.get(&("n1".into(), "a100".into())), Some(&2));
+        assert_eq!(
+            avail.by_node_class.get(&("n1".into(), "a100".into())),
+            Some(&2)
+        );
     }
 
     #[test]
@@ -580,12 +617,21 @@ mod tests {
         ];
         let classes = vec![class("all", &[])]; // empty selectors ⇒ matches all
         let avail = compute_availability(&slices, &classes, &[]);
-        assert_eq!(avail.by_node_class.get(&("n1".into(), "all".into())), Some(&2));
+        assert_eq!(
+            avail.by_node_class.get(&("n1".into(), "all".into())),
+            Some(&2)
+        );
     }
 
     #[test]
     fn overlap_flagged_when_device_matches_two_classes() {
-        let slices = vec![slice_basic("n1", "d", "p", 1, json!([device_basic("g0", json!({}))]))];
+        let slices = vec![slice_basic(
+            "n1",
+            "d",
+            "p",
+            1,
+            json!([device_basic("g0", json!({}))]),
+        )];
         let classes = vec![class("c1", &[]), class("c2", &[])]; // both empty ⇒ both match g0
         let avail = compute_availability(&slices, &classes, &[]);
         assert!(avail.overlapping_classes);
@@ -593,7 +639,13 @@ mod tests {
 
     #[test]
     fn definite_no_wins_over_unevaluable_selector() {
-        let slices = vec![slice_basic("n1", "gpu.other.com", "p", 1, json!([device_basic("g0", json!({}))]))];
+        let slices = vec![slice_basic(
+            "n1",
+            "gpu.other.com",
+            "p",
+            1,
+            json!([device_basic("g0", json!({}))]),
+        )];
         let classes = vec![class(
             "c",
             &[
@@ -611,7 +663,13 @@ mod tests {
 
     #[test]
     fn unevaluable_class_not_counted() {
-        let slices = vec![slice_basic("n1", "d", "p", 1, json!([device_basic("g0", json!({}))]))];
+        let slices = vec![slice_basic(
+            "n1",
+            "d",
+            "p",
+            1,
+            json!([device_basic("g0", json!({}))]),
+        )];
         let classes = vec![class("weird", &[r#"device.attributes["x"].y > 3"#])];
         let avail = compute_availability(&slices, &classes, &[]);
         assert!(avail.unevaluable_classes.contains("weird"));
@@ -678,7 +736,13 @@ mod tests {
         let template = json!({"spec": {"spec": {"devices": {"requests": [
             {"name": "r", "deviceClassName": "a100", "count": 4}
         ]}}}});
-        let devices = template.get("spec").unwrap().get("spec").unwrap().get("devices").unwrap();
+        let devices = template
+            .get("spec")
+            .unwrap()
+            .get("spec")
+            .unwrap()
+            .get("devices")
+            .unwrap();
         let d = demand_from_device_claim(devices);
         assert_eq!(d.by_class.get("a100"), Some(&4));
     }

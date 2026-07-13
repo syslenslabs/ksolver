@@ -404,7 +404,10 @@ impl KubeCollector {
         if served.is_empty() {
             return None;
         }
-        select_dra_version(&served, group.preferred_version.as_ref().map(|v| v.version.as_str()))
+        select_dra_version(
+            &served,
+            group.preferred_version.as_ref().map(|v| v.version.as_str()),
+        )
     }
 
     /// List one DRA kind as untyped `DynamicObject`s at the given served version, returned as full
@@ -553,7 +556,11 @@ impl KubeCollector {
                     // A ResourceClaimTemplate's embedded DeviceClaim lives at spec.spec.devices.
                     template_by_ns_name
                         .get(&(pod.namespace.clone(), tn.clone()))
-                        .and_then(|t| t.get("spec").and_then(|s| s.get("spec")).and_then(|s| s.get("devices")))
+                        .and_then(|t| {
+                            t.get("spec")
+                                .and_then(|s| s.get("spec"))
+                                .and_then(|s| s.get("devices"))
+                        })
                         .map(crate::dra::demand_from_device_claim)
                 } else {
                     None
@@ -2331,7 +2338,10 @@ mod tests {
             ..Default::default()
         };
         // init peak = sidecar(1)+setup(4)=5; app phase = app(2)+sidecar(1)=3; max = 5.
-        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&5));
+        assert_eq!(
+            sum_pod_extended_requests(&spec).get("nvidia.com/gpu"),
+            Some(&5)
+        );
     }
 
     #[test]
@@ -2342,7 +2352,10 @@ mod tests {
             containers: vec![corev1::Container {
                 name: "app".to_string(),
                 resources: Some(corev1::ResourceRequirements {
-                    requests: Some(BTreeMap::from([("cpu".to_string(), Quantity("2".to_string()))])),
+                    requests: Some(BTreeMap::from([(
+                        "cpu".to_string(),
+                        Quantity("2".to_string()),
+                    )])),
                     limits: Some(BTreeMap::from([(
                         "nvidia.com/gpu".to_string(),
                         Quantity("1".to_string()),
@@ -2353,7 +2366,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&1));
+        assert_eq!(
+            sum_pod_extended_requests(&spec).get("nvidia.com/gpu"),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -2361,7 +2377,10 @@ mod tests {
         use k8s_openapi::api::core::v1 as corev1;
         let cpu_req = |c: &str| -> Option<corev1::ResourceRequirements> {
             Some(corev1::ResourceRequirements {
-                requests: Some(BTreeMap::from([("cpu".to_string(), Quantity(c.to_string()))])),
+                requests: Some(BTreeMap::from([(
+                    "cpu".to_string(),
+                    Quantity(c.to_string()),
+                )])),
                 ..Default::default()
             })
         };
@@ -2392,7 +2411,10 @@ mod tests {
             containers: vec![corev1::Container {
                 name: "app".to_string(),
                 resources: Some(corev1::ResourceRequirements {
-                    requests: Some(BTreeMap::from([("cpu".to_string(), Quantity("1".to_string()))])),
+                    requests: Some(BTreeMap::from([(
+                        "cpu".to_string(),
+                        Quantity("1".to_string()),
+                    )])),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2404,7 +2426,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(sum_pod_spec_requests(&spec).milli_cpu, 1250); // 1000m + 250m overhead
-        assert_eq!(sum_pod_extended_requests(&spec).get("nvidia.com/gpu"), Some(&1));
+        assert_eq!(
+            sum_pod_extended_requests(&spec).get("nvidia.com/gpu"),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -2420,9 +2445,15 @@ mod tests {
             Some("v1beta2")
         );
         // 1.32: v1beta1 only.
-        assert_eq!(select_dra_version(&["v1beta1"], None).as_deref(), Some("v1beta1"));
+        assert_eq!(
+            select_dra_version(&["v1beta1"], None).as_deref(),
+            Some("v1beta1")
+        );
         // 1.31: v1alpha3 only.
-        assert_eq!(select_dra_version(&["v1alpha3"], None).as_deref(), Some("v1alpha3"));
+        assert_eq!(
+            select_dra_version(&["v1alpha3"], None).as_deref(),
+            Some("v1alpha3")
+        );
         // Unknown/future version not in the preference list -> fall back to server preferred.
         assert_eq!(
             select_dra_version(&["v2", "v1zeta"], Some("v2")).as_deref(),

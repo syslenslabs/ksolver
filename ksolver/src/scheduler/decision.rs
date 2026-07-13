@@ -438,7 +438,10 @@ pub fn build_decision_trace(
                 "deferred below admitted longer-waiting work (max admitted queue wait {max_admitted_queue_wait_seconds}s)"
             ));
         } else if solve_ok
-            && fair_share_deficit_by_scope.get(&scope).copied().unwrap_or(0)
+            && fair_share_deficit_by_scope
+                .get(&scope)
+                .copied()
+                .unwrap_or(0)
                 < max_admitted_fair_share_deficit
         {
             caveats.push(format!(

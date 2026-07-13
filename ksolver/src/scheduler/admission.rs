@@ -436,7 +436,11 @@ pub fn vram_injection_ops(
         .get("confidence")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("advisory");
-    set_ann(&mut ops, "ksolver.dev/predicted-peak-vram-source", source.to_string());
+    set_ann(
+        &mut ops,
+        "ksolver.dev/predicted-peak-vram-source",
+        source.to_string(),
+    );
     set_ann(
         &mut ops,
         "ksolver.dev/predicted-peak-vram-confidence",
@@ -578,7 +582,10 @@ mod tests {
         let ops = vram_injection_ops(&p, &res);
         assert!(ops.iter().any(|o| o.path
             == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-explanation"
-            && o.value == Some(serde_json::Value::String("predicted 18 GiB from transformer".to_string()))));
+            && o.value
+                == Some(serde_json::Value::String(
+                    "predicted 18 GiB from transformer".to_string()
+                ))));
     }
 
     #[test]
@@ -589,8 +596,9 @@ mod tests {
         });
         let ops = vram_injection_ops(&p, &res);
         assert!(!ops.iter().any(|o| o.path == "/spec/affinity"));
-        assert!(ops.iter().any(|o| o.path
-            == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-advisory"));
+        assert!(ops
+            .iter()
+            .any(|o| o.path == "/metadata/annotations/ksolver.dev~1predicted-peak-vram-advisory"));
     }
 
     #[test]
@@ -610,7 +618,9 @@ mod tests {
         }];
         let merged = merge_extra_ops(seeded, extra);
         let b64 = merged.response.unwrap().patch.unwrap();
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         let ops: Vec<JsonPatchOperation> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().any(|o| o.path == "/spec/schedulerName"));
