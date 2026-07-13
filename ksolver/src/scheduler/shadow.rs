@@ -3217,6 +3217,10 @@ fn vram_model_driver_summary(
         "quality": {
             "loo_mae_mib": model.get("leave_one_out_mean_absolute_error_mib").cloned().unwrap_or(serde_json::Value::Null),
             "loo_p95_mib": model.get("leave_one_out_abs_error_p95_mib").cloned().unwrap_or(serde_json::Value::Null),
+            // Honest group-aware (leave-one-config-out) generalization to novel configs — row-level LOO
+            // above is optimistic. Surfaced so the dashboard shows both; null on older models.
+            "group_loo_mae_mib": model.get("group_leave_one_out_mean_absolute_error_mib").cloned().unwrap_or(serde_json::Value::Null),
+            "group_loo_p95_mib": model.get("group_leave_one_out_abs_error_p95_mib").cloned().unwrap_or(serde_json::Value::Null),
             "usable_for_prediction": model.get("usable_for_prediction").cloned().unwrap_or(serde_json::Value::Null),
         },
         "summary": "Top drivers are mean absolute feature contributions over the current calibration rows; synthetic VRAM headroom features are stress-test probes, not organic model demand.",
@@ -3276,6 +3280,10 @@ fn vram_model_driver_summary_from_impacts(model: &serde_json::Value) -> serde_js
         "quality": {
             "loo_mae_mib": model.get("leave_one_out_mean_absolute_error_mib").cloned().unwrap_or(serde_json::Value::Null),
             "loo_p95_mib": model.get("leave_one_out_abs_error_p95_mib").cloned().unwrap_or(serde_json::Value::Null),
+            // Honest group-aware (leave-one-config-out) generalization to novel configs — row-level LOO
+            // above is optimistic. Surfaced so the dashboard shows both; null on older models.
+            "group_loo_mae_mib": model.get("group_leave_one_out_mean_absolute_error_mib").cloned().unwrap_or(serde_json::Value::Null),
+            "group_loo_p95_mib": model.get("group_leave_one_out_abs_error_p95_mib").cloned().unwrap_or(serde_json::Value::Null),
             "usable_for_prediction": model.get("usable_for_prediction").cloned().unwrap_or(serde_json::Value::Null),
         },
         "summary": "Top drivers are coefficient times observed feature standard deviation from the fitted model artifact; synthetic VRAM headroom features are stress-test probes, not organic model demand.",

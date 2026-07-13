@@ -1886,6 +1886,22 @@
     looP95.title = looTip;
     stats.appendChild(looMae);
     stats.appendChild(looP95);
+    // Honest novel-config generalization (group-aware / leave-one-config-out): holds out all repeated
+    // samples of a config so it doesn't leak near-duplicate twins. This is the number to quote for
+    // customer accuracy claims. Shown alongside row-level; only present on models that carry it.
+    var gTip = "Leave-one-CONFIG-out CV — holds out every repeated sample of a config, so it doesn't "
+      + "leak near-duplicate twins across folds. Honest error on configs the model has never seen; "
+      + "quote this for customer accuracy claims.";
+    if (reg.group_loo_mae_mib != null) {
+      var gMae = stat("LOO MAE", modelMetric(reg.group_loo_mae_mib, " MiB"), "novel-config");
+      gMae.title = gTip;
+      stats.appendChild(gMae);
+    }
+    if (reg.group_loo_p95_abs_error_mib != null) {
+      var gP95 = stat("LOO p95", modelMetric(reg.group_loo_p95_abs_error_mib, " MiB"), "novel-config");
+      gP95.title = gTip;
+      stats.appendChild(gP95);
+    }
     stats.appendChild(stat("Risk recall", modelMetric((oom.recall || 0) * 100, "%"), "OOM/near-cap"));
 	    stats.appendChild(stat("Synthetic headroom probes", fmt(reserve.pressure_rows || 0), "reserve_extra_mib padding rows; not organic model demand"));
 	    stats.appendChild(stat("Max synthetic headroom", modelMetric(reserve.max_synthetic_reserve_extra_mib, " MiB"), "largest synthetic reserve_extra_mib VRAM probe"));
