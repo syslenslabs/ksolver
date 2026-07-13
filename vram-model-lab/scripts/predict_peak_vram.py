@@ -56,9 +56,21 @@ def main() -> int:
     selected = family_model if family_model and family_model.get("usable_for_prediction") else global_model
     x = np.array(features(row, mode=selected.get("feature_mode", "interactions")), dtype=float)
     point = float(x @ np.array(selected["coefficients"], dtype=float))
+    # Prefer the HONEST group-aware (leave-one-config-out) p95 for the safety margin — row-level LOO is
+    # optimistic (near-duplicate rows leak across folds), and here the margin has functional impact on
+    # the fits/OOM decision. Fall back to row-level p95 (then 2*MAE) if group-aware isn't present.
+    group_p95 = selected.get("group_leave_one_out_abs_error_p95_mib")
     p95 = selected.get("leave_one_out_abs_error_p95_mib")
     loo = selected.get("leave_one_out_mean_absolute_error_mib") or 0.0
-    default_safety = max(1024.0, float(p95) if p95 is not None else 2.0 * float(loo))
+    if group_p95 is not None:
+        default_safety = max(1024.0, float(group_p95))
+        safety_source = "group_leave_one_out_abs_error_p95_mib"
+    elif p95 is not None:
+        default_safety = max(1024.0, float(p95))
+        safety_source = "leave_one_out_abs_error_p95_mib"
+    else:
+        default_safety = max(1024.0, 2.0 * float(loo))
+        safety_source = "2x_leave_one_out_mae"
     safety = float(args.safety_mib) if args.safety_mib is not None else default_safety
     conservative = point + safety
     decision = "fits" if conservative < args.gpu_total_mib else "risk_or_oom"
@@ -70,7 +82,7 @@ def main() -> int:
         "selected_model_usable": selected.get("usable_for_prediction"),
         "point_estimate_mib": round(point, 1),
         "safety_margin_mib": round(safety, 1),
-        "safety_source": "explicit" if args.safety_mib is not None else "leave_one_out_abs_error_p95_mib",
+        "safety_source": "explicit" if args.safety_mib is not None else safety_source,
         "conservative_estimate_mib": round(conservative, 1),
         "gpu_total_mib": args.gpu_total_mib,
         "decision": decision,

@@ -27,6 +27,11 @@ def compact(model: dict) -> dict:
         "loo_mae_mib": model.get("leave_one_out_mean_absolute_error_mib"),
         "loo_p95_abs_error_mib": model.get("leave_one_out_abs_error_p95_mib"),
         "loo_max_abs_error_mib": model.get("leave_one_out_max_absolute_error_mib"),
+        # Group-aware (leave-one-config-out) = honest generalization to novel configs; row-level LOO
+        # above is optimistic (near-duplicate rows leak across folds). Quote these for customer claims.
+        "group_loo_mae_mib": model.get("group_leave_one_out_mean_absolute_error_mib"),
+        "group_loo_p95_abs_error_mib": model.get("group_leave_one_out_abs_error_p95_mib"),
+        "group_loo_max_abs_error_mib": model.get("group_leave_one_out_max_absolute_error_mib"),
         "top_driver_labels": model.get("top_driver_labels") or [
             row.get("description") or row.get("feature")
             for row in feature_impacts[:5]

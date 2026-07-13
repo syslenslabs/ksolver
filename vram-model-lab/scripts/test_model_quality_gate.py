@@ -113,6 +113,33 @@ class ModelQualityGateTest(unittest.TestCase):
             "evaluation.json training_rows disagrees with the model — stale summary",
         )
 
+    def test_committed_group_aware_fields_present_agree_and_within_policy(self) -> None:
+        """The HONEST group-aware (leave-one-config-out) error must be a committed field in both the
+        model and evaluation.json, they must agree, and stay within the same policy ceilings as the
+        row-level metric. This guards the honest number the demo/estimator now surface."""
+        g = self.evaluation["global"]
+        model_p95 = self.model.get("group_leave_one_out_abs_error_p95_mib")
+        model_max = self.model.get("group_leave_one_out_max_absolute_error_mib")
+        self.assertIsNotNone(model_p95, "model missing committed group_leave_one_out p95")
+        self.assertIsNotNone(model_max, "model missing committed group_leave_one_out max")
+        self.assertAlmostEqual(
+            g["group_loo_p95_abs_error_mib"], model_p95, delta=AGREEMENT_TOLERANCE_MIB,
+            msg="evaluation.json group-aware p95 disagrees with the model — stale summary",
+        )
+        self.assertAlmostEqual(
+            g["group_loo_max_abs_error_mib"], model_max, delta=AGREEMENT_TOLERANCE_MIB,
+            msg="evaluation.json group-aware max disagrees with the model — stale summary",
+        )
+        # Honest generalization must ALSO stay within policy (it's the number customers should trust).
+        self.assertLessEqual(
+            model_p95, POLICY_MAX_LOO_P95_MIB,
+            f"committed group-aware p95 {model_p95:.0f} exceeds policy {POLICY_MAX_LOO_P95_MIB}",
+        )
+        self.assertLessEqual(
+            model_max, POLICY_MAX_LOO_MAX_MIB,
+            f"committed group-aware max {model_max:.0f} exceeds policy {POLICY_MAX_LOO_MAX_MIB}",
+        )
+
     def test_group_aware_generalization_within_policy(self) -> None:
         """The HONEST generalization must ALSO stay within the policy ceilings — not just the committed
         row-LOO, which is optimistic because the training data has many near-duplicate rows (repeated

@@ -159,6 +159,28 @@ def leave_one_out(x: np.ndarray, y: np.ndarray, alpha: float) -> list[float]:
     return errors
 
 
+def leave_one_group_out(x: np.ndarray, y: np.ndarray, alpha: float) -> list[float]:
+    """Group-aware CV: hold out ALL rows sharing a feature vector (one config) at once. Row-level LOO
+    leaks near-duplicate twins (repeated samples per config) across train/test and is optimistic; this
+    is the honest generalization to NOVEL configs. Mirrors group_aware_eval.py. Returns [] if <2 groups."""
+    errors: list[float] = []
+    if len(y) < 3:
+        return errors
+    groups: dict[tuple, list[int]] = {}
+    for i, row in enumerate(x):
+        groups.setdefault(tuple(np.round(row, 6)), []).append(i)
+    if len(groups) < 2:
+        return errors
+    for members in groups.values():
+        mask = np.ones(len(y), dtype=bool)
+        for i in members:
+            mask[i] = False
+        coef = fit_ridge(x[mask], y[mask], alpha=alpha)
+        for i in members:
+            errors.append(abs(float(y[i]) - float(x[i] @ coef)))
+    return errors
+
+
 def percentile(values: np.ndarray | list[float], pct: float) -> float | None:
     if len(values) == 0:
         return None
@@ -213,6 +235,7 @@ def fit_model(rows: list[dict], name: str, alpha: float = 25.0, mode: str = "int
     pred = x @ coef
     abs_err = np.abs(pred - y)
     loo = leave_one_out(x, y, alpha=alpha)
+    group_loo = leave_one_group_out(x, y, alpha=alpha)
     residuals = y - pred
     loo_p95 = percentile(loo, 95)
     loo_max = float(np.max(loo)) if loo else None
@@ -256,6 +279,16 @@ def fit_model(rows: list[dict], name: str, alpha: float = 25.0, mode: str = "int
         "leave_one_out_max_absolute_error_mib": loo_max,
         "leave_one_out_abs_error_p90_mib": percentile(loo, 90),
         "leave_one_out_abs_error_p95_mib": loo_p95,
+        # Group-aware (leave-one-CONFIG-out) CV = honest generalization to NOVEL configs. Row-level LOO
+        # above is optimistic because near-duplicate rows (repeated samples per config) leak across
+        # train/test. Reported alongside row-level so consumers can quote the honest novel-config error.
+        "group_leave_one_out_mean_absolute_error_mib": (
+            float(np.mean(group_loo)) if group_loo else None
+        ),
+        "group_leave_one_out_max_absolute_error_mib": (
+            float(np.max(group_loo)) if group_loo else None
+        ),
+        "group_leave_one_out_abs_error_p95_mib": percentile(group_loo, 95),
         "usable_for_prediction": usable,
         "quality_gate": "rows>=8 and loo_p95<=5000MiB and loo_max<=25000MiB",
         "examples": [

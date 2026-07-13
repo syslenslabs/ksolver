@@ -2969,6 +2969,9 @@
           "group": "model family"
         }
       ],
+      "group_leave_one_out_abs_error_p95_mib": 1538.9628656842096,
+      "group_leave_one_out_max_absolute_error_mib": 5691.336789651827,
+      "group_leave_one_out_mean_absolute_error_mib": 532.3615830660258,
       "in_sample_abs_error_p50_mib": 292.0240404334413,
       "in_sample_abs_error_p90_mib": 867.3566261652309,
       "in_sample_abs_error_p95_mib": 1394.7131769608536,
@@ -3638,6 +3641,9 @@
           "group": "model family"
         }
       ],
+      "group_leave_one_out_abs_error_p95_mib": 4796.010126510038,
+      "group_leave_one_out_max_absolute_error_mib": 6077.828272991057,
+      "group_leave_one_out_mean_absolute_error_mib": 1245.4692945681631,
       "in_sample_abs_error_p50_mib": 456.12390072277367,
       "in_sample_abs_error_p90_mib": 1278.8653597502603,
       "in_sample_abs_error_p95_mib": 2417.833233029621,
@@ -4870,6 +4876,9 @@
           "group": "model family"
         }
       ],
+      "group_leave_one_out_abs_error_p95_mib": 2842.2462303588754,
+      "group_leave_one_out_max_absolute_error_mib": 5536.580596964734,
+      "group_leave_one_out_mean_absolute_error_mib": 929.7930974871066,
       "in_sample_abs_error_p50_mib": 509.43270031430984,
       "in_sample_abs_error_p90_mib": 1584.2557357453607,
       "in_sample_abs_error_p95_mib": 2125.403393137919,
@@ -7326,6 +7335,9 @@
         "group": "training strategy"
       }
     ],
+    "group_leave_one_out_abs_error_p95_mib": 3364.9347869137855,
+    "group_leave_one_out_max_absolute_error_mib": 12200.052511393196,
+    "group_leave_one_out_mean_absolute_error_mib": 1239.5083833033175,
     "in_sample_abs_error_p50_mib": 647.3182459659538,
     "in_sample_abs_error_p90_mib": 2292.671489892712,
     "in_sample_abs_error_p95_mib": 2680.4841199077473,
@@ -7394,6 +7406,9 @@
       "group": "training strategy"
     }
   ],
+  "group_leave_one_out_abs_error_p95_mib": 3364.9347869137855,
+  "group_leave_one_out_max_absolute_error_mib": 12200.052511393196,
+  "group_leave_one_out_mean_absolute_error_mib": 1239.5083833033175,
   "in_sample_abs_error_p50_mib": 647.3182459659538,
   "in_sample_abs_error_p90_mib": 2292.671489892712,
   "in_sample_abs_error_p95_mib": 2680.4841199077473,
