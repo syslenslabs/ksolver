@@ -111,6 +111,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--observations", help="JSONL observation store for the fingerprint tier")
+    # In-cluster a MutatingWebhookConfiguration calls /admit over HTTPS from the API server, so bind
+    # 0.0.0.0 and terminate TLS here. Localhost + plain HTTP stay the default for local dev/testing.
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (use 0.0.0.0 in-cluster)")
+    parser.add_argument("--tls-cert", help="PEM cert; enables HTTPS (required for a k8s webhook)")
+    parser.add_argument("--tls-key", help="PEM private key (paired with --tls-cert)")
     args = parser.parse_args()
 
     import os
@@ -119,9 +124,22 @@ def main() -> int:
     if args.observations and os.path.exists(args.observations):
         observations = vr.load_observations(args.observations)
     server = ThreadingHTTPServer(
-        ("127.0.0.1", args.port), _make_handler(observations, args.observations)
+        (args.host, args.port), _make_handler(observations, args.observations)
     )
-    print(f"vram admission service on 127.0.0.1:{args.port} (/predict, /admit, /observe, /claim)")
+    scheme = "http"
+    if args.tls_cert or args.tls_key:
+        if not (args.tls_cert and args.tls_key):
+            parser.error("--tls-cert and --tls-key must be given together")
+        import ssl
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=args.tls_cert, keyfile=args.tls_key)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
+    print(
+        f"vram admission service on {scheme}://{args.host}:{args.port} "
+        f"(/predict, /admit, /observe, /claim)"
+    )
     server.serve_forever()
     return 0
 
