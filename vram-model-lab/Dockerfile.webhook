@@ -1,0 +1,23 @@
+# VRAM->DRA admission webhook (frontier F3). Packages vram_admission_service.py + the resolver
+# cascade + the committed peak-VRAM model so a k8s MutatingWebhookConfiguration can call /admit over
+# HTTPS. Fail-open by design (any error admits the pod unchanged).
+#
+# Build (context = vram-model-lab/):
+#   docker build -f Dockerfile.webhook -t ksolver-vram-webhook:dev .
+# Local smoke (no TLS):
+#   docker run --rm -p 8091:8091 ksolver-vram-webhook:dev --host 0.0.0.0 --port 8091
+# In-cluster: the default CMD serves HTTPS on :8443 with the TLS keypair mounted at /tls (see the
+# Deployment/Certificate manifests). Override CMD for HTTP/local.
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir numpy pyyaml
+
+# The resolver computes ROOT as scripts/.. and loads data/models/peak_vram_linear.json, so preserve
+# that layout: /app/scripts + /app/data/models.
+WORKDIR /app/scripts
+COPY scripts/ /app/scripts/
+COPY data/models/peak_vram_linear.json /app/data/models/peak_vram_linear.json
+
+EXPOSE 8443
+ENTRYPOINT ["python", "vram_admission_service.py"]
+CMD ["--host", "0.0.0.0", "--port", "8443", "--tls-cert", "/tls/tls.crt", "--tls-key", "/tls/tls.key"]
