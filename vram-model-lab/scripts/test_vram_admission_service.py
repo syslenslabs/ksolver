@@ -32,6 +32,16 @@ class RouteTest(unittest.TestCase):
         ops = json.loads(base64.b64decode(body["response"]["patch"]))
         self.assertTrue(any("predicted-peak-vram" in o["path"] for o in ops))
 
+    def test_admit_with_apiserver_query_string_still_routes(self):
+        # Regression: the k8s API server calls the webhook path with a "?timeout=<N>s" query. Matching
+        # the raw path (with query) 404s every real admission call — caught by a live kind deployment.
+        review = {"request": {"uid": "u", "operation": "CREATE",
+                              "object": gpu_pod({"ksolver.dev/predicted-peak-vram-gib": "20"})}}
+        status, body = svc.route("/admit?timeout=5s", review, {})
+        self.assertEqual(status, 200, "webhook must route /admit?timeout=... (not 404)")
+        self.assertTrue(body["response"]["allowed"])
+        self.assertIn("patch", body["response"])
+
     def test_observe_indexes_and_reports_samples(self):
         obs: dict = {}
         pod = gpu_pod(args=["--x", "1"])

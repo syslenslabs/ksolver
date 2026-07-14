@@ -30,7 +30,9 @@ def route(path, payload, observations, store_path=None):
     /admit   {request:...}  -> AdmissionReview response (base64 JSONPatch)
     /observe {pod,peak_mib} -> index + persist an observation (tier-4 populate)
     """
-    path = path.rstrip("/")
+    # Strip any query string — the k8s API server calls the webhook path with a "?timeout=<N>s" query,
+    # so matching the raw path (with query) would 404 every real admission call. Then strip trailing /.
+    path = path.split("?", 1)[0].rstrip("/")
     if path == "/predict":
         return 200, vr.resolve(payload, observations=observations)
     if path == "/admit":
