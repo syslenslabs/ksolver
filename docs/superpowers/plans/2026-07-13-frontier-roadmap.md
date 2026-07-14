@@ -27,11 +27,20 @@ SKUs) ready to `kubectl apply` on a GPU cluster.
 live provenance.
 **Already built:** the whole comparison pipeline (`gpu-scenarios --simulator[-pool]`, cache grind,
 Volcano baseline capture); it fails closed without live KSS.
-**USER must supply:** an amd64 host running the official `registry.k8s.io/scheduler-simulator` images,
-OR a fixed arm64 source build (debug the Go `/reset` drain).
-**Acceptance:** `gpu-scenarios` reports `mode=live` for spread+binpack on the proof scenarios;
-`conform` runs live; provenance flips cached→live in the honesty strip.
-**Autonomous prep now:** none beyond what exists (upstream/infra fix required).
+**ROOT CAUSE FOUND (2026-07-13):** the `/reset` drain bug is an **etcd-prefix mismatch**, not a
+fundamental arm64 issue. `reset.go` deletes prefix `/kube-scheduler-simulator`, but the self-built
+setup points the simulator at a KWOK cluster whose apiserver stores objects under the default
+`/registry` prefix → reset misses them. Fix: make the prefixes match — either configure KWOK's
+apiserver `--etcd-prefix=/kube-scheduler-simulator` (committable in kss-pool.sh) or patch reset.go's
+`EtcdPrefix` to `/registry` + rebuild (source is a gitignored build artifact, so patch in the build
+step). Details in memory [[kss-simulator-reset-rootcause]]. Go 1.26 + the source + the official amd64
+v0.4.0 images are all present locally.
+**USER must supply / decide:** which fix (KWOK apiserver arg vs rebuild vs official amd64 under
+emulation) — then it's implementable + testable locally.
+**Acceptance:** import→reset→export drains empty; `gpu-scenarios` reports `mode=live`; `conform` runs
+live; provenance flips cached→live.
+**Autonomous prep now:** root cause diagnosed + fix path documented (above). Full fix needs the
+KWOK-apiserver reconfig + full-stack re-test (a focused follow-up).
 
 ## F3 — In-cluster VRAM→DRA admission webhook  (rank 3: makes it actionable)
 **Gap:** the VRAM→DRA wedge runs fail-open but has no deployed `MutatingWebhookConfiguration` + TLS.
@@ -51,7 +60,17 @@ ready-to-apply YAML, gated behind an opt-in label — reviewable without a clust
 **USER must supply:** DCGM exporter (or equivalent) scraping GPU memory + a Prometheus the collector
 can read.
 **Acceptance:** the store auto-fills from live metrics; tier-4 predictions cite real observations.
-**Autonomous prep now:** a scrape-config + ingestion mapping (DCGM metric → store row) as a doc/config.
+**Concrete approach (2026-07-13):** `historical_usage.rs` already has the PromQL client
+(`query_prometheus_vector/matrix`) — it currently queries pod CPU/memory. Add a per-pod peak-VRAM
+query against the standard dcgm-exporter metric: `max_over_time(DCGM_FI_DEV_FB_USED{pod!=""}[<window>])`
+(framebuffer used, MiB; the kube-integrated dcgm-exporter adds `pod`/`namespace`/`exported_pod`
+labels). The non-trivial glue is mapping DCGM's per-pod peak → the tier-4 store's key (workload
+fingerprint = image+command_hash, `vram_store.rs`): join the DCGM pod to its spec, compute the
+fingerprint, write the observed peak. **Can't be validated without a real dcgm-exporter** (the exact
+label set varies by exporter version + kube-state-metrics join), so wire it behind the existing
+Prometheus config and gate on real metrics rather than writing it blind.
+**Autonomous prep now:** the query + mapping design above; a mock-Prometheus unit test could validate
+the PromQL parsing + fingerprint mapping, but the real label join needs a live exporter.
 
 ## F5 — Concrete DRA device identity + topology  (rank 5: high potential, high risk)
 **Gap:** DRA is honest scalar approximation; NVLink/topology is label-filter only. Phase 5 depth.
