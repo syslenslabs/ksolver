@@ -372,6 +372,9 @@ Filter phase. For each pending pod and each (non-cordoned) node it gets two verd
 - `--json` emits a machine-readable report with the same strict/expected-divergence matrices, mismatch lists, expected-divergence reason counts, and `strict_gate_status`.
 - `--fail-on-strict-false-positive` exits non-zero after printing the report if the strict gate fails. Expected-divergence mismatches remain advisory and do not trip this CI gate.
 - Read-only on the real cluster; only the simulator (a sandbox) is scheduled against. With no simulator URL configured, `conform` prints a skip notice and exits 0. With `--json`, the skip path emits a JSON object with `skipped: true`.
+- **Scaling on large fleets.** `conform` is O(pods × nodes) — one simulator reset/import/probe per (pod, node) pair — so a full run on a 100+-node cluster is slow. Two opt-in flags (defaults unchanged) make it tractable:
+  - `--max-nodes N` caps the probed candidate set to a sample; the report records `nodes_evaluated` vs `nodes_total` and prints a "node-sampled spot-check … (not full-cluster coverage)" note, so a sampled run is never mistaken for exhaustive coverage.
+  - `--dedup-nodes` keeps **exact full coverage** but probes only one representative per feasibility-equivalence class (nodes with identical allocatable + pod-referenced labels + taints yield the same Filter verdict), replicating the verdict to the rest. It falls back to per-node probing for any pod whose verdict could depend on an un-keyed attribute (`matchFields`, PVC volumes), so it can only ever probe *more* than necessary, never return a wrong verdict. The report shows `simulator_probes` vs the pair count.
 
 CI-friendly examples:
 
@@ -384,6 +387,26 @@ KSOLVER_SCHEDULER_SIMULATOR_URL=http://localhost:8080 \
 ```
 
 **Live-verified** (2026-07-01) against a self-built arm64 kube-scheduler-simulator (v0.4.0 publishes amd64-only images that crash under emulation on Apple Silicon — build them from source with `docker buildx --platform=linux/arm64`). `conform` ran end-to-end and produced a confusion matrix (agree / false-positive / false-negative) with **zero false-negatives**. Note: the single-node import path can yield spurious false-positives when the imported node isn't marked Ready inside the simulator (its own KWOK re-manages imported node status) — a harness-fidelity caveat, not a Filter-modeling gap.
+
+**Update (2026-07-14):** the local simulator pool (`scripts/kss-pool.sh`) now runs the full import/reset/probe cycle reliably — two KWOK apiserver bugs that previously broke pod import (ServiceAccount admission) and `/reset` drain (etcd-prefix mismatch) are fixed in that script. `conform` runs live end-to-end against a one-command pool, and `--max-nodes`/`--dedup-nodes` (above) make large-fleet runs tractable. Verified on the 113-node `solver-lab` KWOK cluster: a full run and a `--dedup-nodes` run produced **identical verdicts and mismatches**, with the strict gate passing.
+
+## Populating the VRAM history store
+
+The tier-4 VRAM predictor (see the historical predictor above) reads a JSONL store of measured
+peak-VRAM observations keyed by workload fingerprint. `ksolver vram-observe` fills that store from a
+real GPU-metrics source — a [dcgm-exporter](https://github.com/NVIDIA/dcgm-exporter) scraped by
+Prometheus:
+
+    ksolver vram-observe --store /var/lib/ksolver/vram.jsonl \
+      --prometheus-url https://prom.example.com \
+      [--prometheus-username <u> --prometheus-token <t>] [--window 24h] [--kubeconfig <path>]
+
+It queries each pod's peak framebuffer usage
+(`max_over_time(DCGM_FI_DEV_FB_USED{pod!=""}[<window>])`), joins each metric to its pod's spec to
+compute the same fingerprint the predictor uses, and appends one row per matched pod. Credentials may
+also come from `KSOLVER_PROMETHEUS_{URL,USERNAME,TOKEN}`. It **requires** a live Prometheus and writes
+nothing when the exporter reports no matching series — it never fabricates an observation. Run it on a
+schedule (e.g. a CronJob) so tier-4 predictions are grounded in real usage.
 
 ## License
 

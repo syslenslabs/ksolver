@@ -418,6 +418,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let sample: usize = flag("--sample").and_then(|v| v.parse().ok()).unwrap_or(20);
+            // 0 = probe all candidate nodes (default). A positive cap makes conform a sampled
+            // spot-check on large fleets, where the O(pods x nodes) full run is intractable.
+            let max_nodes: usize = flag("--max-nodes")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            // Exact full-coverage speedup: probe one representative per feasibility-identical node
+            // class instead of every node (same verdicts; opt-in, default off).
+            let dedup_nodes = rest.iter().any(|a| a == "--dedup-nodes");
             let cluster = flag("--cluster")
                 .or_else(|| std::env::var("KSOLVER_CLUSTER_NAME").ok())
                 .unwrap_or_else(|| "default".to_string());
@@ -428,6 +436,8 @@ async fn main() -> Result<()> {
                 command = "conform",
                 %cluster,
                 sample,
+                max_nodes,
+                dedup_nodes,
                 "running feasibility conformance vs kube-scheduler-simulator (read-only)"
             );
             let report = ksolver::conformance::run_conformance(
@@ -435,6 +445,8 @@ async fn main() -> Result<()> {
                 &cluster,
                 simulator_url.trim(),
                 sample,
+                max_nodes,
+                dedup_nodes,
             )
             .await?;
             if json {
@@ -476,12 +488,78 @@ async fn main() -> Result<()> {
             serde_json::to_writer_pretty(std::io::stdout(), &scored)?;
             println!();
         }
+        Some("vram-observe") => {
+            // Tier-4 populate: scrape a real dcgm-exporter (via Prometheus) for each pod's peak VRAM
+            // and append fingerprinted observations to the JSONL store the predictor reads. Requires a
+            // live Prometheus/dcgm-exporter — it refuses to run without one rather than fabricate.
+            let mut kubeconfig = env::var("KUBECONFIG").unwrap_or_default();
+            let mut store_path = String::new();
+            let mut window = "24h".to_string();
+            let mut prometheus_url = env::var("KSOLVER_PROMETHEUS_URL").unwrap_or_default();
+            let mut prometheus_username =
+                env::var("KSOLVER_PROMETHEUS_USERNAME").unwrap_or_default();
+            let mut prometheus_token = env::var("KSOLVER_PROMETHEUS_TOKEN").unwrap_or_default();
+            let mut remaining = args;
+            while let Some(arg) = remaining.next() {
+                match arg.as_str() {
+                    "--kubeconfig" => kubeconfig = remaining.next().unwrap_or_default(),
+                    "--store" => store_path = remaining.next().unwrap_or_default(),
+                    "--window" => window = remaining.next().unwrap_or_else(|| "24h".to_string()),
+                    "--prometheus-url" => prometheus_url = remaining.next().unwrap_or_default(),
+                    "--prometheus-username" => {
+                        prometheus_username = remaining.next().unwrap_or_default()
+                    }
+                    "--prometheus-token" => prometheus_token = remaining.next().unwrap_or_default(),
+                    // Only echo flag-looking args. A bare value here is likely a mis-passed secret
+                    // (e.g. a typo'd --prometheus-token flag leaving the token as a stray arg); never
+                    // print its value to stderr.
+                    other if other.starts_with('-') => {
+                        eprintln!("unknown vram-observe flag: {other}")
+                    }
+                    _ => eprintln!(
+                        "unexpected vram-observe argument (ignored; value not echoed in case it is a secret)"
+                    ),
+                }
+            }
+            if store_path.is_empty() {
+                eprintln!("vram-observe requires --store <path.jsonl>");
+                std::process::exit(2);
+            }
+            if prometheus_url.is_empty() {
+                eprintln!(
+                    "vram-observe requires --prometheus-url (or KSOLVER_PROMETHEUS_URL): no metrics source, refusing to fabricate observations"
+                );
+                std::process::exit(2);
+            }
+            let resolved = ksolver::historical_usage::ResolvedHistoricalUsageConfig {
+                prometheus_url,
+                prometheus_username,
+                prometheus_token,
+                source: "vram-observe-flags".to_string(),
+                ..Default::default()
+            };
+            let written = ksolver::scheduler::vram_store::collect_and_store_vram_observations(
+                &kubeconfig,
+                &resolved,
+                &window,
+                &store_path,
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "observations_written": written,
+                    "store": store_path,
+                    "window": window,
+                })
+            );
+        }
         Some("version") => {
             println!("syslens-solver rust dev");
         }
         _ => {
             println!(
-                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--volcano-baseline <cache.json>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver score-gang-baseline  (reads placements JSON on stdin)\n  syslens-solver version"
+                "syslens-solver rust\n\nUsage:\n  syslens-solver serve [addr]\n  syslens-solver analyze [--snapshot <path>] [--cluster <name>] [--kubeconfig <path>]\n  syslens-solver shadow\n  syslens-solver bench\n  syslens-solver gpu-scenarios [--simulator <url>] [--simulator-pool <url[,url...]>] [--simulator-cache <path>] [--simulator-cache-dir <dir>] [--refresh-simulator-cache] [--refresh-simulator-cache-only] [--simulator-timeout-ms <ms>] [--simulator-max-live-baselines <n|all>] [--simulator-live-scenarios <name[,name...]>] [--simulator-progress] [--volcano-baseline <cache.json>] [--json]\n  syslens-solver conform [--simulator <url>] [--sample <n>] [--max-nodes <n>] [--dedup-nodes] [--cluster <name>] [--kubeconfig <path>] [--json] [--fail-on-strict-false-positive]\n  syslens-solver dump-scenarios\n  syslens-solver score-gang-baseline  (reads placements JSON on stdin)\n  syslens-solver vram-observe --store <path.jsonl> --prometheus-url <url> [--prometheus-username <u>] [--prometheus-token <t>] [--window <dur>] [--kubeconfig <path>]\n  syslens-solver version"
             );
         }
     }

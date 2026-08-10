@@ -11347,6 +11347,7 @@ mod tests {
                 target_count: 8,
                 present_targets: 8,
                 terminal_present_targets: 8,
+                unschedulable_present_targets: 0,
             },
             stable_polls: 0,
             timed_out: false,

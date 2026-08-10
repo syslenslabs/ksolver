@@ -113,6 +113,40 @@ pub fn observations_from_pods(pods: &[corev1::Pod]) -> Vec<ObservationRow> {
     rows
 }
 
+/// Bridge live DCGM VRAM metrics into tier-4 observations. `peak_by_pod` maps `"namespace/pod"` to
+/// a measured peak VRAM (MiB) — as produced by `historical_usage::query_pod_peak_vram_mib` from the
+/// dcgm-exporter — and `pods` supplies the specs to fingerprint. DCGM keys observations by
+/// (namespace, pod); the tier-4 store keys them by (image, command_hash), so this joins each metric
+/// to its pod's spec, computes the fingerprint, and emits a row. Pods with no matching metric (or a
+/// non-positive peak) are skipped; no value is invented for a pod the exporter never reported.
+pub fn observations_from_vram_metrics(
+    peak_by_pod: &BTreeMap<String, f64>,
+    pods: &[corev1::Pod],
+) -> Vec<ObservationRow> {
+    let mut rows = Vec::new();
+    for pod in pods {
+        let namespace = pod.metadata.namespace.as_deref().unwrap_or_default();
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        if namespace.is_empty() || name.is_empty() {
+            continue;
+        }
+        let Some(&peak) = peak_by_pod.get(&format!("{namespace}/{name}")) else {
+            continue;
+        };
+        if !peak.is_finite() || peak <= 0.0 {
+            continue;
+        }
+        if let Some((image, command_hash)) = pod_command_hash(pod) {
+            rows.push(ObservationRow {
+                image,
+                command_hash,
+                peak_mib: peak,
+            });
+        }
+    }
+    rows
+}
+
 /// Append observation rows to the JSONL store (one JSON object per line).
 pub fn append_observations(store_path: &str, rows: &[ObservationRow]) -> std::io::Result<()> {
     use std::io::Write;
@@ -128,6 +162,37 @@ pub fn append_observations(store_path: &str, rows: &[ObservationRow]) -> std::io
         writeln!(file, "{line}")?;
     }
     Ok(())
+}
+
+/// Collect live DCGM VRAM observations and append them to the tier-4 store. Queries the configured
+/// Prometheus (dcgm-exporter) for each pod's peak VRAM over `window`, lists cluster pods to resolve
+/// their fingerprints, maps the metrics onto (image, command_hash) rows, and appends them. Returns
+/// the number of rows written. Requires a real Prometheus/dcgm-exporter via `resolved`; it writes
+/// nothing when the exporter reports no matching series (no observation is ever fabricated).
+pub async fn collect_and_store_vram_observations(
+    kubeconfig: &str,
+    resolved: &crate::historical_usage::ResolvedHistoricalUsageConfig,
+    window: &str,
+    store_path: &str,
+) -> anyhow::Result<usize> {
+    use anyhow::Context;
+    let peak_by_pod = crate::historical_usage::query_pod_peak_vram_mib(resolved, window)
+        .await
+        .context("query dcgm pod peak vram")?;
+    if peak_by_pod.is_empty() {
+        return Ok(0);
+    }
+    let client = crate::collector::build_client(kubeconfig, None)
+        .await
+        .context("build kube client for vram observation")?;
+    let pods: kube::Api<corev1::Pod> = kube::Api::all(client);
+    let list = pods
+        .list(&kube::api::ListParams::default())
+        .await
+        .context("list pods for vram observation")?;
+    let rows = observations_from_vram_metrics(&peak_by_pod, &list.items);
+    append_observations(store_path, &rows).context("append vram observations")?;
+    Ok(rows.len())
 }
 
 #[cfg(test)]
@@ -200,5 +265,217 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].peak_mib, 8000.0);
         assert_eq!(rows[0].image, "img:1");
+    }
+
+    #[test]
+    fn vram_metrics_map_to_fingerprints_and_skip_unreported_pods() {
+        // DCGM keys observations by namespace/pod; the tier-4 store keys them by (image,
+        // command_hash). This is the join that turns a live per-pod peak into a fingerprinted row.
+        let mk = |ns: &str, name: &str, image: &str| corev1::Pod {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                namespace: Some(ns.to_string()),
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                containers: vec![corev1::Container {
+                    name: "t".to_string(),
+                    image: Some(image.to_string()),
+                    command: Some(vec!["python".to_string(), "train.py".to_string()]),
+                    resources: Some(corev1::ResourceRequirements {
+                        limits: Some(std::collections::BTreeMap::from([(
+                            "nvidia.com/gpu".to_string(),
+                            k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                                "1".to_string(),
+                            ),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pods = vec![
+            mk("team", "job-a", "img:1"),
+            mk("team", "job-b", "img:2"), // no metric -> skipped
+        ];
+        let peaks = BTreeMap::from([
+            ("team/job-a".to_string(), 17000.0),
+            ("team/ghost".to_string(), 9999.0), // metric for a pod not in the list -> ignored
+        ]);
+        let rows = observations_from_vram_metrics(&peaks, &pods);
+        assert_eq!(rows.len(), 1, "only the reported, listed pod yields a row");
+        assert_eq!(rows[0].image, "img:1");
+        assert_eq!(rows[0].peak_mib, 17000.0);
+        // The row's fingerprint must equal the pod's own fingerprint (webhook/predictor parity).
+        let (_, expected_hash) = pod_command_hash(&pods[0]).unwrap();
+        assert_eq!(rows[0].command_hash, expected_hash);
+    }
+
+    #[test]
+    fn vram_metrics_skip_nonpositive_peaks() {
+        let pod = corev1::Pod {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                namespace: Some("team".to_string()),
+                name: Some("job".to_string()),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                containers: vec![corev1::Container {
+                    name: "t".to_string(),
+                    image: Some("img:1".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let peaks = BTreeMap::from([("team/job".to_string(), 0.0)]);
+        assert!(observations_from_vram_metrics(&peaks, std::slice::from_ref(&pod)).is_empty());
+    }
+
+    #[test]
+    fn append_observations_writes_python_readable_jsonl_contract() {
+        // The store is a cross-language contract: this Rust writer feeds the Python resolver's
+        // `load_observations`, which reads each JSONL row's {image, command_hash, peak_mib} and keys
+        // by `image|command_hash` with `float(peak_mib)`. Pin the exact shape so a field rename or an
+        // extra key can't silently break the predictor.
+        let rows = vec![
+            ObservationRow {
+                image: "img:1".to_string(),
+                command_hash: "abc".to_string(),
+                peak_mib: 8000.0,
+            },
+            ObservationRow {
+                image: "img:2".to_string(),
+                command_hash: "def".to_string(),
+                peak_mib: 12345.5,
+            },
+        ];
+        let path = std::env::temp_dir().join(format!(
+            "ksolver-vram-store-contract-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_str().unwrap();
+
+        append_observations(p, &rows).unwrap();
+        // Appending again must ADD, not overwrite (the store accumulates observations).
+        append_observations(p, &rows[..1]).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 3, "append is additive (2 + 1)");
+
+        let expected: Vec<&ObservationRow> = rows.iter().chain(rows[..1].iter()).collect();
+        for (line, exp) in lines.iter().zip(expected) {
+            let value: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+            let obj = value.as_object().expect("JSON object");
+            assert_eq!(
+                obj.get("image").and_then(|x| x.as_str()),
+                Some(exp.image.as_str())
+            );
+            assert_eq!(
+                obj.get("command_hash").and_then(|x| x.as_str()),
+                Some(exp.command_hash.as_str())
+            );
+            // Must be a JSON number so Python `float(peak_mib)` works.
+            assert_eq!(
+                obj.get("peak_mib").and_then(serde_json::Value::as_f64),
+                Some(exp.peak_mib)
+            );
+            assert_eq!(
+                obj.len(),
+                3,
+                "exactly image/command_hash/peak_mib — no extra keys"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_command_hash_selects_gpu_container_not_first_sidecar() {
+        // Multi-container pods (e.g. a logging/proxy sidecar first, trainer second) must fingerprint
+        // the GPU container, matching Python `_gpu_container` (first GPU-requesting container, else
+        // first). Picking the sidecar would produce a fingerprint that never matches the predictor.
+        let pod = corev1::Pod {
+            spec: Some(corev1::PodSpec {
+                containers: vec![
+                    corev1::Container {
+                        name: "sidecar".to_string(),
+                        image: Some("sidecar:1".to_string()),
+                        command: Some(vec!["/proxy".to_string()]),
+                        ..Default::default()
+                    },
+                    corev1::Container {
+                        name: "trainer".to_string(),
+                        image: Some("trainer:1".to_string()),
+                        command: Some(vec!["python".to_string(), "train.py".to_string()]),
+                        resources: Some(corev1::ResourceRequirements {
+                            limits: Some(std::collections::BTreeMap::from([(
+                                "nvidia.com/gpu".to_string(),
+                                k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                                    "1".to_string(),
+                                ),
+                            )])),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (image, hash) = pod_command_hash(&pod).expect("has a container");
+        assert_eq!(
+            image, "trainer:1",
+            "must fingerprint the GPU container, not the sidecar"
+        );
+        // Hash must be the trainer's command hash, not the sidecar's.
+        let trainer_hash = workload_command_hash(
+            &["python".to_string(), "train.py".to_string()],
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(hash, trainer_hash);
+    }
+
+    #[test]
+    fn no_fabrication_when_no_metrics_or_no_rows() {
+        // Core honesty invariant: with no metrics we produce NO observations, and appending an
+        // empty row set writes NOTHING (not even an empty file). Guards the "never fabricate an
+        // observation" contract the whole VRAM tier relies on.
+        let pod = corev1::Pod {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                namespace: Some("team".to_string()),
+                name: Some("job".to_string()),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                containers: vec![corev1::Container {
+                    name: "t".to_string(),
+                    image: Some("img:1".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // No DCGM metrics reported for any pod ⇒ zero rows (nothing invented).
+        assert!(
+            observations_from_vram_metrics(&BTreeMap::new(), std::slice::from_ref(&pod)).is_empty()
+        );
+
+        // Empty rows ⇒ the store file is not even created (no phantom/empty observation file).
+        let path = std::env::temp_dir().join(format!(
+            "ksolver-vram-store-empty-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        append_observations(path.to_str().unwrap(), &[]).unwrap();
+        assert!(!path.exists(), "empty append must not create a store file");
     }
 }

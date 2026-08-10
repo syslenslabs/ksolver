@@ -148,12 +148,15 @@ harness fixes above are the correct approach; the scorer stays simple.
 **Reproduction commands (this arm64 env):**
 1. Build the simulator once: arm64 `simulator-server`/`simulator-scheduler` images (see
    [[gpu-scheduler-phase1-status]] — `docker buildx --platform=linux/arm64` from simulator source).
-2. KSS baselines (66 = 33 scenarios × spread/binpack). The simulator's `/api/v1/reset` is broken on
-   this arm64 build (never drains), so each container serves ~1 baseline then must restart. Grind:
-   loop `kss-pool.sh start 8 12140 <cache-dir>` → `ksolver gpu-scenarios --simulator-pool <8 urls>
-   --simulator-cache-dir <cache-dir> --refresh-simulator-cache-only --simulator-max-live-baselines
-   all`, restarting the pool each round (cache persists per-baseline on disk) until 66 files exist
-   (~11 rounds). On a WORKING (amd64) simulator this is a single pass, no grind.
+2. KSS baselines (66 = 33 scenarios × spread/binpack). As of 2026-07-13 the arm64 simulator's
+   `/api/v1/reset` DRAINS correctly (the two KWOK apiserver bugs — ServiceAccount admission and an
+   etcd-prefix mismatch — are fixed in `scripts/kss-pool.sh`), so a single fresh pool serves all 66
+   in ONE pass: `kss-pool.sh start 1 12120 <cache-dir>` → `ksolver gpu-scenarios --simulator-pool
+   http://127.0.0.1:12120 --simulator-cache-dir <cache-dir> --refresh-simulator-cache
+   --simulator-max-live-baselines all` (verified: 66/66 live, 0 errors). `scripts/kss-cache-grind.sh`
+   still works as a harmless multi-round fallback but now completes in round 1.
+   (HISTORICAL: before that fix, reset never drained, so each container served ~1 baseline and the
+   grind needed ~11 rounds.)
 3. Volcano baseline: `scripts/volcano-baseline-cache.sh volcano-baseline-cache.json` (faithful
    harness; ~18 min for 13 gang scenarios).
 4. Report: `ksolver gpu-scenarios --simulator-cache-dir <kss-cache-dir> --volcano-baseline

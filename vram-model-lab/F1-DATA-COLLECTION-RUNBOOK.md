@@ -24,9 +24,14 @@ writes `data/models/peak_vram_linear.json` → `evaluate_model.py` writes `evalu
 1. **Define the matrix** in `scenarios.yaml`: family × precision × size × (optionally) batch/seq, plus
    a few deliberately-oversized configs for OOM. `run_k8s_probe.py --print-manifest --scenario <name>`
    emits the job manifest (label `ksolver.ai/vram-scenario=<slug>`) to review before running.
-2. **Run per SKU**: on each SKU's node pool, `python run_k8s_probe.py --all --namespace <ns>` (or
-   `--scenario <name>`). Each successful run appends a row to `data/results.jsonl` with
-   `nvidia_smi_peak_used_mib`, torch peaks, `oom`, and framework labels.
+2. **Run per SKU**: target each SKU's node pool with `--node-selector KEY=VALUE` (repeatable) and, on
+   tainted GPU pools, `--tolerate-gpu` (adds the standard `nvidia.com/gpu:NoSchedule` toleration —
+   without it the probe pod stays Pending even with the right nodeSelector). Example:
+   `python run_k8s_probe.py --all --namespace <ns> --node-selector cloud.google.com/gke-accelerator=nvidia-tesla-t4 --tolerate-gpu`
+   then re-run with `...=nvidia-l4`, `...=nvidia-a100`, etc. A per-scenario `node_selector:` map in
+   `scenarios.yaml` also works and is overridden by the CLI flag on key conflict. Each successful run
+   appends a row to `data/results.jsonl` with `nvidia_smi_peak_used_mib`, torch peaks, `oom`, and
+   framework labels. Preview the exact manifest first with `--print-manifest` (no cluster needed).
 3. **Refit + evaluate**: `python fit_peak_vram_model.py && python evaluate_model.py`. Regen is
    deterministic given the data; check `git diff data/models/` — coefficients change only because new
    rows landed.

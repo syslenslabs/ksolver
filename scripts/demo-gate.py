@@ -1535,6 +1535,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "endpoint to pass /api/v1/export before failing; default: %(default)s"
         ),
     )
+    parser.add_argument(
+        "--start-kss",
+        action="store_true",
+        help=(
+            "start a local kube-scheduler-simulator pool via kss-pool.sh before the gate and "
+            "tear it down after (opt-in; default off leaves pool lifecycle to the caller). Uses "
+            "--kss-count/--kss-base-port/--kss-cache-dir; pair with --require-kss-ready to verify it "
+            "came up. Since the F2 fix, a single pool serves all baselines, so this makes a live gate "
+            "a one-command run."
+        ),
+    )
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument("--json", action="store_true", help="emit full machine-readable JSON")
     output_group.add_argument(
@@ -1554,20 +1565,43 @@ def main() -> int:
         if args.output_dir
         else pathlib.Path(args.output_root) / f"demo-gate-{timestamp_slug()}"
     )
-    result = run_demo_gate(
-        base_url=args.base_url,
-        output_dir=output_dir,
-        min_scenarios=args.min_scenarios,
-        require_review_ready=args.require_review_ready,
-        require_simulator_claim_ready=args.require_simulator_claim_ready,
-        require_kss_ready=args.require_kss_ready,
-        doctor_preflight=args.doctor_preflight,
-        allow_readiness_blocked=args.allow_readiness_blocked,
-        kss_count=args.kss_count,
-        kss_base_port=args.kss_base_port,
-        kss_cache_dir=args.kss_cache_dir,
-        kss_wait_seconds=args.wait_kss_ready_seconds,
-    )
+
+    # Opt-in pool lifecycle. Started here (outside run_demo_gate) so teardown is guaranteed via
+    # finally regardless of which stage the gate returns/raises at. Default off => unchanged behavior.
+    scripts_dir = pathlib.Path(__file__).resolve().parent
+    kss_pool_args = [str(args.kss_count), str(args.kss_base_port), args.kss_cache_dir]
+    started_kss = False
+    if args.start_kss:
+        start = run_command(
+            [str(scripts_dir / "kss-pool.sh"), "start", *kss_pool_args, "120"]
+        )
+        started_kss = start.returncode == 0
+        if not started_kss:
+            print(
+                f"--start-kss: kss-pool.sh start failed (rc={start.returncode}): "
+                f"{(start.stderr or start.stdout or '').strip()[:400]}",
+                file=sys.stderr,
+            )
+            return 2
+
+    try:
+        result = run_demo_gate(
+            base_url=args.base_url,
+            output_dir=output_dir,
+            min_scenarios=args.min_scenarios,
+            require_review_ready=args.require_review_ready,
+            require_simulator_claim_ready=args.require_simulator_claim_ready,
+            require_kss_ready=args.require_kss_ready,
+            doctor_preflight=args.doctor_preflight,
+            allow_readiness_blocked=args.allow_readiness_blocked,
+            kss_count=args.kss_count,
+            kss_base_port=args.kss_base_port,
+            kss_cache_dir=args.kss_cache_dir,
+            kss_wait_seconds=args.wait_kss_ready_seconds,
+        )
+    finally:
+        if started_kss:
+            run_command([str(scripts_dir / "kss-pool.sh"), "stop", *kss_pool_args])
     write_json_file(output_dir / DEMO_GATE_RESULT_FILENAME, result)
     if args.compact_json:
         print(json.dumps(compact_result(result), sort_keys=True))

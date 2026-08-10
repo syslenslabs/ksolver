@@ -2,14 +2,21 @@
 # Build the full kube-scheduler-simulator (KSS) baseline CACHE for the GPU scenario library
 # (33 scenarios x {spread, binpack} = 66 baselines), tolerating a fragile simulator.
 #
-# WHY A GRIND: the self-built arm64 kube-scheduler-simulator's `PUT /api/v1/reset` is broken — it
-# returns 202 but NEVER drains imported objects (verified by direct probe), so each container can
-# serve ~ONE baseline before it is poisoned. `gpu-scenarios --refresh-simulator-cache-only` writes
-# each baseline to the cache DIR incrementally as it succeeds, and each pool worker's FIRST baseline
-# (on a fresh, empty container) succeeds. So: run a pool, let each worker cache its first baseline,
-# restart the pool fresh, repeat — the on-disk cache accumulates until all 66 are present (~11 rounds
-# with an 8-container pool). On a WORKING simulator (amd64 official images) `/reset` drains and this
-# completes in a single round; the grind is simply harmless there.
+# NOTE (2026-07-13): `/api/v1/reset` now DRAINS correctly — the two KWOK apiserver bugs behind the
+# old "reset never drains" behavior were fixed in scripts/kss-pool.sh (ServiceAccount admission
+# rejecting pod imports -> --kube-admission=false; and an etcd-prefix mismatch -> --extra-args
+# kube-apiserver=etcd-prefix=/kube-scheduler-simulator). A single fresh pool now serves ALL 66
+# baselines in ONE round (verified: `gpu-scenarios --refresh-simulator-cache` -> 66/66 live, 0 errors).
+#
+# The multi-round loop below is therefore usually unnecessary — it detects completion and exits after
+# round 1 — but is retained as a harmless, robust fallback: if a container ever wedges mid-run, the
+# next round restarts the pool fresh and the on-disk cache (written incrementally by
+# `--refresh-simulator-cache-only`) still accumulates to all 66. On a fully healthy pool this is a
+# no-op after the first round.
+#
+# HISTORICAL: before the kss-pool.sh fix, the self-built arm64 simulator's reset returned 202 but
+# never drained, so each container served ~ONE baseline before being poisoned and the grind needed
+# ~11 rounds. That premise no longer holds.
 #
 # Usage: kss-cache-grind.sh [cache_dir] [pool_size] [base_port] [max_rounds]
 #   defaults: /tmp/ksolver-kss-cache 8 12140 16

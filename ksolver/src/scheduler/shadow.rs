@@ -652,6 +652,73 @@ async fn demo_report_handler(State(s): State<ShadowHttpState>) -> Json<serde_jso
     Json(value)
 }
 
+/// Environment variable naming a pre-generated `snapshot_pack` JSON report to surface in the
+/// Scenarios tab. Read-only: the dashboard never runs the `snapshot_pack` CLI or writes files.
+const SNAPSHOT_PACK_REPORT_ENV: &str = "KSOLVER_SNAPSHOT_PACK_REPORT";
+
+/// Load the optional live snapshot-packing advisory report for the dashboard.
+///
+/// This is intentionally a pure, read-only loader (given the configured path) so it can be
+/// unit-tested without touching process env or the network:
+/// - `None`/empty path → a "not configured" object (still HTTP 200); the card stays hidden.
+/// - unreadable file or invalid JSON → a clear error object so the operator can see why.
+/// - success → `{ ok: true, report: <verbatim snapshot_pack JSON> }`.
+///
+/// It never executes a command and never mutates a file — it only reads the named report.
+fn snapshot_packing_value(report_path: Option<String>) -> serde_json::Value {
+    let Some(path) = report_path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    else {
+        return serde_json::json!({
+            "enabled": false,
+            "configured": false,
+            "reason": "snapshot-packing advisory not configured",
+            "hint": format!(
+                "set {SNAPSHOT_PACK_REPORT_ENV} to a snapshot_pack JSON report to enable this card"
+            ),
+        });
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return serde_json::json!({
+                "enabled": true,
+                "configured": true,
+                "ok": false,
+                "error": {
+                    "reason": format!("could not read snapshot-packing report: {e}"),
+                    "path": path,
+                },
+            });
+        }
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(report) => serde_json::json!({
+            "enabled": true,
+            "configured": true,
+            "ok": true,
+            "report": report,
+        }),
+        Err(e) => serde_json::json!({
+            "enabled": true,
+            "configured": true,
+            "ok": false,
+            "error": {
+                "reason": format!("could not parse snapshot-packing report as JSON: {e}"),
+                "path": path,
+            },
+        }),
+    }
+}
+
+/// Read-only endpoint backing the optional live snapshot-packing card in the Scenarios tab.
+async fn snapshot_packing_handler() -> Json<serde_json::Value> {
+    Json(snapshot_packing_value(
+        std::env::var(SNAPSHOT_PACK_REPORT_ENV).ok(),
+    ))
+}
+
 async fn demo_report_refresh_handler(
     Query(params): Query<DemoReportRefreshQuery>,
     State(s): State<ShadowHttpState>,
@@ -5210,6 +5277,10 @@ pub async fn run_shadow(cfg: ShadowConfig) -> Result<()> {
             get(simulator_cache_coverage_handler),
         )
         .route(
+            "/api/scheduler/snapshot-packing",
+            get(snapshot_packing_handler),
+        )
+        .route(
             "/api/scheduler/vram-calibration",
             get(vram_calibration_handler),
         )
@@ -7219,6 +7290,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapshot_packing_value_is_hidden_without_a_report() {
+        let value = snapshot_packing_value(None);
+        assert_eq!(value["enabled"], serde_json::json!(false));
+        assert_eq!(value["configured"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn snapshot_packing_value_exposes_a_valid_report_read_only() {
+        let path = std::env::temp_dir().join(format!(
+            "ksolver-snapshot-packing-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"baseline_active_gpus":94,"packed_active_gpus":82,"recoverable_h100_equivalents":12}"#,
+        )
+        .unwrap();
+
+        let value = snapshot_packing_value(Some(path.display().to_string()));
+        assert_eq!(value["enabled"], serde_json::json!(true));
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(value["report"]["recoverable_h100_equivalents"], 12);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn volcano_baseline_cache_loads_map_and_degrades_to_empty() {
         // Guards the demo-dashboard wiring: demo_benchmark_options loads this cache so the report can
         // classify `beats-gang-aware`. A regression that drops/ misreads it would silently strip the
@@ -7440,6 +7541,7 @@ mod tests {
             "/api/scheduler/vram-calibration",
             "/api/scheduler/operator-status",
             "/api/scheduler/production-safety",
+            "/api/scheduler/snapshot-packing",
         ] {
             assert!(SHADOW_HTML.contains(ep), "dashboard must call {}", ep);
         }
@@ -7575,6 +7677,12 @@ mod tests {
 
         // Scenarios: kube spread + binpack vs ksolver, with metrics, placements, provenance.
         assert!(SHADOW_HTML.contains("renderScenarios"));
+        assert!(SHADOW_HTML.contains("renderSnapshotPacking"));
+        assert!(SHADOW_HTML.contains("id=\"snapshot-packing\""));
+        assert!(SHADOW_HTML.contains("Point-in-time advisory only"));
+        assert!(
+            SHADOW_HTML.contains("if (!data || data.enabled !== true || data.ok !== true) return;")
+        );
         assert!(SHADOW_HTML.contains("report.scenarios"));
         assert!(SHADOW_HTML.contains("id=\"scen-refresh-btn\""));
         assert!(SHADOW_HTML.contains("Refresh baselines"));

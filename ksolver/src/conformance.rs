@@ -171,6 +171,141 @@ pub(crate) fn pod_has_unmodeled_constructs(pod: &corev1::Pod) -> bool {
     !pod_expected_divergence_reasons(pod).is_empty()
 }
 
+/// A key that is EQUAL for two nodes iff the kube-scheduler **Filter** verdict for `pod` is
+/// guaranteed identical on both (so one simulator probe can stand in for the whole class). Returns
+/// `None` — meaning "do NOT dedup this pod; probe every node individually" — whenever the verdict
+/// could depend on a node attribute this key does not capture. Correctness rule: a `None` or a
+/// coarser key only ever *under*-merges (slower, never wrong); it must never merge two nodes that
+/// could differ.
+///
+/// For conform's isolated probe (ONE node + ONE pod, no other pods), the Filter verdict depends on:
+/// node allocatable (NodeResourcesFit), the values of the node labels the pod's nodeSelector /
+/// required node-affinity `matchExpressions` reference (NodeAffinity), and node taints
+/// (TaintToleration). Inter-pod affinity/anti-affinity and topology-spread are trivially satisfiable
+/// with no other pods, so they don't affect the verdict and are safely ignored. Constructs whose
+/// verdict CAN depend on un-keyed node attributes force `None`: `matchFields` (node name/fields) and
+/// PVC volumes (VolumeBinding topology references node labels via the PV/PVC, not the pod).
+pub(crate) fn pod_filter_equivalence_key(pod: &corev1::Pod, node: &corev1::Node) -> Option<String> {
+    let spec = pod.spec.as_ref()?;
+
+    // PVC volumes → VolumeBinding may filter on node topology labels we don't enumerate. Bail.
+    if spec
+        .volumes
+        .iter()
+        .flatten()
+        .any(|v| v.persistent_volume_claim.is_some())
+    {
+        return None;
+    }
+
+    // Node-label keys the pod's Filter verdict depends on (nodeSelector + required node-affinity
+    // matchExpressions). matchFields ⇒ node-name/field dependent ⇒ bail (no dedup).
+    let mut label_keys: std::collections::BTreeSet<String> = spec
+        .node_selector
+        .iter()
+        .flatten()
+        .map(|(k, _)| k.clone())
+        .collect();
+    if let Some(node_affinity) = spec
+        .affinity
+        .as_ref()
+        .and_then(|a| a.node_affinity.as_ref())
+    {
+        if let Some(required) = node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .as_ref()
+        {
+            for term in &required.node_selector_terms {
+                if term.match_fields.as_ref().is_some_and(|f| !f.is_empty()) {
+                    return None;
+                }
+                for expr in term.match_expressions.iter().flatten() {
+                    label_keys.insert(expr.key.clone());
+                }
+            }
+        }
+        // preferredDuringScheduling affects Score, not Filter — irrelevant to feasibility.
+    }
+
+    let allocatable: Vec<String> = node
+        .status
+        .as_ref()
+        .and_then(|s| s.allocatable.as_ref())
+        .map(|m| m.iter().map(|(k, v)| format!("{k}={}", v.0)).collect())
+        .unwrap_or_default();
+
+    let labels = node.metadata.labels.clone().unwrap_or_default();
+    let referenced: Vec<String> = label_keys
+        .iter()
+        .map(|k| {
+            let v = labels.get(k).map(String::as_str).unwrap_or("\u{0}absent");
+            format!("{k}={v}")
+        })
+        .collect();
+
+    let mut taints: Vec<String> = node
+        .spec
+        .as_ref()
+        .and_then(|s| s.taints.as_ref())
+        .map(|ts| {
+            ts.iter()
+                .map(|t| {
+                    format!(
+                        "{}={}:{}",
+                        t.key,
+                        t.value.as_deref().unwrap_or(""),
+                        t.effect
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    taints.sort();
+
+    Some(format!(
+        "alloc[{}]|lbl[{}]|taint[{}]",
+        allocatable.join(","),
+        referenced.join(","),
+        taints.join(",")
+    ))
+}
+
+/// Group candidate nodes into probe-classes for a pod. Each returned inner Vec is one class whose
+/// representative (element 0) is probed once against the simulator; the verdict is replicated to the
+/// rest. With `dedup=false`, or for nodes whose `pod_filter_equivalence_key` is `None`, each node is
+/// its own singleton class (probed individually — the exact prior behavior). Node order is preserved.
+pub(crate) fn group_nodes_for_probe<'a>(
+    pod: &corev1::Pod,
+    nodes: &[&'a crate::model::NormalizedNode],
+    raw_nodes: &std::collections::BTreeMap<String, &corev1::Node>,
+    dedup: bool,
+) -> Vec<Vec<&'a crate::model::NormalizedNode>> {
+    let mut groups: Vec<Vec<&crate::model::NormalizedNode>> = Vec::new();
+    let mut index_by_key: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for node in nodes {
+        let key = if dedup {
+            raw_nodes
+                .get(&node.name)
+                .and_then(|raw| pod_filter_equivalence_key(pod, raw))
+        } else {
+            None
+        };
+        match key {
+            Some(k) => {
+                if let Some(&i) = index_by_key.get(&k) {
+                    groups[i].push(node);
+                } else {
+                    index_by_key.insert(k, groups.len());
+                    groups.push(vec![node]);
+                }
+            }
+            None => groups.push(vec![node]),
+        }
+    }
+    groups
+}
+
 /// The scheduler's Filter verdict for `pod_scope_target` on `node_name`, read from the export:
 /// feasible iff the pod bound to that node (selected-node annotation OR spec.nodeName), else
 /// infeasible with the filter-result annotation (if any) as the reason.
@@ -268,6 +403,14 @@ pub struct ConformanceReport {
     pub expected_divergence_reason_counts: std::collections::BTreeMap<String, usize>,
     pub pods_evaluated: usize,
     pub cordoned_nodes_skipped: usize,
+    /// Total non-cordoned candidate nodes in the cluster.
+    pub nodes_total: usize,
+    /// Nodes actually probed per pod. Less than `nodes_total` when `--max-nodes` caps the set — the
+    /// run is then a SAMPLED spot-check, not full-cluster coverage (surfaced in `render()`).
+    pub nodes_evaluated: usize,
+    /// Actual simulator round-trips made. With `--dedup-nodes`, feasibility-identical nodes share one
+    /// probe, so this is < the number of (pod, node) pairs recorded — a pure speedup, same verdicts.
+    pub simulator_probes: usize,
     pub mismatches: Vec<Mismatch>,
     pub expected_divergence_mismatches: Vec<Mismatch>,
 }
@@ -299,6 +442,19 @@ impl ConformanceReport {
             self.expected_divergence.total(),
             self.cordoned_nodes_skipped,
         ));
+        if self.nodes_evaluated < self.nodes_total {
+            out.push_str(&format!(
+                "  NOTE: node-sampled spot-check — probed {} of {} candidate nodes per pod (not full-cluster coverage)\n",
+                self.nodes_evaluated, self.nodes_total
+            ));
+        }
+        let pairs = self.strict.total() + self.expected_divergence.total();
+        if self.simulator_probes > 0 && self.simulator_probes < pairs {
+            out.push_str(&format!(
+                "  node-dedup: {} simulator probes for {} (pod,node) pairs (feasibility-identical nodes shared a probe; same verdicts)\n",
+                self.simulator_probes, pairs
+            ));
+        }
         out.push_str(&format!(
             "  strict: agree={} false_positive={} false_negative={}\n",
             self.strict.agree, self.strict.false_positive, self.strict.false_negative
@@ -385,6 +541,8 @@ pub async fn run_conformance(
     cluster_name: &str,
     simulator_url: &str,
     sample: usize,
+    max_nodes: usize,
+    dedup_nodes: bool,
 ) -> anyhow::Result<ConformanceReport> {
     use crate::normalizer::{
         build_volumes_by_claim, node_feasibility_reasons, Normalizer, Options,
@@ -424,6 +582,16 @@ pub async fn run_conformance(
         }
     }
 
+    // Optionally cap the candidate-node set. conform is O(pods x nodes) — one reset+import+poll per
+    // (pod, node) — so on a large fleet a full run is intractable. `max_nodes > 0` truncates to a
+    // sample, turning the run into an honest spot-check (recorded as nodes_evaluated < nodes_total
+    // and flagged in the report). 0 means "all nodes" (unchanged default).
+    let nodes_total = candidate_nodes.len();
+    if max_nodes > 0 && candidate_nodes.len() > max_nodes {
+        candidate_nodes.truncate(max_nodes);
+    }
+    let nodes_evaluated = candidate_nodes.len();
+
     // Pending pods: unscheduled (no node) and not terminal.
     let pending: Vec<&crate::model::Pod> = snapshot
         .pods
@@ -435,8 +603,18 @@ pub async fn run_conformance(
     let mut report = ConformanceReport {
         pods_evaluated: pending.len(),
         cordoned_nodes_skipped,
+        nodes_total,
+        nodes_evaluated,
         ..Default::default()
     };
+
+    // Only nodes with a raw counterpart can be probed/recorded (matches the prior per-node `continue`
+    // on a missing raw node). Pod-independent, so compute once; the per-pod grouping happens below.
+    let probeable: Vec<&crate::model::NormalizedNode> = candidate_nodes
+        .iter()
+        .copied()
+        .filter(|n| raw_nodes.contains_key(&n.name))
+        .collect();
 
     for pod in &pending {
         let scope = format!("{}/{}", pod.namespace, pod.name);
@@ -445,49 +623,59 @@ pub async fn run_conformance(
         };
         let expected_divergence_reasons = pod_expected_divergence_reasons(raw_pod);
         let expected_divergence = pod_has_unmodeled_constructs(raw_pod);
-        for node in &candidate_nodes {
-            let Some(raw_node) = raw_nodes.get(&node.name) else {
-                continue;
-            };
-            let ours_reasons =
-                node_feasibility_reasons(pod, &conformance_node(node), &volumes, &opts);
-            let ours_feasible = ours_reasons.is_empty();
 
-            let payload = build_single_node_payload(&raw, raw_pod, raw_node);
+        // Group feasibility-identical nodes so one simulator probe covers the whole class. With
+        // dedup off (default), every class is a singleton == the exact prior per-node behavior.
+        let groups = group_nodes_for_probe(raw_pod, &probeable, &raw_nodes, dedup_nodes);
+
+        for group in &groups {
+            // Probe the representative ONCE; its Filter verdict holds for the whole class (the
+            // equivalence key captures every attribute that could change the verdict).
+            let rep = group[0];
+            let rep_raw = raw_nodes.get(&rep.name).expect("probeable node has raw");
+            let payload = build_single_node_payload(&raw, raw_pod, rep_raw);
             let export =
                 crate::verifier::schedule_snapshot(simulator_url, &payload, &scope).await?;
-            let (sched_feasible, sched_reason) = scheduler_feasible(&export, &node.name, &scope);
+            let (sched_feasible, sched_reason) = scheduler_feasible(&export, &rep.name, &scope);
+            report.simulator_probes += 1;
 
-            let verdict = classify(ours_feasible, sched_feasible);
-            if expected_divergence {
-                report.expected_divergence.record(verdict);
-                for reason in &expected_divergence_reasons {
-                    *report
-                        .expected_divergence_reason_counts
-                        .entry(reason.clone())
-                        .or_insert(0) += 1;
-                }
-                if verdict != Verdict::Agree {
-                    report.expected_divergence_mismatches.push(Mismatch {
-                        pod: scope.clone(),
-                        node: node.name.clone(),
-                        verdict,
-                        ours_reasons: ours_reasons.clone(),
-                        scheduler_reason: sched_reason,
-                        expected_divergence_reasons: expected_divergence_reasons.clone(),
-                    });
-                }
-            } else {
-                report.strict.record(verdict);
-                if verdict != Verdict::Agree {
-                    report.mismatches.push(Mismatch {
-                        pod: scope.clone(),
-                        node: node.name.clone(),
-                        verdict,
-                        ours_reasons: ours_reasons.clone(),
-                        scheduler_reason: sched_reason,
-                        expected_divergence_reasons: Vec::new(),
-                    });
+            for node in group {
+                // `ours` is computed per-node (cheap, no probe) so replication only ever reuses the
+                // simulator's Filter verdict — the sole class-invariant we depend on.
+                let ours_reasons =
+                    node_feasibility_reasons(pod, &conformance_node(node), &volumes, &opts);
+                let ours_feasible = ours_reasons.is_empty();
+                let verdict = classify(ours_feasible, sched_feasible);
+                if expected_divergence {
+                    report.expected_divergence.record(verdict);
+                    for reason in &expected_divergence_reasons {
+                        *report
+                            .expected_divergence_reason_counts
+                            .entry(reason.clone())
+                            .or_insert(0) += 1;
+                    }
+                    if verdict != Verdict::Agree {
+                        report.expected_divergence_mismatches.push(Mismatch {
+                            pod: scope.clone(),
+                            node: node.name.clone(),
+                            verdict,
+                            ours_reasons,
+                            scheduler_reason: sched_reason.clone(),
+                            expected_divergence_reasons: expected_divergence_reasons.clone(),
+                        });
+                    }
+                } else {
+                    report.strict.record(verdict);
+                    if verdict != Verdict::Agree {
+                        report.mismatches.push(Mismatch {
+                            pod: scope.clone(),
+                            node: node.name.clone(),
+                            verdict,
+                            ours_reasons,
+                            scheduler_reason: sched_reason.clone(),
+                            expected_divergence_reasons: Vec::new(),
+                        });
+                    }
                 }
             }
         }
@@ -506,6 +694,31 @@ mod tests {
         assert_eq!(classify(false, false), Verdict::Agree);
         assert_eq!(classify(true, false), Verdict::FalsePositive);
         assert_eq!(classify(false, true), Verdict::FalseNegative);
+    }
+
+    #[test]
+    fn render_flags_node_sampling_as_spot_check() {
+        // When --max-nodes caps the probed set, the report must NOT read as full-cluster coverage.
+        let sampled = ConformanceReport {
+            pods_evaluated: 3,
+            nodes_total: 113,
+            nodes_evaluated: 10,
+            ..Default::default()
+        };
+        let rendered = sampled.render();
+        assert!(
+            rendered.contains("node-sampled spot-check") && rendered.contains("10 of 113"),
+            "sampled run must disclose partial coverage; got:\n{rendered}"
+        );
+
+        // A full run (nodes_evaluated == nodes_total) must NOT print the sampling note.
+        let full = ConformanceReport {
+            pods_evaluated: 3,
+            nodes_total: 4,
+            nodes_evaluated: 4,
+            ..Default::default()
+        };
+        assert!(!full.render().contains("node-sampled spot-check"));
     }
 
     use crate::verifier::{SimulatorExportPayload, SimulatorResources};
@@ -845,5 +1058,247 @@ mod tests {
         assert!(rendered.contains("expected=[requiredPodAntiAffinity]"));
         assert!(report.has_strict_false_positives());
         assert_eq!(report.strict_gate_status(), "fail");
+    }
+
+    // ---- node-dedup optimization (opt-in --dedup-nodes) ----
+
+    fn qty(v: &str) -> k8s_openapi::apimachinery::pkg::api::resource::Quantity {
+        k8s_openapi::apimachinery::pkg::api::resource::Quantity(v.to_string())
+    }
+
+    fn raw_node(
+        name: &str,
+        alloc: &[(&str, &str)],
+        labels: &[(&str, &str)],
+        taints: &[(&str, &str, &str)],
+    ) -> corev1::Node {
+        corev1::Node {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.to_string()),
+                labels: Some(
+                    labels
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            spec: Some(corev1::NodeSpec {
+                taints: Some(
+                    taints
+                        .iter()
+                        .map(|(k, v, e)| corev1::Taint {
+                            key: k.to_string(),
+                            value: Some(v.to_string()),
+                            effect: e.to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            status: Some(corev1::NodeStatus {
+                allocatable: Some(alloc.iter().map(|(k, v)| (k.to_string(), qty(v))).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_node_selector(pairs: &[(&str, &str)]) -> corev1::Pod {
+        corev1::Pod {
+            spec: Some(corev1::PodSpec {
+                node_selector: Some(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn equivalence_key_merges_identical_and_ignores_unreferenced_labels() {
+        // Pod selects only on `sku`. Two nodes identical on alloc/taints/sku but differing on an
+        // UNREFERENCED label (hostname) must share a key (the whole point — enables dedup).
+        let pod = pod_with_node_selector(&[("sku", "a100")]);
+        let a = raw_node(
+            "a",
+            &[("cpu", "8"), ("nvidia.com/gpu", "8")],
+            &[("sku", "a100"), ("kubernetes.io/hostname", "a")],
+            &[("nvidia.com/gpu", "present", "NoSchedule")],
+        );
+        let b = raw_node(
+            "b",
+            &[("cpu", "8"), ("nvidia.com/gpu", "8")],
+            &[("sku", "a100"), ("kubernetes.io/hostname", "b")],
+            &[("nvidia.com/gpu", "present", "NoSchedule")],
+        );
+        let ka = pod_filter_equivalence_key(&pod, &a);
+        assert!(ka.is_some());
+        assert_eq!(
+            ka,
+            pod_filter_equivalence_key(&pod, &b),
+            "differ only on unreferenced label"
+        );
+
+        // Differing REFERENCED label ⇒ different key (must NOT merge).
+        let c = raw_node(
+            "c",
+            &[("cpu", "8"), ("nvidia.com/gpu", "8")],
+            &[("sku", "l4"), ("kubernetes.io/hostname", "c")],
+            &[("nvidia.com/gpu", "present", "NoSchedule")],
+        );
+        assert_ne!(
+            ka,
+            pod_filter_equivalence_key(&pod, &c),
+            "differ on referenced label sku"
+        );
+
+        // Differing allocatable ⇒ different key. Differing taint ⇒ different key.
+        let d = raw_node(
+            "d",
+            &[("cpu", "4"), ("nvidia.com/gpu", "8")],
+            &[("sku", "a100")],
+            &[],
+        );
+        assert_ne!(ka, pod_filter_equivalence_key(&pod, &d));
+    }
+
+    #[test]
+    fn equivalence_key_extracts_node_affinity_matchexpression_labels() {
+        // Safety-critical: the key must also fold in labels referenced by required node-affinity
+        // matchExpressions (not just nodeSelector). If it didn't, two nodes differing on an
+        // affinity-referenced label would false-merge and share a probe ⇒ a WRONG verdict.
+        let pod = corev1::Pod {
+            spec: Some(corev1::PodSpec {
+                affinity: Some(corev1::Affinity {
+                    node_affinity: Some(corev1::NodeAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(
+                            corev1::NodeSelector {
+                                node_selector_terms: vec![corev1::NodeSelectorTerm {
+                                    match_expressions: Some(vec![
+                                        corev1::NodeSelectorRequirement {
+                                            key: "zone".to_string(),
+                                            operator: "In".to_string(),
+                                            values: Some(vec!["z1".to_string()]),
+                                        },
+                                    ]),
+                                    ..Default::default()
+                                }],
+                            },
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = raw_node("a", &[("cpu", "8")], &[("zone", "z1")], &[]);
+        let b = raw_node("b", &[("cpu", "8")], &[("zone", "z2")], &[]);
+        let same = raw_node("s", &[("cpu", "8")], &[("zone", "z1")], &[]);
+        let ka = pod_filter_equivalence_key(&pod, &a);
+        assert!(ka.is_some());
+        // Nodes differing on the affinity-referenced label MUST NOT merge.
+        assert_ne!(
+            ka,
+            pod_filter_equivalence_key(&pod, &b),
+            "affinity-referenced label 'zone' differs ⇒ keys must differ"
+        );
+        // Nodes agreeing on it (and everything else keyed) DO merge.
+        assert_eq!(ka, pod_filter_equivalence_key(&pod, &same));
+    }
+
+    #[test]
+    fn equivalence_key_none_on_pvc_and_matchfields() {
+        // PVC volume ⇒ VolumeBinding topology not keyed ⇒ None (probe individually).
+        let mut pvc_pod = pod_with_node_selector(&[]);
+        pvc_pod.spec.as_mut().unwrap().volumes = Some(vec![corev1::Volume {
+            name: "data".to_string(),
+            persistent_volume_claim: Some(corev1::PersistentVolumeClaimVolumeSource {
+                claim_name: "c".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+        let n = raw_node("n", &[("cpu", "8")], &[], &[]);
+        assert_eq!(pod_filter_equivalence_key(&pvc_pod, &n), None);
+
+        // matchFields (node-name dependent) ⇒ None.
+        let mf_pod = corev1::Pod {
+            spec: Some(corev1::PodSpec {
+                affinity: Some(corev1::Affinity {
+                    node_affinity: Some(corev1::NodeAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(
+                            corev1::NodeSelector {
+                                node_selector_terms: vec![corev1::NodeSelectorTerm {
+                                    match_fields: Some(vec![corev1::NodeSelectorRequirement {
+                                        key: "metadata.name".to_string(),
+                                        operator: "In".to_string(),
+                                        values: Some(vec!["n".to_string()]),
+                                    }]),
+                                    ..Default::default()
+                                }],
+                            },
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(pod_filter_equivalence_key(&mf_pod, &n), None);
+    }
+
+    #[test]
+    fn group_nodes_for_probe_dedups_only_when_enabled() {
+        let pod = pod_with_node_selector(&[("sku", "a100")]);
+        let raw: std::collections::BTreeMap<String, &corev1::Node> =
+            std::collections::BTreeMap::new();
+        let a = raw_node("a", &[("cpu", "8")], &[("sku", "a100")], &[]);
+        let b = raw_node("b", &[("cpu", "8")], &[("sku", "a100")], &[]); // identical to a for this pod
+        let c = raw_node("c", &[("cpu", "4")], &[("sku", "a100")], &[]); // different alloc
+        let raw = {
+            let mut m = raw;
+            m.insert("a".into(), &a);
+            m.insert("b".into(), &b);
+            m.insert("c".into(), &c);
+            m
+        };
+        let na = crate::model::NormalizedNode {
+            name: "a".into(),
+            ..Default::default()
+        };
+        let nb = crate::model::NormalizedNode {
+            name: "b".into(),
+            ..Default::default()
+        };
+        let nc = crate::model::NormalizedNode {
+            name: "c".into(),
+            ..Default::default()
+        };
+        let nodes = vec![&na, &nb, &nc];
+
+        // dedup off ⇒ every node its own group (exact prior behavior).
+        let off = group_nodes_for_probe(&pod, &nodes, &raw, false);
+        assert_eq!(off.len(), 3);
+        assert!(off.iter().all(|g| g.len() == 1));
+
+        // dedup on ⇒ a and b merge (identical for this pod); c separate.
+        let on = group_nodes_for_probe(&pod, &nodes, &raw, true);
+        assert_eq!(on.len(), 2, "a+b merge, c separate");
+        let sizes: std::collections::BTreeSet<usize> = on.iter().map(|g| g.len()).collect();
+        assert_eq!(sizes, std::collections::BTreeSet::from([1, 2]));
+        // every node still appears exactly once across groups (no dropped/duplicated coverage).
+        let mut names: Vec<&str> = on.iter().flatten().map(|n| n.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b", "c"]);
     }
 }

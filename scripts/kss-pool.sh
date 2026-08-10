@@ -165,13 +165,31 @@ start_pool() {
 
     docker rm -f "$scheduler" "$server" "$cluster" >/dev/null 2>&1 || true
 
+    # Two KWOK apiserver fixes are required for the live simulator import/reset cycle to work
+    # (both verified empirically; the entrypoint forwards these container args to
+    # `kwokctl create cluster`):
+    #
+    #  1. --kube-admission=false: this KWOK cluster image runs the apiserver but NOT a
+    #     kube-controller-manager, so no per-namespace "default" ServiceAccount is ever created.
+    #     With admission enabled (the default), the ServiceAccount admission plugin rejects every
+    #     imported pod ("serviceaccount \"default\" not found") -> /api/v1/import 500s. Disabling
+    #     admission lets pods import without a default SA (pod create 500 -> 201 with this flag).
+    #
+    #  2. --extra-args kube-apiserver=etcd-prefix=/kube-scheduler-simulator: KWOK's apiserver
+    #     defaults to storing objects under etcd prefix /registry, but the simulator's reset.go
+    #     deletes+restores prefix /kube-scheduler-simulator. Mismatched -> PUT /api/v1/reset
+    #     returns 202 but never drains imported objects, so every batch times out in the reset
+    #     phase. Overriding the apiserver's etcd-prefix to match reset.go makes reset actually
+    #     drain. (pflag: this appends a second --etcd-prefix that wins over KWOK's default.)
     docker run -d \
       --name "$cluster" \
       --network "$network" \
       --network-alias "$cluster" \
       -e KWOK_KUBE_APISERVER_PORT=3131 \
       -e ETCD_PORT=2379 \
-      "$cluster_image" >/dev/null
+      "$cluster_image" \
+      --kube-admission=false \
+      --extra-args kube-apiserver=etcd-prefix=/kube-scheduler-simulator >/dev/null
 
     local etcd_port
     etcd_port="$(discover_etcd_port "$cluster")"

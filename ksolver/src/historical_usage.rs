@@ -174,6 +174,86 @@ struct PrometheusMatrixSeries {
     values: Vec<(f64, String)>,
 }
 
+/// Standard kube-integrated dcgm-exporter metric: GPU framebuffer memory *used*, reported in MiB.
+pub const DCGM_FB_USED_METRIC: &str = "DCGM_FI_DEV_FB_USED";
+
+/// PromQL for each pod's peak GPU-framebuffer usage (MiB) over `window`. dcgm-exporter exposes
+/// `DCGM_FI_DEV_FB_USED` per GPU; the kube integration relabels it with `namespace`/`pod` (and
+/// sometimes `exported_pod`). We take `max_over_time` over the window and `max` across a pod's GPUs,
+/// so a multi-GPU pod resolves to its single-device peak — matching the per-device VRAM model.
+pub fn pod_peak_vram_query(window: &str) -> String {
+    format!(
+        "max by (namespace, pod, exported_pod) (max_over_time({DCGM_FB_USED_METRIC}{{pod!=\"\"}}[{window}]))"
+    )
+}
+
+/// Pure parse of a Prometheus vector response into `"namespace/pod" -> peak MiB`, taking the max
+/// across a pod's GPU series. Prefers the `pod` label, falling back to `exported_pod` (some
+/// dcgm-exporter relabelings only carry the latter). Factored out so the DCGM label handling is
+/// unit-testable against a mock response without a live exporter.
+fn parse_pod_vram_peaks(envelope: PrometheusQueryEnvelope) -> BTreeMap<String, f64> {
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for sample in envelope.data.result {
+        let namespace = sample.metric.get("namespace").cloned().unwrap_or_default();
+        let pod = sample
+            .metric
+            .get("pod")
+            .filter(|value| !value.is_empty())
+            .or_else(|| sample.metric.get("exported_pod"))
+            .cloned()
+            .unwrap_or_default();
+        if namespace.is_empty() || pod.is_empty() {
+            continue;
+        }
+        let Ok(value) = sample.value.1.parse::<f64>() else {
+            continue;
+        };
+        if !(value.is_finite()) || value <= 0.0 {
+            continue;
+        }
+        let key = format!("{namespace}/{pod}");
+        let entry = out.entry(key).or_insert(0.0);
+        if value > *entry {
+            *entry = value;
+        }
+    }
+    out
+}
+
+/// Query the configured Prometheus for each pod's peak GPU-VRAM usage (MiB) over `window`, via the
+/// standard dcgm-exporter metric. Returns `"namespace/pod" -> peak MiB`. Gated entirely on a real
+/// Prometheus/dcgm-exporter being configured — it returns an empty map only when the exporter has
+/// no matching series, and never fabricates observations.
+pub async fn query_pod_peak_vram_mib(
+    resolved: &ResolvedHistoricalUsageConfig,
+    window: &str,
+) -> Result<BTreeMap<String, f64>> {
+    let http = Client::builder()
+        .build()
+        .context("build prometheus client for dcgm vram query")?;
+    let query = pod_peak_vram_query(window);
+    let response = http
+        .get(format!(
+            "{}/api/prom/api/v1/query",
+            resolved.prometheus_url.trim_end_matches('/')
+        ))
+        .basic_auth(
+            resolved.prometheus_username.clone(),
+            Some(resolved.prometheus_token.clone()),
+        )
+        .query(&[("query", query.as_str())])
+        .send()
+        .await
+        .context("send dcgm vram prometheus query")?
+        .error_for_status()
+        .context("dcgm vram prometheus query status")?;
+    let payload: PrometheusQueryEnvelope = response
+        .json()
+        .await
+        .context("decode dcgm vram prometheus response")?;
+    Ok(parse_pod_vram_peaks(payload))
+}
+
 async fn query_prometheus_vector(
     http: &Client,
     resolved: &ResolvedHistoricalUsageConfig,
@@ -319,4 +399,41 @@ fn parse_prometheus_duration(input: &str) -> Result<Duration> {
         _ => anyhow::bail!("unsupported duration unit in {trimmed}"),
     };
     Ok(duration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_dcgm_pod_peaks_taking_max_across_gpus_with_exported_pod_fallback() {
+        // Mock dcgm-exporter vector response: two GPU series for one pod (take the max), one pod
+        // labeled only via `exported_pod`, a series missing pod labels (dropped), and a
+        // non-positive reading (dropped). Validates the DCGM label handling without a live exporter.
+        let json = r#"{
+          "status":"success",
+          "data":{"resultType":"vector","result":[
+            {"metric":{"namespace":"team","pod":"job-a","gpu":"0"},"value":[1710000000,"12000"]},
+            {"metric":{"namespace":"team","pod":"job-a","gpu":"1"},"value":[1710000000,"15000"]},
+            {"metric":{"namespace":"team","exported_pod":"job-b"},"value":[1710000000,"8000"]},
+            {"metric":{"namespace":"team"},"value":[1710000000,"9999"]},
+            {"metric":{"namespace":"team","pod":"job-c"},"value":[1710000000,"0"]}
+          ]}
+        }"#;
+        let envelope: PrometheusQueryEnvelope = serde_json::from_str(json).unwrap();
+        let peaks = parse_pod_vram_peaks(envelope);
+        assert_eq!(peaks.get("team/job-a"), Some(&15000.0)); // max across the pod's two GPUs
+        assert_eq!(peaks.get("team/job-b"), Some(&8000.0)); // exported_pod fallback
+        assert!(!peaks.contains_key("team/")); // no pod label -> dropped
+        assert!(!peaks.contains_key("team/job-c")); // non-positive -> dropped
+        assert_eq!(peaks.len(), 2);
+    }
+
+    #[test]
+    fn pod_peak_vram_query_uses_dcgm_metric_and_window() {
+        let query = pod_peak_vram_query("30m");
+        assert!(query.contains(DCGM_FB_USED_METRIC));
+        assert!(query.contains("[30m]"));
+        assert!(query.contains("max_over_time"));
+    }
 }

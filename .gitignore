@@ -3,6 +3,10 @@ target/
 __pycache__/
 *.pyc
 
+# Live cluster captures used by local ksolver demo/replay runs. They contain
+# operational node, process, and workload metadata and must never be committed.
+/demo/*snapshot*/
+
 # Local review/demo scratch (screenshots captured during UI iteration)
 /*.png
 # MCP browser-automation scratch

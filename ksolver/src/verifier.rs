@@ -336,12 +336,13 @@ pub(crate) struct SimulatorPhaseTiming {
 impl SimulatorBatchDiagnostics {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "phase={}, elapsed={}ms, targets={}, present={}, terminal_present={}, missing={}, stable_polls={}, timed_out={}",
+            "phase={}, elapsed={}ms, targets={}, present={}, terminal_present={}, unschedulable_present={}, missing={}, stable_polls={}, timed_out={}",
             self.phase,
             self.elapsed_millis,
             self.state.target_count,
             self.state.present_targets,
             self.state.terminal_present_targets,
+            self.state.unschedulable_present_targets,
             self.state.missing_targets(),
             self.stable_polls,
             self.timed_out
@@ -815,7 +816,7 @@ pub(crate) async fn schedule_all_snapshot_report_with_timeout_and_stable_polls(
         let state = simulator_batch_state(&latest, target_scopes);
         last_state = state.clone();
         let timed_out = Instant::now() >= deadline;
-        if state.all_targets_resolved() || (state.visible_targets_terminal() && stable) {
+        if state.all_targets_resolved() || (state.visible_targets_settled() && stable) {
             return Ok(SimulatorBatchReport {
                 export: latest,
                 diagnostics: SimulatorBatchDiagnostics {
@@ -909,6 +910,12 @@ pub(crate) struct SimulatorBatchState {
     pub(crate) target_count: usize,
     pub(crate) present_targets: usize,
     pub(crate) terminal_present_targets: usize,
+    /// Present targets the scheduler evaluated and left Pending with a
+    /// `PodScheduled=False/Unschedulable` condition (preemption already attempted in PostFilter).
+    /// These are a settled "not placed" outcome, but the simulator only writes its filter-result
+    /// annotations on bind, so they never become `terminal_present_targets`. Counted separately so
+    /// a stably-unschedulable pod ends the batch instead of stalling until the timeout.
+    pub(crate) unschedulable_present_targets: usize,
 }
 
 impl SimulatorBatchState {
@@ -920,8 +927,14 @@ impl SimulatorBatchState {
         self.target_count > 0 && self.terminal_present_targets == self.target_count
     }
 
-    fn visible_targets_terminal(&self) -> bool {
-        self.present_targets > 0 && self.present_targets == self.terminal_present_targets
+    /// Every present target has reached a settled outcome: either terminal (assigned a node or
+    /// annotated by the simulator) or evaluated-and-unschedulable. Callers gate this on the batch
+    /// signature being stable, so a pod still mid-scheduling (Pending with no Unschedulable
+    /// condition yet) is neither terminal nor unschedulable and keeps the batch polling.
+    fn visible_targets_settled(&self) -> bool {
+        self.present_targets > 0
+            && self.present_targets
+                == self.terminal_present_targets + self.unschedulable_present_targets
     }
 }
 
@@ -941,9 +954,30 @@ fn simulator_batch_state(
         state.present_targets += 1;
         if pod_is_terminal_in_simulator(pod) {
             state.terminal_present_targets += 1;
+        } else if pod_is_unschedulable_in_simulator(pod) {
+            state.unschedulable_present_targets += 1;
         }
     }
     state
+}
+
+/// True when the scheduler has evaluated the pod and left it Pending with a
+/// `PodScheduled=False` condition whose reason is `Unschedulable`. This is set only after a full
+/// scheduling cycle (including PostFilter/preemption), so it is an authoritative "not placed for
+/// this snapshot" signal — unlike a Pending pod still working through the queue, which carries no
+/// such condition yet.
+fn pod_is_unschedulable_in_simulator(pod: &corev1::Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .map(|conditions| {
+            conditions.iter().any(|condition| {
+                condition.type_ == "PodScheduled"
+                    && condition.status == "False"
+                    && condition.reason.as_deref() == Some("Unschedulable")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn pod_is_terminal_in_simulator(pod: &corev1::Pod) -> bool {
@@ -1504,7 +1538,7 @@ mod tests {
         assert_eq!(complete.present_targets, 2);
         assert_eq!(complete.terminal_present_targets, 2);
         assert!(complete.all_targets_resolved());
-        assert!(complete.visible_targets_terminal());
+        assert!(complete.visible_targets_settled());
 
         let partial_targets = BTreeSet::from([
             "bench/placed".to_string(),
@@ -1516,7 +1550,80 @@ mod tests {
         assert_eq!(partial.present_targets, 2);
         assert_eq!(partial.terminal_present_targets, 2);
         assert!(!partial.all_targets_resolved());
-        assert!(partial.visible_targets_terminal());
+        assert!(partial.visible_targets_settled());
+    }
+
+    #[test]
+    fn simulator_batch_state_counts_unschedulable_targets_as_settled_not_terminal() {
+        // A pod the scheduler left Pending with PodScheduled=False/Unschedulable is settled
+        // ("not placed for this snapshot") but never terminal — the simulator only writes its
+        // filter-result annotations on bind. It must let a stable batch conclude instead of
+        // stalling until the timeout, while NOT counting as a placement.
+        let placed = BTreeMap::from([(
+            super::SELECTED_NODE_ANNOTATION.to_string(),
+            "node-a".to_string(),
+        )]);
+        let exported = super::SimulatorExportPayload {
+            pods: vec![
+                corev1::Pod {
+                    metadata: kube::api::ObjectMeta {
+                        name: Some("placed".to_string()),
+                        namespace: Some("bench".to_string()),
+                        annotations: Some(placed),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                corev1::Pod {
+                    metadata: kube::api::ObjectMeta {
+                        name: Some("unschedulable".to_string()),
+                        namespace: Some("bench".to_string()),
+                        ..Default::default()
+                    },
+                    status: Some(corev1::PodStatus {
+                        conditions: Some(vec![corev1::PodCondition {
+                            type_: "PodScheduled".to_string(),
+                            status: "False".to_string(),
+                            reason: Some("Unschedulable".to_string()),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        };
+        let targets = BTreeSet::from([
+            "bench/placed".to_string(),
+            "bench/unschedulable".to_string(),
+        ]);
+        let state = super::simulator_batch_state(&exported, &targets);
+        assert_eq!(state.present_targets, 2);
+        assert_eq!(state.terminal_present_targets, 1);
+        assert_eq!(state.unschedulable_present_targets, 1);
+        // Not all targets are terminal (the unschedulable one never binds)...
+        assert!(!state.all_targets_resolved());
+        // ...but every present target has reached a settled outcome, so a stable batch concludes.
+        assert!(state.visible_targets_settled());
+
+        // A pod still working through the queue (Pending, no Unschedulable condition yet) is
+        // neither terminal nor settled: the batch must keep polling.
+        let pending = super::SimulatorExportPayload {
+            pods: vec![corev1::Pod {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("pending".to_string()),
+                    namespace: Some("bench".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        };
+        let pending_targets = BTreeSet::from(["bench/pending".to_string()]);
+        let pending_state = super::simulator_batch_state(&pending, &pending_targets);
+        assert_eq!(pending_state.present_targets, 1);
+        assert_eq!(pending_state.terminal_present_targets, 0);
+        assert_eq!(pending_state.unschedulable_present_targets, 0);
+        assert!(!pending_state.visible_targets_settled());
     }
 
     #[test]
@@ -1528,6 +1635,7 @@ mod tests {
                 target_count: 6,
                 present_targets: 2,
                 terminal_present_targets: 2,
+                unschedulable_present_targets: 0,
             },
             stable_polls: 3,
             timed_out: true,

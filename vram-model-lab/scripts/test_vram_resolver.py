@@ -239,6 +239,23 @@ class ResolveCascadeTest(unittest.TestCase):
             "eaa6a4fb61954e8cfb836369d109a019a83fe3416ccdcb315cc7f2957d322d36",
         )
 
+    def test_fingerprint_matches_shared_constant_for_basic_command(self):
+        # Bilateral Rust<->Python parity for the basic command+args+env case: the SAME constant is
+        # asserted in vram_store.rs::command_hash_matches_python_pod_fingerprint. Env order in the
+        # spec is irrelevant (canonicalized by sorted keys), so it's listed unsorted on purpose.
+        pod = {
+            "spec": {"containers": [{
+                "name": "t", "image": "i",
+                "command": ["python", "train.py"], "args": ["--bs", "8"],
+                "env": [{"name": "B", "value": "2"}, {"name": "A", "value": "1"}],
+                "resources": {"limits": {"nvidia.com/gpu": "1"}},
+            }]}
+        }
+        self.assertEqual(
+            vr.pod_fingerprint(pod)["command_hash"],
+            "1d38135f20ad3a389d575a9ff775d2e4b00c36b215958c9ae2717a36f46b2bd8",
+        )
+
     def test_known_model_name_fills_architecture_for_prediction(self):
         # No family/hidden/layers annotations — only a model name + batch/seq in CLI.
         pod = gpu_pod(args=["--model", "gpt2-large", "--batch-size", "4", "--seq-len", "1024"])

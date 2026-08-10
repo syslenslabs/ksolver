@@ -332,6 +332,62 @@ class KssPoolScriptTests(unittest.TestCase):
         self.assertIn("wait_timeout_seconds must be a non-negative integer", result.stderr)
         self.assertNotIn("docker should not be called", result.stderr)
 
+    def test_start_passes_f2_apiserver_fixes_to_cluster_container(self):
+        # Regression guard for the F2 fix: the KWOK cluster MUST be started with both apiserver
+        # workarounds, or live baselines silently break (pod import 500s / reset never drains).
+        # These are two easily-deletable flags in a shell script, so pin them with a test.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            bindir = tmp / "bin"
+            bindir.mkdir()
+            runlog = tmp / "docker-runs.log"
+            docker_body = f"""
+            #!/usr/bin/env bash
+            set -uo pipefail
+            case "$1" in
+              info) exit 0 ;;
+              image) exit 0 ;;      # image inspect -> images present (preflight passes)
+              network) exit 0 ;;    # network create/inspect
+              rm) exit 0 ;;
+              run) echo "$*" >> "{runlog}"; echo fakeid; exit 0 ;;
+              exec)
+                # discover_etcd_port: netstat probe -> a port; wget /version health check -> ok
+                if printf '%s' "$*" | grep -q netstat; then echo 2379; fi
+                exit 0 ;;
+              *) echo "unexpected docker: $*" >&2; exit 9 ;;
+            esac
+            """
+            write_executable(bindir / "docker", docker_body)
+            write_executable(bindir / "curl", "#!/usr/bin/env bash\nexit 0\n")
+            env = os.environ.copy()
+            env["PATH"] = f"{bindir}:{env['PATH']}"
+            env["KSOLVER_KSS_POOL_STATE_DIR"] = str(tmp / "state")
+            result = subprocess.run(
+                [str(SCRIPT), "start", "1", "12120", str(tmp / "cache"), "5"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            log = runlog.read_text(encoding="utf-8") if runlog.exists() else ""
+            cluster_runs = [
+                line for line in log.splitlines() if "ksolver-kss-0-cluster" in line
+            ]
+            self.assertTrue(
+                cluster_runs,
+                f"cluster container was not `docker run`; rc={result.returncode} "
+                f"stderr={result.stderr[:400]} log={log[:400]}",
+            )
+            line = cluster_runs[0]
+            self.assertIn("--kube-admission=false", line, "F2: ServiceAccount admission must be off")
+            self.assertIn(
+                "kube-apiserver=etcd-prefix=/kube-scheduler-simulator",
+                line,
+                "F2: apiserver etcd-prefix must match reset.go so /reset drains",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1738,5 +1738,73 @@ class DemoGateTests(unittest.TestCase):
         self.assertNotIn("verification", compact)
 
 
+class StartKssLifecycleTests(unittest.TestCase):
+    """--start-kss must start the pool before the gate and ALWAYS tear it down after."""
+
+    def _pool_actions(self, calls):
+        actions = []
+        for cmd in calls:
+            if any("kss-pool.sh" in part for part in cmd):
+                idx = next(i for i, part in enumerate(cmd) if "kss-pool.sh" in part)
+                actions.append(cmd[idx + 1])
+        return actions
+
+    def _run_main(self, argv, gate_side_effect=None):
+        calls: list[list[str]] = []
+
+        def fake_run_command(cmd):
+            calls.append(cmd)
+            return completed(0)
+
+        def fake_gate(**_kwargs):
+            if gate_side_effect is not None:
+                gate_side_effect()
+            return {"exit_code": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            full_argv = ["demo-gate.py", "--output-dir", tmp, *argv]
+            with mock.patch.object(demo_gate, "run_command", side_effect=fake_run_command), \
+                 mock.patch.object(demo_gate, "run_demo_gate", side_effect=fake_gate), \
+                 mock.patch.object(demo_gate.sys, "argv", full_argv), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                rc = demo_gate.main()
+        return rc, calls
+
+    def test_start_kss_starts_then_stops_pool_around_gate(self):
+        rc, calls = self._run_main(
+            ["--start-kss", "--kss-count", "1", "--kss-base-port", "12120"]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._pool_actions(calls), ["start", "stop"], "expected start then stop"
+        )
+
+    def test_default_does_not_touch_pool(self):
+        _, calls = self._run_main([])
+        self.assertEqual(self._pool_actions(calls), [], "default must not manage the pool")
+
+    def test_pool_torn_down_even_when_gate_raises(self):
+        calls: list[list[str]] = []
+
+        def fake_run_command(cmd):
+            calls.append(cmd)
+            return completed(0)
+
+        def boom(**_kwargs):
+            raise RuntimeError("gate blew up mid-stage")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = ["demo-gate.py", "--output-dir", tmp, "--start-kss"]
+            with mock.patch.object(demo_gate, "run_command", side_effect=fake_run_command), \
+                 mock.patch.object(demo_gate, "run_demo_gate", side_effect=boom), \
+                 mock.patch.object(demo_gate.sys, "argv", argv), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    demo_gate.main()
+        self.assertEqual(
+            self._pool_actions(calls), ["start", "stop"], "finally must stop the pool"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

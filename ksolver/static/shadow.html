@@ -524,6 +524,39 @@
                       border: 1px solid var(--border-2); background: var(--surface-2); color: var(--muted); margin: 1px 2px; }
   .proof-empty { color: var(--muted); font-size: 12.5px; padding: 10px 0; }
 
+  /* ---- snapshot packing advisory ---- */
+  .snap-pack { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 13px 16px; margin-bottom: 16px; }
+  .snap-pack .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .snap-pack .title { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .snap-pack .scope { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border-2); border-radius: 999px; padding: 1px 8px; background: var(--surface-2); }
+  .snap-pack .disclaimer { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--warn); }
+  .snap-pack .disclaimer b { color: var(--warn); font-weight: 600; }
+  .snap-pack .stats { margin: 11px 0 8px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .snap-pack .stat { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); padding: 8px 10px; }
+  .snap-pack .stat .v { font-size: 17px; }
+  .snap-pack .coverage { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: 4px 0 6px; }
+  .snap-pack .policy { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+  .snap-pack .policy .kv { border: 1px solid var(--border-2); border-radius: 999px; padding: 2px 8px; font-size: 10.5px;
+                          color: var(--muted); background: var(--surface); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .snap-pack .policy .kv b { color: var(--ink); font-weight: 600; }
+  .snap-pack .note { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin-top: 6px; overflow-wrap: anywhere; }
+  .snap-pack .headline { margin: 11px 0 6px; padding: 10px 13px; border: 1px solid #245239; border-radius: var(--radius-sm); background: #0f1e16; }
+  .snap-pack .headline .num { font-size: 22px; font-weight: 700; color: var(--good); font-variant-numeric: tabular-nums; }
+  .snap-pack .headline .num small { font-size: 12px; font-weight: 600; color: var(--good); margin-left: 4px; }
+  .snap-pack .headline .lbl { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+  .snap-pack .samp-wrap { margin: 10px 0 3px; overflow-x: auto; }
+  .snap-pack table.samp { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .snap-pack table.samp th, .snap-pack table.samp td { text-align: right; padding: 5px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .snap-pack table.samp thead th { color: var(--muted); font-weight: 600; font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .snap-pack table.samp td.lbl, .snap-pack table.samp th.lbl { text-align: left; font-family: var(--mono); color: var(--ink); }
+  .snap-pack table.samp tr.partial td { color: var(--muted); }
+  .snap-pack table.samp tr.complete td.rec { color: var(--good); font-weight: 600; }
+  .snap-pack table.samp td.cov .flag { margin-left: 6px; font-size: 9.5px; }
+  .snap-pack table.samp td.cov .flag.ok { color: var(--good); }
+  .snap-pack table.samp td.cov .flag.warn { color: var(--warn); }
+  .snap-pack table.samp td.rec .na { color: var(--warn); font-size: 10px; }
+  .snap-pack .samp-cap { font-size: 10.5px; color: var(--muted); margin: 2px 0 8px; line-height: 1.5; }
+
   /* ---- diagnostics ---- */
   .diag { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
   .diag .card { padding: 14px 16px; }
@@ -707,6 +740,8 @@
       </div>
     </div>
     <div class="scen-honesty" id="scen-honesty" style="display:none"></div>
+    <!-- point-in-time snapshot GPU packing advisory (only rendered when the endpoint reports enabled) -->
+    <div id="snapshot-packing"></div>
     <div class="scenarios" id="scenarios"></div>
     <div class="empty-hint" id="scen-empty">Waiting for the scenario benchmark…</div>
     <!-- vram predictor demo below scenario cards -->
@@ -2163,6 +2198,155 @@
     box.appendChild(ol);
     if (script.operator_close) box.appendChild(el("div", "ds-close", script.operator_close));
     host.appendChild(box);
+  }
+
+  // Point-in-time snapshot GPU packing advisory. Rendered above the proof scenarios
+  // only when the endpoint reports enabled:true; hidden (host cleared) otherwise.
+  // Compact label for a series sample id like "000-20260717T000000Z" → "000 · 00:00:00Z".
+  function shortSampleLabel(s) {
+    s = String(s || "");
+    var m = s.match(/^(\d+)-\d{8}T(\d{2})(\d{2})(\d{2})Z?/);
+    return m ? m[1] + " · " + m[2] + ":" + m[3] + ":" + m[4] + "Z" : s;
+  }
+
+  // Multi-snapshot ("series") advisory: many point-in-time samples. Every capacity figure
+  // (headline, observed range, median) is drawn ONLY from complete-coverage samples; partial
+  // samples appear as evidence but are visibly marked and excluded from any claim.
+  function renderSnapshotSeries(card, rep) {
+    var cov = rep.coverage || {};
+    var ccs = rep.complete_coverage_summary || {};
+    var recRange = ccs.recoverable_h100_equivalents || {};
+    var expected = cov.expected_scanned_gpus;
+    var completeN = Number(cov.complete_sample_count || 0);
+    var totalN = rep.sample_count;
+
+    // Conservative headline — the minimum recoverable H100-equivalents among complete samples.
+    var headline = el("div", "headline");
+    var num = el("div", "num");
+    num.textContent = fmt(rep.conservative_recoverable_h100_equivalents);
+    num.appendChild(el("small", null, "H100-equiv"));
+    headline.appendChild(num);
+    headline.appendChild(el("div", "lbl",
+      "Conservative recoverable headroom — the minimum recoverable H100-equivalents observed across the "
+      + fmtUnit(completeN, "complete-coverage sample")
+      + (expected != null ? " (each scanned all " + fmt(expected) + " expected GPUs)." : ".")));
+    card.appendChild(headline);
+
+    // Coverage + complete-coverage observed range/median.
+    var st = el("div", "stats");
+    st.appendChild(stat("Complete coverage", fmt(completeN) + " / " + fmt(totalN), "samples"));
+    st.appendChild(stat("Expected GPU coverage", fmt(expected), "GPUs / sample"));
+    st.appendChild(stat("Observed range", completeN > 0 ? fmt(recRange.min) + "–" + fmt(recRange.max) : "—", "H100-equiv · complete only"));
+    st.appendChild(stat("Median", completeN > 0 ? fmt(recRange.median) : "—", "H100-equiv · complete only"));
+    card.appendChild(st);
+
+    // Per-sample evidence table.
+    var wrap = el("div", "samp-wrap");
+    var tbl = el("table", "samp");
+    var thead = el("thead");
+    var htr = el("tr");
+    htr.appendChild(el("th", "lbl", "Sample"));
+    ["Coverage", "Baseline H100s", "Packed H100s", "Recoverable"].forEach(function (h) {
+      htr.appendChild(el("th", null, h));
+    });
+    thead.appendChild(htr);
+    tbl.appendChild(thead);
+
+    var tbody = el("tbody");
+    (rep.samples || []).forEach(function (s) {
+      var complete = (expected != null) && (s.scanned_gpus === expected);
+      var tr = el("tr", complete ? "complete" : "partial");
+      tr.appendChild(el("td", "lbl", shortSampleLabel(s.sample)));
+      var tdC = el("td", "cov");
+      tdC.appendChild(document.createTextNode(fmt(s.scanned_gpus) + " / " + fmt(expected)));
+      tdC.appendChild(el("span", "flag " + (complete ? "ok" : "warn"), complete ? "✓ full" : "⚠ partial"));
+      tr.appendChild(tdC);
+      tr.appendChild(el("td", null, fmt(s.baseline_active_gpus)));
+      tr.appendChild(el("td", null, fmt(s.packed_active_gpus)));
+      var tdR = el("td", "rec");
+      tdR.appendChild(document.createTextNode(fmt(s.recoverable_h100_equivalents)));
+      if (!complete) tdR.appendChild(el("span", "na", " excluded"));
+      tr.appendChild(tdR);
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    wrap.appendChild(tbl);
+    card.appendChild(wrap);
+
+    card.appendChild(el("div", "samp-cap",
+      "Partial-coverage rows (scanning fewer than the expected " + fmt(expected)
+      + " GPUs) are observed evidence only — excluded from the conservative headline, observed range, and median above."));
+
+    if (rep.policy && typeof rep.policy === "object") {
+      var pol = el("div", "policy");
+      Object.keys(rep.policy).forEach(function (k) {
+        var kv = el("span", "kv");
+        kv.appendChild(document.createTextNode(k.replace(/_/g, " ") + " "));
+        kv.appendChild(el("b", null, String(rep.policy[k])));
+        pol.appendChild(kv);
+      });
+      if (pol.childNodes.length) card.appendChild(pol);
+    }
+  }
+
+  function renderSnapshotPacking(data) {
+    var host = $("snapshot-packing");
+    clear(host);
+    if (!data || data.enabled !== true || data.ok !== true) return;
+    var rep = data.report || {};
+    var card = el("div", "snap-pack");
+
+    var hd = el("div", "hd");
+    hd.appendChild(el("div", "title", "Snapshot GPU packing advisory"));
+    hd.appendChild(el("span", "scope", "point-in-time"));
+    card.appendChild(hd);
+
+    // Mandatory honesty guardrails — stated verbatim and visibly.
+    var disc = el("div", "disclaimer");
+    disc.appendChild(el("b", null, "Point-in-time advisory only"));
+    disc.appendChild(document.createTextNode(" — "));
+    disc.appendChild(el("b", null, "Not realized savings or a whole-run safety claim"));
+    disc.appendChild(document.createTextNode("."));
+    card.appendChild(disc);
+
+    // Multi-snapshot report: a series of point-in-time samples. Capacity claims are
+    // derived ONLY from complete-coverage samples; incomplete rows are shown as evidence
+    // but explicitly excluded from any headline/range figure.
+    if (typeof rep.sample_count === "number" && Array.isArray(rep.samples)) {
+      hd.querySelector(".scope").textContent = "multi-sample (" + fmt(rep.sample_count) + ")";
+      renderSnapshotSeries(card, rep);
+      if (rep.note) card.appendChild(el("div", "note", String(rep.note)));
+      host.appendChild(card);
+      return;
+    }
+
+    var st = el("div", "stats");
+    st.appendChild(stat("Baseline H100s", fmt(rep.baseline_active_gpus)));
+    st.appendChild(stat("Packed H100s", fmt(rep.packed_active_gpus)));
+    st.appendChild(stat("Headroom", fmt(rep.recoverable_h100_equivalents), "H100-equiv"));
+    card.appendChild(st);
+
+    var cov = el("div", "coverage");
+    cov.textContent = "Coverage: " + fmt(rep.scanned_gpus) + " GPUs scanned · "
+      + fmt(rep.unknown_or_idle_gpus) + " idle/unknown"
+      + (rep.active_gpu_workloads != null ? " · " + fmt(rep.active_gpu_workloads) + " active GPU workloads" : "")
+      + (rep.exclusive_workloads != null ? " · " + fmt(rep.exclusive_workloads) + " exclusive" : "");
+    card.appendChild(cov);
+
+    if (rep.policy && typeof rep.policy === "object") {
+      var pol = el("div", "policy");
+      Object.keys(rep.policy).forEach(function (k) {
+        var kv = el("span", "kv");
+        kv.appendChild(document.createTextNode(k.replace(/_/g, " ") + " "));
+        kv.appendChild(el("b", null, String(rep.policy[k])));
+        pol.appendChild(kv);
+      });
+      if (pol.childNodes.length) card.appendChild(pol);
+    }
+
+    if (rep.note) card.appendChild(el("div", "note", String(rep.note)));
+
+    host.appendChild(card);
   }
 
   function renderScenarios(report, calibration) {
@@ -3680,7 +3864,8 @@
 	      getJSON("/api/scheduler/vram-calibration").catch(function (e) { return { available: false, reason: String(e.message) }; }),
 	      getJSON("/api/scheduler/simulator-cache-coverage").catch(function (e) { return { ok: false, reason: String(e.message) }; }),
 	      getJSON("/api/scheduler/evidence-bundle").catch(function (e) { return { ok: false, reason: String(e.message), summary: {} }; }),
-	      getJSON("/api/scheduler/operator-status").catch(function (e) { return { ok: false, reason: String(e.message) }; })
+	      getJSON("/api/scheduler/operator-status").catch(function (e) { return { ok: false, reason: String(e.message) }; }),
+	      getJSON("/api/scheduler/snapshot-packing").catch(function (e) { return { enabled: false, reason: String(e.message) }; })
 	    ]).then(function (r) {
       var traces = (r[0] && r[0].traces) || [];
       lastCluster = r[1]; lastKubePlan = r[2];
@@ -3721,6 +3906,7 @@
       if (changed("baseline", clusterSig(r[1]) + "|" + kubeSig(r[2]))) renderBaseline();
       if (changed("repair", repairSig(r[3]))) renderRepair(r[3]);
       if (changed("scen", scenSig(report, calibration))) renderScenarios(report, calibration);
+      if (changed("snappack", JSON.stringify(r[10] || null))) renderSnapshotPacking(r[10]);
       if (changed("diag", diagSig(r[5], r[3], report, r[8], r[9]))) renderDiagnostics(r[5], r[3], report, r[8], r[9]);
       setConn("live", "updated " + new Date().toLocaleTimeString());
     }).catch(function (e) {

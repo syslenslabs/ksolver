@@ -525,8 +525,43 @@ def scenario_env(scenario: dict[str, Any]) -> list[dict[str, str]]:
     return [{"name": k, "value": str(v)} for k, v in mapping.items()]
 
 
-def build_manifest(scenario: dict[str, Any], image: str, namespace: str) -> dict[str, Any]:
+def build_manifest(
+    scenario: dict[str, Any],
+    image: str,
+    namespace: str,
+    node_selector: dict[str, str] | None = None,
+    tolerate_gpu: bool = False,
+) -> dict[str, Any]:
     job_name = "ksolver-vram-" + slug(scenario["name"])
+    # Cross-SKU runs (roadmap F1): target a specific GPU node pool via nodeSelector. A per-scenario
+    # `node_selector` in scenarios.yaml is the base; the CLI `--node-selector` overrides on conflict
+    # so the same matrix can be re-run per SKU without editing the file. GPU pools are usually tainted
+    # (nvidia.com/gpu:NoSchedule), so `--tolerate-gpu` adds the matching toleration or the probe pod
+    # stays Pending even with the right nodeSelector.
+    merged_selector: dict[str, str] = {}
+    merged_selector.update(scenario.get("node_selector") or {})
+    merged_selector.update(node_selector or {})
+
+    pod_spec: dict[str, Any] = {
+        "restartPolicy": "Never",
+        "runtimeClassName": "nvidia",
+        "containers": [{
+            "name": "probe",
+            "image": image,
+            "imagePullPolicy": "IfNotPresent",
+            "env": scenario_env(scenario),
+            "command": ["python", "-u", "-c", WORKLOAD],
+        }],
+    }
+    if merged_selector:
+        pod_spec["nodeSelector"] = merged_selector
+    if tolerate_gpu:
+        pod_spec["tolerations"] = [{
+            "key": "nvidia.com/gpu",
+            "operator": "Exists",
+            "effect": "NoSchedule",
+        }]
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -548,17 +583,7 @@ def build_manifest(scenario: dict[str, Any], image: str, namespace: str) -> dict
                         "ksolver.ai/vram-scenario": slug(scenario["name"]),
                     }
                 },
-                "spec": {
-                    "restartPolicy": "Never",
-                    "runtimeClassName": "nvidia",
-                    "containers": [{
-                        "name": "probe",
-                        "image": image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "env": scenario_env(scenario),
-                        "command": ["python", "-u", "-c", WORKLOAD],
-                    }],
-                },
+                "spec": pod_spec,
             },
         },
     }
@@ -632,8 +657,30 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def run_scenario(scenario: dict[str, Any], image: str, namespace: str, timeout: int, keep_jobs: bool) -> dict[str, Any]:
-    manifest = build_manifest(scenario, image, namespace)
+def parse_key_value_pairs(pairs: list[str]) -> dict[str, str]:
+    """Parse repeatable KEY=VALUE CLI args into a dict (later duplicates win)."""
+    out: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise SystemExit(f"--node-selector expects KEY=VALUE, got {pair!r}")
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"--node-selector has an empty key: {pair!r}")
+        out[key] = value.strip()
+    return out
+
+
+def run_scenario(
+    scenario: dict[str, Any],
+    image: str,
+    namespace: str,
+    timeout: int,
+    keep_jobs: bool,
+    node_selector: dict[str, str] | None = None,
+    tolerate_gpu: bool = False,
+) -> dict[str, Any]:
+    manifest = build_manifest(scenario, image, namespace, node_selector, tolerate_gpu)
     job_name = manifest["metadata"]["name"]
     mh = manifest_hash(manifest)
     RAW.mkdir(parents=True, exist_ok=True)
@@ -687,7 +734,21 @@ def main() -> int:
     parser.add_argument("--keep-jobs", action="store_true")
     parser.add_argument("--print-manifest", action="store_true", help="print manifests instead of submitting jobs")
     parser.add_argument("--skip-existing", action="store_true", help="skip scenario names already present in results.jsonl")
+    parser.add_argument(
+        "--node-selector",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="nodeSelector label to target a SKU's node pool (repeatable); overrides scenario node_selector",
+    )
+    parser.add_argument(
+        "--tolerate-gpu",
+        action="store_true",
+        help="add a toleration for the standard nvidia.com/gpu:NoSchedule taint on GPU node pools",
+    )
     args = parser.parse_args()
+
+    node_selector = parse_key_value_pairs(args.node_selector)
 
     if not os.environ.get("KUBECONFIG"):
         print("warning: KUBECONFIG is not set; expected ~/.kube/wsl for this lab", file=sys.stderr)
@@ -705,7 +766,10 @@ def main() -> int:
     if args.print_manifest:
         for scenario in selected:
             print("---")
-            print(yaml.safe_dump(build_manifest(scenario, args.image, args.namespace), sort_keys=False))
+            print(yaml.safe_dump(
+                build_manifest(scenario, args.image, args.namespace, node_selector, args.tolerate_gpu),
+                sort_keys=False,
+            ))
         return 0
 
     if args.skip_existing:
@@ -715,7 +779,10 @@ def main() -> int:
         print(f"skip-existing: {before - len(selected)} skipped, {len(selected)} remaining", flush=True)
 
     for scenario in selected:
-        result = run_scenario(scenario, args.image, args.namespace, args.wait_timeout, args.keep_jobs)
+        result = run_scenario(
+            scenario, args.image, args.namespace, args.wait_timeout, args.keep_jobs,
+            node_selector, args.tolerate_gpu,
+        )
         peak = result.get("nvidia_smi_peak_used_mib")
         status = "oom" if result.get("oom") else ("ok" if result.get("ok") else "failed")
         print(f"{scenario['name']}: {status}, peak_nvidia_smi={peak} MiB", flush=True)
