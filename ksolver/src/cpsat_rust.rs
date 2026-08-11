@@ -821,7 +821,11 @@ mod enabled {
         let stats = cp_solver_response_stats(&response, true);
 
         if status != CpSolverStatus::Optimal && status != CpSolverStatus::Feasible {
-            bail!("cp-sat rust solve failed with status {status:?}; {stats}");
+            let detail = response.solution_info.trim();
+            if detail.is_empty() {
+                bail!("cp-sat rust solve failed with status {status:?}; {stats}");
+            }
+            bail!("cp-sat rust solve failed with status {status:?}: {detail}; {stats}");
         }
 
         // Soft-affinity tie-break (Phase 2): only when enabled, Phase 1 is proven OPTIMAL, and some

@@ -100,6 +100,7 @@ scenarios:
     hidden_size: 1024
     layers: 8
     heads: 16
+    param_count: 166337792
     steps: 4
     optimizer: adamw
     activation_checkpointing: false

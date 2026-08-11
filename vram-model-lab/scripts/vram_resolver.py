@@ -166,6 +166,7 @@ _CONFIG_KEY_MAP = {
     "hidden_size": ("hidden_size", "n_embd", "d_model"),
     "layers": ("num_hidden_layers", "num_layers", "n_layer", "layers"),
     "heads": ("num_attention_heads", "n_head", "heads"),
+    "param_count": ("param_count", "num_parameters", "parameter_count"),
     "family": ("family", "model_family"),
 }
 

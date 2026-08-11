@@ -525,6 +525,29 @@ def scenario_env(scenario: dict[str, Any]) -> list[dict[str, str]]:
     return [{"name": k, "value": str(v)} for k, v in mapping.items()]
 
 
+def scenario_vram_annotations(scenario: dict[str, Any]) -> dict[str, str]:
+    """Expose the declared pre-run fingerprint through the resolver's public contract."""
+    fields = {
+        "family": scenario.get("family"),
+        "precision": scenario.get("precision"),
+        "batch-size": scenario.get("batch_size"),
+        "seq-len": scenario.get("seq_len"),
+        "image-size": scenario.get("image_size"),
+        "hidden-size": scenario.get("hidden_size"),
+        "layers": scenario.get("layers"),
+        "heads": scenario.get("heads"),
+        "optimizer": scenario.get("optimizer"),
+        "activation-checkpointing": scenario.get("activation_checkpointing"),
+        "param-count": scenario.get("param_count"),
+        "reserve-extra-mib": scenario.get("reserve_extra_mib"),
+    }
+    return {
+        f"ksolver.ai/vram-{key}": str(value).lower() if isinstance(value, bool) else str(value)
+        for key, value in fields.items()
+        if value not in (None, "", 0)
+    }
+
+
 def build_manifest(
     scenario: dict[str, Any],
     image: str,
@@ -541,6 +564,8 @@ def build_manifest(
     merged_selector: dict[str, str] = {}
     merged_selector.update(scenario.get("node_selector") or {})
     merged_selector.update(node_selector or {})
+    requested_gpu_count = int(scenario.get("requested_gpu_count", 1))
+    vram_annotations = scenario_vram_annotations(scenario)
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
@@ -549,6 +574,12 @@ def build_manifest(
             "name": "probe",
             "image": image,
             "imagePullPolicy": "IfNotPresent",
+            # Request the physical GPU from the device plugin. The NVIDIA runtime alone
+            # exposes the device but does not make this a Kubernetes-scheduled allocation.
+            "resources": {
+                "requests": {"nvidia.com/gpu": str(requested_gpu_count)},
+                "limits": {"nvidia.com/gpu": str(requested_gpu_count)},
+            },
             "env": scenario_env(scenario),
             "command": ["python", "-u", "-c", WORKLOAD],
         }],
@@ -581,7 +612,8 @@ def build_manifest(
                     "labels": {
                         "app.kubernetes.io/name": "ksolver-vram-probe",
                         "ksolver.ai/vram-scenario": slug(scenario["name"]),
-                    }
+                    },
+                    "annotations": vram_annotations,
                 },
                 "spec": pod_spec,
             },

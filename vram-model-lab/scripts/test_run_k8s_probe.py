@@ -20,6 +20,20 @@ class BuildManifestTest(unittest.TestCase):
         self.assertNotIn("nodeSelector", spec)
         self.assertNotIn("tolerations", spec)
 
+    def test_requests_one_gpu_by_default(self):
+        spec = pod_spec(probe.build_manifest(SCENARIO, "img:1", "default"))
+        resources = spec["containers"][0]["resources"]
+        self.assertEqual(resources["requests"], {"nvidia.com/gpu": "1"})
+        self.assertEqual(resources["limits"], {"nvidia.com/gpu": "1"})
+
+    def test_declared_vram_fingerprint_is_copied_to_pod_annotations(self):
+        scenario = {**SCENARIO, "hidden_size": 1024, "layers": 8, "seq_len": 2048,
+                    "param_count": 166_337_792}
+        manifest = probe.build_manifest(scenario, "img:1", "default")
+        annotations = manifest["spec"]["template"]["metadata"]["annotations"]
+        self.assertEqual(annotations["ksolver.ai/vram-param-count"], "166337792")
+        self.assertEqual(annotations["ksolver.ai/vram-family"], "mlp")
+
     def test_cli_node_selector_and_gpu_toleration(self):
         spec = pod_spec(
             probe.build_manifest(

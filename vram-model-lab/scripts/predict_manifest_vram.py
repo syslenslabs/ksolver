@@ -116,6 +116,11 @@ def row_from_hints(hints: dict[str, Any]) -> tuple[dict[str, Any] | None, list[s
         missing.append("seq_len")
     if family == "cnn" and image_size is None:
         missing.append("image_size")
+    param_count = as_int(hints.get("param_count"))
+    # The fitted models include parameter count as a material driver. Treating an
+    # absent value as zero produces a plausible-looking but dangerously low estimate.
+    if param_count is None or param_count <= 0:
+        missing.append("param_count")
     if missing:
         return None, sorted(set(missing))
     return {
@@ -129,7 +134,7 @@ def row_from_hints(hints: dict[str, Any]) -> tuple[dict[str, Any] | None, list[s
         "heads": as_int(hints.get("heads")),
         "optimizer": str(hints.get("optimizer") or "adamw").lower(),
         "activation_checkpointing": as_bool(hints.get("activation_checkpointing")),
-        "param_count": as_int(hints.get("param_count")) or 0,
+        "param_count": param_count,
         "reserve_extra_mib": as_int(hints.get("reserve_extra_mib")) or 0,
     }, []
 

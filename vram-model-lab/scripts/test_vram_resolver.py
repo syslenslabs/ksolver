@@ -48,6 +48,7 @@ class ResolveCascadeTest(unittest.TestCase):
                 "ksolver.ai/vram-family": "transformer",
                 "ksolver.ai/vram-hidden-size": "1024",
                 "ksolver.ai/vram-layers": "12",
+                "ksolver.ai/vram-param-count": "110000000",
             },
             args=["--batch-size", "8", "--seq-len", "512", "--precision", "fp16"],
         )
@@ -69,6 +70,7 @@ class ResolveCascadeTest(unittest.TestCase):
                 "ksolver.ai/vram-family": "transformer",
                 "ksolver.ai/vram-hidden-size": "8192",
                 "ksolver.ai/vram-layers": "80",
+                "ksolver.ai/vram-param-count": "10000000000",
             },
             args=["--batch-size", "64", "--seq-len", "8192"],
         )
@@ -86,6 +88,20 @@ class ResolveCascadeTest(unittest.TestCase):
         self.assertFalse(r["hard"])
         self.assertIsNone(r["vram_mib"])
         self.assertIn("family", r["missing"])
+
+    def test_missing_parameter_count_is_unknown_not_zero_parameter_prediction(self):
+        pod = gpu_pod(
+            annotations={
+                "ksolver.ai/vram-family": "transformer",
+                "ksolver.ai/vram-hidden-size": "1024",
+                "ksolver.ai/vram-layers": "12",
+            },
+            args=["--batch-size", "8", "--seq-len", "512", "--precision", "fp16"],
+        )
+        r = vr.resolve(pod, hard_admit_model=True)
+        self.assertEqual(r["source"], "unknown")
+        self.assertIn("param_count", r["missing"])
+        self.assertFalse(r["hard"])
 
     def test_tier4_historical_fingerprint_hit_is_high_and_uses_p95(self):
         pod = gpu_pod(args=["--epochs", "3"])  # unsniffable, but seen before
@@ -113,6 +129,7 @@ class ResolveCascadeTest(unittest.TestCase):
                 "ksolver.ai/vram-family": "transformer",
                 "ksolver.ai/vram-hidden-size": "1024",
                 "ksolver.ai/vram-layers": "12",
+                "ksolver.ai/vram-param-count": "110000000",
             },
             args=["--batch-size", "8", "--seq-len", "512"],
         )
@@ -152,6 +169,7 @@ class ResolveCascadeTest(unittest.TestCase):
                 "ksolver.ai/vram-family": "transformer",
                 "ksolver.ai/vram-hidden-size": "1024",
                 "ksolver.ai/vram-layers": "12",
+                "ksolver.ai/vram-param-count": "110000000",
             }
         )
         # Without config -> unknown (batch/seq missing).
@@ -206,6 +224,7 @@ class ResolveCascadeTest(unittest.TestCase):
                 "ksolver.ai/vram-family": "transformer",
                 "ksolver.ai/vram-hidden-size": "1024",
                 "ksolver.ai/vram-layers": "12",
+                "ksolver.ai/vram-param-count": "110000000",
                 "ksolver.ai/vram-config": _json.dumps(
                     {"train_micro_batch_size_per_gpu": 8, "max_seq_length": 512, "fp16": {"enabled": True}}
                 ),
